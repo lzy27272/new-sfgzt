@@ -184,3 +184,13 @@ Browser插件不可用，且Playwright自带Chromium未安装；遵循前端测�
 - 部署后Core API、Caddy、PostgreSQL、fail2ban和ClamAV均为`active`，运行进程目录及两个`current`软链接均指向新release，健康状态为`UP`；Flyway数据库版本V53且失败迁移0，Core API和PostgreSQL继续只监听`127.0.0.1`，公网首页返回200，未授权身份接口返回401，激活窗口warning/error/exception为0。旧release `20260916-pilot8-6f746bb`保留为回滚目标，本次未触发回滚。
 - Codex内置Browser组件缺失，且不从生产进程提取认证密钥伪造用户会话，因此无法代替真实企业微信客户端完成最后一步交互验收。测试账号仍需连续执行“打开任务→返回→再次打开同一或另一任务”，确认第二次直接进入任务且不出现账号密码页。
 - 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
+
+## 18. 2026-09-16 董事长与管理岗位任务下达入口修复
+
+- 功能提交为`bbb4592f8b17a47acde949302d3b336aa956dafa`，已快进合并并推送至GitHub `lzy27272/AIzhongtai:main`。董事长工作台按服务端能力进入专用高管交办流程；其他具备`task.create`与`task.dispatch`的管理岗位不再因缺少可选的`template.read`或`standard.read`而阻断任务下达，可选权限不存在时前端不会请求对应接口，也不会展示对应控件。
+- 云端不可变发布版本为`20260916-pilot8-bbb4592`。后端没有生产代码变化，继续复用已包含企微RLS事务修复的稳定JAR，SHA-256为`0038ffb1f8eca96ce833dad1a4e4a88290bfddbcce559831b316f91390b52b34`；Web发布包SHA-256为`6d8801e3938b7b4568839c18f523bbf1d473dcdd4fb1c0c7a3ebde9b8a1f96ac`；服务器与公网`index.html` SHA-256均为`c03623bd5fdb5bcc8ff50c7c0297e557eb564090ee7d6ac085b263d77169a417`。
+- 部署前生成并校验本地加密PostgreSQL备份`hotel_ai_os-daily-20260916T143643+0800.dump.enc`及运行配置备份`...T143643+0800.env.enc`，两者均为`root:root:0600`且SHA-256清单校验通过。异地备份仍未配置，备份服务在本地备份完成后按预期以`OFFSITE_BACKUP_CONFIG_REQUIRED`退出；本次继续沿用已批准的内部Pilot例外，不表示异地备份门禁已满足。
+- 董事长高管任务能力通过独立、最小化环境文件启用：仅设置`GROUP_MANAGEMENT_EXECUTIVE_TASKS_ENABLED=true`和目标租户白名单；未启用工作计划或提醒Worker，也未修改既有`core-api.env`。生产只读核验显示2个有效董事长任职，已发布董事长岗位方案包含`executive-task.read/assign`，不包含通用`task.create/task.dispatch/template.read`。
+- 部署后Core API、Caddy和PostgreSQL均为`active`，运行进程目录及两个`current`软链接均指向本次release，健康状态为`UP`；Flyway保持V53且失败迁移0，Core API与PostgreSQL继续只监听`127.0.0.1`。公网首页返回200，未授权`/api/v1/iam/me`及`/api/v1/executive-tasks`均返回401，启动窗口未发现warning/error/exception。
+- 验证：Web全量118项、聚焦20项、TypeScript及Pilot生产构建通过；高管任务后端集成测试6项通过。Codex内置Browser运行组件缺失，未伪造生产用户会话，因此董事长专用按钮和普通管理岗任务表单的登录后点击仍需由业务测试账号完成最终复验。
+- 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
