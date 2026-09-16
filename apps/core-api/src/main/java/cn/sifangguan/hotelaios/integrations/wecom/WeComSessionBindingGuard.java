@@ -49,6 +49,7 @@ public class WeComSessionBindingGuard {
         return versions.getFirst();
     }
 
+    @Transactional(readOnly = true)
     public void requireActive(UUID tenantId, UUID accountId, long issuedBindingVersion) {
         long currentVersion = currentVersion(tenantId, accountId);
         if (currentVersion != issuedBindingVersion) {
