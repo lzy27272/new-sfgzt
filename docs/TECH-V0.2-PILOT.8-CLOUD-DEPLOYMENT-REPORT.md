@@ -173,3 +173,14 @@ Browser插件不可用，且Playwright自带Chromium未安装；遵循前端测�
 - 部署采用旧版本软链接自动回滚保护，最终Core API和Caddy均为`active`，健康状态为`UP`，Flyway保持V53且失败迁移0；公网首页返回200，未授权身份接口返回401，`/wecom-auth`返回200，企微OAuth启动入口返回302。线上Web制品已确认包含JSON交换路径且不再包含旧顶层表单换票路径，新服务启动窗口内warning及以上日志为0。
 - 验证：后端全量268项通过（0失败、0错误、3跳过），Web全量113项及企微入口专项7项通过，TypeScript与Pilot生产构建成功；5个发布输入敏感信息扫描0命中、0错误。Codex内置浏览器组件缺失，无法代替真实企业微信客户端完成最终账号点击；测试账号仍需从企业微信点击任一任务确认无需输入中台账号密码。
 - 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
+
+## 17. 2026-09-16 企业微信会话绑定RLS事务修复
+
+- 功能提交为`01daaf31878ee910914a5e5964b835007b6cfb6f`，已快进合并并推送至GitHub `lzy27272/AIzhongtai:main`。用户视频确认从任务返回后再次进入会落到本地账号登录页；服务端生产只读复现实验进一步证明，同一绑定查询在事务外受强制RLS影响返回0行，在设置租户上下文的同一事务内返回5行。
+- 根因是`WeComSessionBindingGuard.requireActive`未建立事务，而其对同类`currentVersion`方法的内部调用不会经过Spring事务代理；`set_config('app.tenant_id', ..., true)`因此在下一条RLS查询前已随自动提交失效，合法企微Cookie会话被错误判定为绑定失效并返回401。修复后公开入口方法建立短生命周期只读事务，使租户上下文与绑定查询位于同一数据库事务；绑定版本不符、暂停或撤销仍关闭式拒绝。
+- 云端不可变发布版本为`20260916-pilot8-01daaf3`。后端JAR SHA-256为`0038ffb1f8eca96ce833dad1a4e4a88290bfddbcce559831b316f91390b52b34`；Web沿用上一稳定制品，服务器与公网`index.html` SHA-256均为`64c66cc659b6f8096549c5680e757d88f8ec1171e88e44695a7ad248d7f921fe`。
+- 部署前生成并独立校验本地加密PostgreSQL备份`hotel_ai_os-daily-20260916T093333+0800.dump.enc`，密文及校验文件均为`root:root:0600`，密文SHA-256为`09ffdb6210869258316a890da51b7a3ea20fc34a3f47690b5291edc81b546873`；解密后的`pg_restore --list`通过，临时明文随后删除。异地备份仍未配置，服务按预期以`OFFSITE_BACKUP_CONFIG_REQUIRED`退出，本次继续沿用已明确批准的内部Pilot例外，不表示异地备份门禁已满足。
+- 验证：新增真实PostgreSQL、非超级用户、`NOBYPASSRLS`及强制RLS集成测试会在旧实现失败、修复后通过；企微绑定专项4项通过，后端全量269项通过（0失败、0错误、3跳过），Flyway V1→V53通过。生产JAR扫描61个归档、23715个条目，敏感信息0命中、0错误。
+- 部署后Core API、Caddy、PostgreSQL、fail2ban和ClamAV均为`active`，运行进程目录及两个`current`软链接均指向新release，健康状态为`UP`；Flyway数据库版本V53且失败迁移0，Core API和PostgreSQL继续只监听`127.0.0.1`，公网首页返回200，未授权身份接口返回401，激活窗口warning/error/exception为0。旧release `20260916-pilot8-6f746bb`保留为回滚目标，本次未触发回滚。
+- Codex内置Browser组件缺失，且不从生产进程提取认证密钥伪造用户会话，因此无法代替真实企业微信客户端完成最后一步交互验收。测试账号仍需连续执行“打开任务→返回→再次打开同一或另一任务”，确认第二次直接进入任务且不出现账号密码页。
+- 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
