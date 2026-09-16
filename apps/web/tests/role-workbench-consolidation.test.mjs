@@ -22,11 +22,20 @@ test('cockpit, task and notification entries are consolidated into the role work
 
 test('quick dispatch opens the real task dialog in the workbench and keeps target policy authoritative', () => {
   assert.match(workbench, /<TaskCreateDialog/)
+  assert.match(workbench, /permissions=\{permissions\}/)
   assert.match(workbench, /creationSource="WORKBENCH_QUICK_DISPATCH"/)
   assert.match(workbench, /initialHotelId=\{selectedHotel\?\.id\}/)
   assert.match(taskPages, /initialHotelId/)
   assert.match(vicePresidentDispatchMigration, /'task\.create', 'task\.dispatch'/)
   assert.match(vicePresidentDispatchMigration, /position_function_profile_permission/)
+})
+
+test('quick dispatch does not require optional template or standard read permissions', () => {
+  assert.match(taskPages, /loadOptionalTaskContext\(permissions, 'template\.read'/)
+  assert.match(taskPages, /loadOptionalTaskContext\(permissions, 'standard\.read'/)
+  assert.match(taskPages, /\{canReadTemplates && <label>任务模板/)
+  assert.match(taskPages, /\{canReadStandards && <label>关联标准/)
+  assert.match(app, /<TaskCreateDialog identity=\{identity\} permissions=\{permissions\}/)
 })
 
 test('rules and work package routes are platform-administrator only', () => {

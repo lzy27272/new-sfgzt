@@ -27,6 +27,7 @@ import type {
 import { TeamWorkDrawer } from '../../P0Pages'
 import { TaskCreateDialog } from '../../Pilot6Pages'
 import { useResource } from '../../useResource'
+import { resolveTaskDispatchMode } from '../tasks/taskDispatchAccess'
 
 const completedStatuses = new Set(['SUBMITTED', 'SATISFIED', 'COMPLETED', 'APPROVED'])
 const overdueStatuses = new Set(['OVERDUE', 'MISSED', 'FAILED'])
@@ -229,10 +230,10 @@ export function RoleWorkbench({
   const canReadTeam = allows(permissions, permissionCodes.workRecord.readTeam) || allows(permissions, 'work-record.review')
   const canReadOwn = hasAssignment && (allows(permissions, 'work-record.read') || allows(permissions, 'work-record.submit') || allows(permissions, 'work.submit'))
   const canReadTasks = allows(permissions, 'task.read') || allows(permissions, 'task.act') || allows(permissions, 'task.review') || allows(permissions, permissionCodes.executiveTask.read)
-  const canManageDispatch = allows(permissions, 'task.create') && allows(permissions, 'task.dispatch')
-  const canExecutiveDispatch = presentationKey === 'GROUP_CHAIRMAN' && executiveTasksEnabled
-    && allows(permissions, permissionCodes.executiveTask.assign)
-  const canDispatch = canManageDispatch || canExecutiveDispatch
+  const dispatchMode = resolveTaskDispatchMode(presentationKey, executiveTasksEnabled, permissions)
+  const canManageDispatch = dispatchMode === 'MANAGEMENT'
+  const canExecutiveDispatch = dispatchMode === 'EXECUTIVE'
+  const canDispatch = Boolean(dispatchMode)
   const canReadNotices = allows(permissions, 'notification.read')
   const canReadOperations = allows(permissions, 'dashboard.operations')
   const canReadHotels = allows(permissions, 'dashboard.hotel')
@@ -482,6 +483,7 @@ export function RoleWorkbench({
     {selected && <TeamWorkDrawer initial={selected} identity={identity} permissions={permissions} go={go} onClose={() => setSelected(undefined)} onChanged={() => { void work.reload(); if (canReadTeam) void completion.reload() }} />}
     {creatingTask && canManageDispatch && <TaskCreateDialog
       identity={identity}
+      permissions={permissions}
       initialHotelId={selectedHotel?.id}
       creationSource="WORKBENCH_QUICK_DISPATCH"
       onClose={() => setCreatingTask(false)}

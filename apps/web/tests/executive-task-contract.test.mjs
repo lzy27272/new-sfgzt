@@ -5,6 +5,7 @@ import test from 'node:test'
 const apiSource = readFileSync(new URL('../src/features/executiveTasks/api.ts', import.meta.url), 'utf8')
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
 const pageSource = readFileSync(new URL('../src/features/executiveTasks/ExecutiveTaskRoutes.tsx', import.meta.url), 'utf8')
+const workbenchSource = readFileSync(new URL('../src/features/workbench/RoleWorkbench.tsx', import.meta.url), 'utf8')
 
 test('chairman feature uses only the dedicated executive-task API family', () => {
   assert.match(apiSource, /'\/executive-tasks'/)
@@ -30,4 +31,10 @@ test('chairman workbench selects the dedicated loader and gates it by server cap
   assert.match(appSource, /isChairman \? loadExecutiveTasks\(identity\) : loadTasks/)
   assert.match(appSource, /executiveTasksEnabled && hasAssignment/)
   assert.match(appSource, /account-self-service/)
+})
+
+test('chairman quick dispatch uses the dedicated executive task route and permission', () => {
+  assert.match(workbenchSource, /resolveTaskDispatchMode\(presentationKey, executiveTasksEnabled, permissions\)/)
+  assert.match(workbenchSource, /canExecutiveDispatch\s*\? go\('tasks', \{ create: 'true' \}\)/)
+  assert.match(workbenchSource, /creatingTask && canManageDispatch && <TaskCreateDialog/)
 })

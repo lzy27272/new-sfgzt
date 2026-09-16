@@ -20,6 +20,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,6 +93,29 @@ class ExecutiveTaskIntegrationTest {
         assertThat(targets.findValuesAsText("assignmentId"))
                 .contains(GENERAL_MANAGER_ASSIGNMENT.toString(), VICE_PRESIDENT_ASSIGNMENT.toString())
                 .doesNotContain(HR_ASSIGNMENT.toString(), OTHER_CHAIRMAN_ASSIGNMENT.toString());
+    }
+
+    @Test
+    void chairmanIdentityExposesOnlyTheEnabledDedicatedDispatchContract() throws Exception {
+        JsonNode me = json(mockMvc.perform(get("/api/v1/iam/me")
+                        .headers(headers(CHAIRMAN, CHAIRMAN_ASSIGNMENT)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.groupManagement.executiveTasksEnabled").value(true))
+                .andReturn());
+
+        JsonNode assignment = null;
+        for (JsonNode candidate : me.path("positionAssignments")) {
+            if (CHAIRMAN_ASSIGNMENT.toString().equals(candidate.path("id").asText())) {
+                assignment = candidate;
+                break;
+            }
+        }
+        assertThat(assignment).isNotNull();
+        List<String> permissionCodes = new ArrayList<>();
+        assignment.path("permissionCodes").forEach(permission -> permissionCodes.add(permission.asText()));
+        assertThat(permissionCodes)
+                .contains("executive-task.read", "executive-task.assign")
+                .doesNotContain("task.create", "task.dispatch", "template.read");
     }
 
     @Test

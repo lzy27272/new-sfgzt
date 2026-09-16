@@ -882,7 +882,7 @@ function Tasks({ identity, permissions, routeParams, go }: { identity: RoleConte
     {linkedTaskError && <div className="inline-error page-error">{linkedTaskError}</div>}
     <article className="panel table-panel"><DataState loading={resource.loading} error={resource.error} empty={!tasks.length} onRetry={resource.reload} />{!resource.loading && !resource.error && !!tasks.length && <TaskRows tasks={tasks} onSelect={setSelected} />}</article>
     {selected && <TaskDetail initial={selected} identity={identity} permissions={permissions} onClose={() => { setSelected(undefined); if (routeParams.taskId) go('tasks', { ...routeParams, taskId: undefined }) }} onChanged={resource.reload} />}
-    {creating && <TaskCreateDialog identity={identity} onClose={() => { setCreating(false); if (routeParams.create) go('tasks', { ...routeParams, create: undefined }) }} onCreated={async () => { await resource.reload(); if (routeParams.create) go('tasks', { ...routeParams, create: undefined }) }} />}
+    {creating && <TaskCreateDialog identity={identity} permissions={permissions} onClose={() => { setCreating(false); if (routeParams.create) go('tasks', { ...routeParams, create: undefined }) }} onCreated={async () => { await resource.reload(); if (routeParams.create) go('tasks', { ...routeParams, create: undefined }) }} />}
   </section>
 }
 

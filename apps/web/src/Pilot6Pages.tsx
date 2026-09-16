@@ -9,6 +9,7 @@ import {
 } from './api/resources'
 import { WorkPackageCenter } from './ConfigurationPages'
 import type { EnterpriseTemplate, EnterpriseTemplateType, RoleContext } from './domain'
+import { hasGrantedPermission, loadOptionalTaskContext } from './features/tasks/taskDispatchAccess'
 import { product } from './product'
 
 type Row = Record<string, unknown>
@@ -119,7 +120,7 @@ export function EnterpriseTemplateCenter({ identity, permissions }: { identity: 
   </section>
 }
 
-export function TaskCreateDialog({ identity, initialHotelId, creationSource = 'MANUAL_TASK_CENTER', onClose, onCreated }: { identity: RoleContext; initialHotelId?: string; creationSource?: string; onClose: () => void; onCreated: () => Promise<void> }) {
+export function TaskCreateDialog({ identity, permissions, initialHotelId, creationSource = 'MANUAL_TASK_CENTER', onClose, onCreated }: { identity: RoleContext; permissions: string[]; initialHotelId?: string; creationSource?: string; onClose: () => void; onCreated: () => Promise<void> }) {
   const [assignments, setAssignments] = useState<AssignmentOption[]>([])
   const [standards, setStandards] = useState<StandardOption[]>([])
   const [templates, setTemplates] = useState<EnterpriseTemplate[]>([])
@@ -127,10 +128,14 @@ export function TaskCreateDialog({ identity, initialHotelId, creationSource = 'M
   const [error, setError] = useState<string>()
   const [form, setForm] = useState({ hotelId: initialHotelId ?? '', assigneeAssignmentId: '', reviewerAssignmentId: '', standardVersionId: '', templateId: '', title: '', description: '', priority: 'NORMAL', dueAt: new Date(Date.now() + 24 * 3600_000).toISOString().slice(0, 16) })
   const [saving, setSaving] = useState(false)
+  const canReadTemplates = hasGrantedPermission(permissions, 'template.read')
+  const canReadStandards = hasGrantedPermission(permissions, 'standard.read')
   useEffect(() => {
     let active = true
     void Promise.all([
-      apiRequest<unknown>('/tasks/targets', identity), apiRequest<unknown>('/standards', identity), loadEnterpriseTemplates(identity, 'TASK'),
+      apiRequest<unknown>('/tasks/targets', identity),
+      loadOptionalTaskContext(permissions, 'standard.read', () => apiRequest<unknown>('/standards', identity).then(asList<Row>)),
+      loadOptionalTaskContext(permissions, 'template.read', () => loadEnterpriseTemplates(identity, 'TASK')),
     ]).then(([targetRaw, standardRaw, templateRows]) => {
       if (!active) return
       const targetRows = asList<Row>(targetRaw).filter((row) => text(row, 'assignment_id', 'assignmentId')).map((row): AssignmentOption => ({
@@ -149,7 +154,7 @@ export function TaskCreateDialog({ identity, initialHotelId, creationSource = 'M
       setTemplates(templateRows.flatMap((row) => row.lifecycleStatus === 'PUBLISHED' ? [row] : row.publishedVersionId && row.publishedConfiguration ? [{ ...row, latestVersionId: row.publishedVersionId, versionNo: row.publishedVersionNo ?? row.versionNo, lifecycleStatus: 'PUBLISHED', configuration: row.publishedConfiguration }] : []))
     }).catch((reason) => setError(reason instanceof Error ? reason.message : '任务上下文加载失败。')).finally(() => active && setLoading(false))
     return () => { active = false }
-  }, [identity.key, initialHotelId])
+  }, [identity.key, initialHotelId, canReadStandards, canReadTemplates])
   const hotels = useMemo(() => Array.from(new Map(assignments.map((row) => [
     row.hotelId ?? row.orgUnitId,
     { id: row.hotelId ?? row.orgUnitId, name: row.hotelName ?? row.orgName },
@@ -188,7 +193,7 @@ export function TaskCreateDialog({ identity, initialHotelId, creationSource = 'M
     finally { setSaving(false) }
   }
   return <Modal title="新建并下达管理任务" onClose={onClose} footer={<><button className="secondary" onClick={onClose}>取消</button><button className="primary" disabled={saving || loading} onClick={() => void save()}>{saving ? '下达中…' : '创建并下达'}</button></>}>
-    {loading ? <div className="state-card"><div className="spinner" /><strong>正在读取可投递岗位和模板</strong></div> : <div className="form-grid"><label>任务模板<select value={form.templateId} onChange={(event) => applyTemplate(event.target.value)}><option value="">不使用模板</option>{templates.map((item) => <option value={item.id} key={item.id}>{item.name} · V{item.versionNo}</option>)}</select></label><label>目标门店<select value={form.hotelId} onChange={(event) => setForm({ ...form, hotelId: event.target.value, assigneeAssignmentId: '', reviewerAssignmentId: '' })}><option value="">请选择门店</option>{hotels.map((hotel) => <option value={hotel.id} key={hotel.id}>{hotel.name}</option>)}</select></label><label>执行负责人<select value={form.assigneeAssignmentId} onChange={(event) => setForm({ ...form, assigneeAssignmentId: event.target.value })}><option value="">请选择门店岗位人员</option>{visibleAssignments.map((row) => <option value={row.id} key={row.id}>{row.employeeName} · {row.positionName} · {row.orgName}</option>)}</select></label><label>验收负责人（可选）<select value={form.reviewerAssignmentId} onChange={(event) => setForm({ ...form, reviewerAssignmentId: event.target.value })}><option value="">自动：发起人 / 直属上级 / 门店管理岗</option>{visibleAssignments.filter((row) => row.levelCode?.startsWith('M')).map((row) => <option value={row.id} key={row.id}>{row.employeeName} · {row.positionName} · {row.orgName}</option>)}</select></label><label>关联标准<select value={form.standardVersionId} onChange={(event) => setForm({ ...form, standardVersionId: event.target.value })}><option value="">暂不关联</option>{standards.filter((row) => row.status === 'PUBLISHED').map((row) => <option value={row.versionId} key={row.versionId}>{row.name}</option>)}</select></label><label>优先级<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option value="LOW">低</option><option value="NORMAL">普通</option><option value="HIGH">高</option><option value="URGENT">紧急</option></select></label><label className="full-field">任务标题<input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label><label className="full-field">执行要求<textarea rows={4} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label><label>截止时间<input type="datetime-local" value={form.dueAt} onChange={(event) => setForm({ ...form, dueAt: event.target.value })} /></label></div>}
+    {loading ? <div className="state-card"><div className="spinner" /><strong>正在读取可投递岗位和任务上下文</strong></div> : <div className="form-grid">{canReadTemplates && <label>任务模板<select value={form.templateId} onChange={(event) => applyTemplate(event.target.value)}><option value="">不使用模板</option>{templates.map((item) => <option value={item.id} key={item.id}>{item.name} · V{item.versionNo}</option>)}</select></label>}<label>目标门店<select value={form.hotelId} onChange={(event) => setForm({ ...form, hotelId: event.target.value, assigneeAssignmentId: '', reviewerAssignmentId: '' })}><option value="">请选择门店</option>{hotels.map((hotel) => <option value={hotel.id} key={hotel.id}>{hotel.name}</option>)}</select></label><label>执行负责人<select value={form.assigneeAssignmentId} onChange={(event) => setForm({ ...form, assigneeAssignmentId: event.target.value })}><option value="">请选择门店岗位人员</option>{visibleAssignments.map((row) => <option value={row.id} key={row.id}>{row.employeeName} · {row.positionName} · {row.orgName}</option>)}</select></label><label>验收负责人（可选）<select value={form.reviewerAssignmentId} onChange={(event) => setForm({ ...form, reviewerAssignmentId: event.target.value })}><option value="">自动：发起人 / 直属上级 / 门店管理岗</option>{visibleAssignments.filter((row) => row.levelCode?.startsWith('M')).map((row) => <option value={row.id} key={row.id}>{row.employeeName} · {row.positionName} · {row.orgName}</option>)}</select></label>{canReadStandards && <label>关联标准<select value={form.standardVersionId} onChange={(event) => setForm({ ...form, standardVersionId: event.target.value })}><option value="">暂不关联</option>{standards.filter((row) => row.status === 'PUBLISHED').map((row) => <option value={row.versionId} key={row.versionId}>{row.name}</option>)}</select></label>}<label>优先级<select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option value="LOW">低</option><option value="NORMAL">普通</option><option value="HIGH">高</option><option value="URGENT">紧急</option></select></label><label className="full-field">任务标题<input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label><label className="full-field">执行要求<textarea rows={4} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label><label>截止时间<input type="datetime-local" value={form.dueAt} onChange={(event) => setForm({ ...form, dueAt: event.target.value })} /></label></div>}
     {error && <div className="inline-error">{error}</div>}
   </Modal>
 }
