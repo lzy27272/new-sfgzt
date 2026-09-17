@@ -75,7 +75,7 @@ function isDaily(item: WorkExpectation) {
 }
 
 export function isLateSubmitted(item: WorkExpectation) {
-  const submittedAt = item.latestSubmittedAt ?? item.records?.[0]?.submittedAt
+  const submittedAt = item.firstSubmittedAt ?? item.latestSubmittedAt ?? item.records?.at(-1)?.submittedAt
   if (!submittedAt || !item.dueAt) return false
   const submitted = new Date(submittedAt).getTime()
   const due = new Date(item.dueAt).getTime()
@@ -83,8 +83,11 @@ export function isLateSubmitted(item: WorkExpectation) {
 }
 
 function currentScopeWork(items: WorkExpectation[], today: string) {
+  const month = today.slice(0, 7)
   return items.filter((item) => !excludedStatuses.has(item.status)
-    && (!isDaily(item) || item.businessDate === today))
+    && item.businessDate.startsWith(month)
+    && item.businessDate <= today
+    && (!isDaily(item) || item.businessDate === today || isLateSubmitted(item)))
 }
 
 function hotelIdFor(item: WorkExpectation) {
@@ -149,7 +152,7 @@ function WorkRows({ items, onSelect }: { items: WorkExpectation[]; onSelect: (it
     {items.map((item) => <button type="button" key={item.id} onClick={() => onSelect(item)}>
       <span className={`workbench-record-state ${statusFor(item).toLowerCase()}`} />
       <span className="workbench-record-main"><strong>{item.title}</strong><small>{departmentLabel(item)} · {item.assigneeName}{item.positionName ? ` · ${item.positionName}` : ''}</small></span>
-      <span className="workbench-record-time"><small>截止 {formatDate(item.dueAt)}</small>{isLateSubmitted(item) && <em>补交 {formatDate(item.latestSubmittedAt ?? item.records?.[0]?.submittedAt)}</em>}</span>
+      <span className="workbench-record-time"><small>截止 {formatDate(item.dueAt)}</small>{isLateSubmitted(item) && <em>补交 {formatDate(item.firstSubmittedAt ?? item.latestSubmittedAt ?? item.records?.at(-1)?.submittedAt)}</em>}</span>
       <b>{statusLabel(statusFor(item))} ›</b>
     </button>)}
   </div>
@@ -242,9 +245,11 @@ export function RoleWorkbench({
   const canReadKpi = allows(permissions, permissionCodes.kpi.scorecardReadOwn) || allows(permissions, permissionCodes.kpi.scorecardReadTeam) || allows(permissions, permissionCodes.kpi.scorecardReadAll) || allows(permissions, permissionCodes.kpi.templateRead)
   const executive = executiveKeys.has(presentationKey)
   const [currentBusinessDate, setCurrentBusinessDate] = useState(businessDate)
+  const monthStart = `${currentBusinessDate.slice(0, 8)}01`
+  const workQuery = { fromBusinessDate: monthStart, toBusinessDate: currentBusinessDate }
   const work = useResource(`${identity.key}:role-workbench-work:${canReadTeam}:${canReadOwn}:${currentBusinessDate}`, () => canReadTeam
-    ? loadTeamWork(identity, { businessDate: currentBusinessDate })
-    : canReadOwn ? loadMyWork(identity, currentBusinessDate) : Promise.resolve({ data: [], source: 'api' as const }), [], 30_000)
+    ? loadTeamWork(identity, workQuery)
+    : canReadOwn ? loadMyWork(identity, workQuery) : Promise.resolve({ data: [], source: 'api' as const }), [], 30_000)
   const completion = useResource<WorkbenchSummary>(`${identity.key}:role-workbench-completion:${canReadTeam}:${currentBusinessDate}`, () => canReadTeam
     ? loadWorkbenchSummary(identity, currentBusinessDate)
     : Promise.resolve({ data: emptySummary(currentBusinessDate), source: 'api' as const }), emptySummary(currentBusinessDate), 60_000)

@@ -88,16 +88,19 @@ test('daily and month-to-date completion rates use the KPI on-time formula', () 
   assert.match(workPackageService, /first_record\.submitted_at/)
 })
 
-test('workbench pins requests to the reactive Shanghai business date', () => {
+test('workbench pins month-to-date requests to the reactive Shanghai business date', () => {
   const currentScope = workbench.slice(workbench.indexOf('function currentScopeWork'), workbench.indexOf('function hotelIdFor'))
   assert.match(workbench, /timeZone: 'Asia\/Shanghai'/)
   assert.match(workbench, /role-workbench-work:\$\{canReadTeam\}:\$\{canReadOwn\}:\$\{currentBusinessDate\}/)
-  assert.match(workbench, /loadTeamWork\(identity, \{ businessDate: currentBusinessDate \}\)/)
+  assert.match(workbench, /const workQuery = \{ fromBusinessDate: monthStart, toBusinessDate: currentBusinessDate \}/)
+  assert.match(workbench, /loadTeamWork\(identity, workQuery\)/)
+  assert.match(workbench, /loadMyWork\(identity, workQuery\)/)
   assert.match(workbench, /loadWorkbenchSummary\(identity, currentBusinessDate\)/)
   assert.match(workbench, /visibilitychange/)
-  assert.match(resources, /query\.set\('businessDate', options\.businessDate\)/)
-  assert.match(resources, /if \(businessDate\) query\.set\('businessDate', businessDate\)/)
-  assert.doesNotMatch(currentScope, /isLateSubmitted/)
+  assert.match(resources, /query\.set\('fromBusinessDate', options\.fromBusinessDate\)/)
+  assert.match(resources, /query\.set\('toBusinessDate', options\.toBusinessDate\)/)
+  assert.match(currentScope, /item\.businessDate\.startsWith\(month\)/)
+  assert.match(currentScope, /item\.businessDate === today \|\| isLateSubmitted\(item\)/)
 })
 
 test('wide hotel details expose a keyboard-accessible horizontal scroll region', () => {

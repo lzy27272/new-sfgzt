@@ -1,9 +1,11 @@
 package cn.sifangguan.hotelaios.workpackage;
 
+import cn.sifangguan.hotelaios.PlatformAdminTestFixture;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -41,6 +43,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class WorkExpectationSlaIntegrationTest {
     private static final String TENANT = "10000000-0000-0000-0000-000000000001";
     private static final String CEO = "19000000-0000-0000-0000-000000000001";
+    private static final String PLATFORM_ADMIN = PlatformAdminTestFixture.ACCOUNT_ID;
     private static final String FRONT_ACCOUNT = "19000000-0000-0000-0000-000000000003";
     private static final String FRONT_ASSIGNMENT = "19200000-0000-0000-0000-000000000002";
     private static final String FRONT_POSITION = "14000000-0000-0000-0000-000000000001";
@@ -73,6 +76,11 @@ class WorkExpectationSlaIntegrationTest {
         registry.add("app.work-expectation.sla.scheduler-enabled", () -> false);
     }
 
+    @BeforeEach
+    void ensurePlatformAdministrator() {
+        PlatformAdminTestFixture.ensure(jdbc, TENANT, CEO);
+    }
+
     @AfterAll
     static void stopPostgres() throws Exception {
         POSTGRES.close();
@@ -97,10 +105,10 @@ class WorkExpectationSlaIntegrationTest {
 
         mockMvc.perform(identity(post("/api/v1/work-expectations/sla/process"), FRONT_ACCOUNT))
                 .andExpect(status().isForbidden());
-        mockMvc.perform(identity(post("/api/v1/work-expectations/sla/process?limit=0"), CEO))
+        mockMvc.perform(identity(post("/api/v1/work-expectations/sla/process?limit=0"), PLATFORM_ADMIN))
                 .andExpect(status().isBadRequest());
 
-        JsonNode first = response(identity(post("/api/v1/work-expectations/sla/process?limit=100"), CEO), 200);
+        JsonNode first = response(identity(post("/api/v1/work-expectations/sla/process?limit=100"), PLATFORM_ADMIN), 200);
         assertThat(first.path("processedCount").asInt()).isEqualTo(3);
         assertThat(first.path("batchLimit").asInt()).isEqualTo(100);
         assertThat(jsonStrings(first.path("expectationIds")))
@@ -115,7 +123,7 @@ class WorkExpectationSlaIntegrationTest {
         assertMissedEvidence(planned);
         assertMissedEvidence(inProgress);
 
-        mockMvc.perform(identity(post("/api/v1/work-expectations/sla/process?limit=100"), CEO))
+        mockMvc.perform(identity(post("/api/v1/work-expectations/sla/process?limit=100"), PLATFORM_ADMIN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.processedCount").value(0));
         assertMissedEventCount(available, 1);
@@ -134,7 +142,7 @@ class WorkExpectationSlaIntegrationTest {
 
     private List<String> createDailyPackageAndExpectations(LocalDate today) throws Exception {
         OffsetDateTime effectiveFrom = OffsetDateTime.now().minusDays(40).withNano(0);
-        JsonNode definition = response(identity(post("/api/v1/work-packages"), CEO)
+        JsonNode definition = response(identity(post("/api/v1/work-packages"), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {
@@ -146,12 +154,12 @@ class WorkExpectationSlaIntegrationTest {
                         """.formatted(FRONT_POSITION, HANGZHOU_HOTEL)), 201);
         String packageId = definition.path("id").asText();
 
-        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", packageId), CEO)
+        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", packageId), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"SLA integration package V1\"}"), 201);
         String versionId = version.path("id").asText();
 
-        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", packageId, versionId), CEO)
+        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", packageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -178,12 +186,12 @@ class WorkExpectationSlaIntegrationTest {
                 .andExpect(status().isOk());
 
         mockMvc.perform(identity(post("/api/v1/work-packages/{id}/versions/{versionId}/publish",
-                        packageId, versionId), CEO)
+                packageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"effectiveFrom\":\"" + effectiveFrom + "\"}"))
                 .andExpect(status().isOk());
 
-        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/allocations", packageId), CEO)
+        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/allocations", packageId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -199,7 +207,7 @@ class WorkExpectationSlaIntegrationTest {
         List<String> expectationIds = new ArrayList<>();
         for (int offset = 10; offset < 15; offset++) {
             LocalDate businessDate = today.minusDays(offset);
-            JsonNode generation = response(identity(post("/api/v1/work-expectations/actions/generate"), CEO)
+            JsonNode generation = response(identity(post("/api/v1/work-expectations/actions/generate"), PLATFORM_ADMIN)
                     .contentType(MediaType.APPLICATION_JSON)
                     .content("""
                             {
@@ -229,7 +237,7 @@ class WorkExpectationSlaIntegrationTest {
 
     private JsonNode processSlaUnchecked() {
         try {
-            return response(identity(post("/api/v1/work-expectations/sla/process?limit=100"), CEO), 200);
+            return response(identity(post("/api/v1/work-expectations/sla/process?limit=100"), PLATFORM_ADMIN), 200);
         } catch (Exception exception) {
             throw new IllegalStateException(exception);
         }

@@ -187,6 +187,7 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
     workPackageVersionId: text(item, ['workPackageVersionId', 'work_package_version_id'], '') || undefined,
     workPackageItemId: text(item, ['workPackageItemId', 'work_package_item_id'], '') || undefined,
     recordId: text(item, ['recordId', 'workRecordId', 'record_id'], '') || records[0]?.id,
+    firstSubmittedAt: text(item, ['firstSubmittedAt', 'first_submitted_at'], '') || records.at(-1)?.submittedAt,
     latestSubmittedAt: text(item, ['latestSubmittedAt', 'latest_submitted_at'], '') || records[0]?.submittedAt,
     rowVersion: value(item, 'rowVersion', 'row_version') === undefined ? undefined : number(item, ['rowVersion', 'row_version']),
     evaluationOutcome: text(item, ['evaluationOutcome', 'evaluation_outcome'], '') || undefined,
@@ -262,23 +263,48 @@ export async function loadExpectation(identity: ApiIdentity, id: string, fallbac
   return withFallback(async () => normalizeExpectation(object(await apiRequest<unknown>(`/work-expectations/${id}`, identity))), fallback)
 }
 
-export async function loadMyWork(identity: ApiIdentity, businessDate?: string) {
+type WorkExpectationQuery = {
+  orgUnitId?: string
+  businessDate?: string
+  fromBusinessDate?: string
+  toBusinessDate?: string
+}
+
+async function loadExpectationPages(identity: ApiIdentity, endpoint: string, options: WorkExpectationQuery) {
+  const pageSize = 200
+  const maxPages = 100
+  const result: WorkExpectation[] = []
+  const ids = new Set<string>()
+  for (let page = 0; page < maxPages; page += 1) {
+    const query = new URLSearchParams({ page: String(page), size: String(pageSize) })
+    if (options.orgUnitId) query.set('targetOrgUnitId', options.orgUnitId)
+    if (options.businessDate) query.set('businessDate', options.businessDate)
+    if (options.fromBusinessDate) query.set('fromBusinessDate', options.fromBusinessDate)
+    if (options.toBusinessDate) query.set('toBusinessDate', options.toBusinessDate)
+    const payload = await apiRequest<unknown>(`${endpoint}?${query.toString()}`, identity)
+    const rows = asList<JsonObject>(payload).map(normalizeExpectation)
+    let added = 0
+    rows.forEach((row) => {
+      if (!row.id || ids.has(row.id)) return
+      ids.add(row.id)
+      result.push(row)
+      added += 1
+    })
+    if (rows.length < pageSize || added === 0) return result
+  }
+  throw new Error('工作记录超过20000条，请缩小日期或组织范围后重试。')
+}
+
+export async function loadMyWork(identity: ApiIdentity, options: Omit<WorkExpectationQuery, 'orgUnitId'> = {}) {
   return withFallback(async () => {
-    const query = new URLSearchParams({ page: '0', size: '100' })
-    if (businessDate) query.set('businessDate', businessDate)
-    const payload = await apiRequest<unknown>(`/my/work-expectations?${query.toString()}`, identity)
-    return asList<JsonObject>(payload).map(normalizeExpectation)
+    return loadExpectationPages(identity, '/my/work-expectations', options)
   }, () => demoValue<WorkExpectation[]>('demoExpectations'))
 }
 
-export async function loadTeamWork(identity: ApiIdentity, options: { orgUnitId?: string; businessDate?: string } = {}) {
+export async function loadTeamWork(identity: ApiIdentity, options: WorkExpectationQuery = {}) {
   return withFallback(async () => {
-    const query = new URLSearchParams({ page: '0', size: '100' })
-    if (options.orgUnitId) query.set('targetOrgUnitId', options.orgUnitId)
-    if (options.businessDate) query.set('businessDate', options.businessDate)
     const endpoint = options.orgUnitId ? '/work-expectations' : '/team/work-expectations'
-    const payload = await apiRequest<unknown>(`${endpoint}?${query.toString()}`, identity)
-    return asList<JsonObject>(payload).map(normalizeExpectation)
+    return loadExpectationPages(identity, endpoint, options)
   }, () => demoValue<WorkExpectation[]>('demoExpectations'))
 }
 

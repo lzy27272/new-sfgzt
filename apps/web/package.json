@@ -3,10 +3,12 @@
   "private": true,
   "version": "0.2.0-pilot.8",
   "type": "module",
+  "packageManager": "pnpm@11.19.0",
   "scripts": {
     "dev": "vite --configLoader runner",
     "build": "tsc -b && vite build --configLoader runner",
     "build:pilot": "tsc -b && vite build --mode pilot --configLoader runner",
+    "test": "node --test --experimental-strip-types \"tests/*.test.mjs\"",
     "test:wecom": "node --test --experimental-strip-types tests/wecom-entry-route.test.mjs",
     "test:employee-invitation": "node --test --experimental-strip-types tests/employee-invitation.test.mjs",
     "preview": "vite preview"

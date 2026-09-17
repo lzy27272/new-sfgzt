@@ -115,6 +115,29 @@ class Sprint2AuthorizationIntegrationTest {
     }
 
     @Test
+    void workExpectationPaginationIsStableAndRejectsUnsafeRanges() throws Exception {
+        JsonNode firstPage = json(getJson("/api/v1/team/work-expectations?page=0&size=1", CEO));
+        JsonNode secondPage = json(getJson("/api/v1/team/work-expectations?page=1&size=1", CEO));
+        assertThat(firstPage.isArray()).isTrue();
+        assertThat(secondPage.isArray()).isTrue();
+        assertThat(firstPage).hasSize(1);
+        assertThat(secondPage).hasSize(1);
+        assertThat(firstPage.get(0).path("id").asText())
+                .isNotEqualTo(secondPage.get(0).path("id").asText());
+
+        mockMvc.perform(get("/api/v1/team/work-expectations?page=0&size=201")
+                        .header("X-Tenant-Id", TENANT)
+                        .header("X-Actor-Id", CEO))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/v1/team/work-expectations")
+                        .param("fromBusinessDate", "2026-09-15")
+                        .param("toBusinessDate", "2026-09-01")
+                        .header("X-Tenant-Id", TENANT)
+                        .header("X-Actor-Id", CEO))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void optionalListFiltersCanBeOmitted() throws Exception {
         mockMvc.perform(get("/api/v1/tasks")
                         .header("X-Tenant-Id", TENANT)

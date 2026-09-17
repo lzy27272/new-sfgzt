@@ -13,6 +13,8 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -589,9 +591,17 @@ public class WorkPackageService {
     }
 
     @Transactional(readOnly = true)
-    public List<Map<String, Object>> teamExpectations(String status, LocalDate businessDate) {
+    public List<Map<String, Object>> teamExpectations(
+            String status,
+            LocalDate businessDate,
+            LocalDate fromBusinessDate,
+            LocalDate toBusinessDate,
+            int page,
+            int size
+    ) {
         accessPolicy.requireAnyPermission("work-record.review", "work-record.team-read");
-        return expectations(status, null, null, businessDate, false);
+        return expectations(status, null, null, businessDate,
+                fromBusinessDate, toBusinessDate, false, page, size);
     }
 
     @Transactional(readOnly = true)
@@ -711,12 +721,28 @@ public class WorkPackageService {
             UUID positionAssignmentId,
             UUID targetOrgUnitId,
             LocalDate businessDate,
-            boolean mineOnly
+            LocalDate fromBusinessDate,
+            LocalDate toBusinessDate,
+            boolean mineOnly,
+            int page,
+            int size
     ) {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission(
                 "work-package.read", "work-record.read", "work-record.review", "work-record.team-read");
-        MapSqlParameterSource params = base(principal).addValue("actorId", principal.actorId());
+        if (page < 0 || size < 1 || size > 200) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "page必须大于等于0，size必须在1到200之间");
+        }
+        if (businessDate == null && fromBusinessDate != null && toBusinessDate != null
+                && fromBusinessDate.isAfter(toBusinessDate)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "fromBusinessDate不能晚于toBusinessDate");
+        }
+        MapSqlParameterSource params = base(principal)
+                .addValue("actorId", principal.actorId())
+                .addValue("pageSize", size)
+                .addValue("pageOffset", (long) page * size);
         List<String> predicates = new ArrayList<>();
         if (status != null && !status.isBlank()) {
             predicates.add("x.status = :status");
@@ -741,6 +767,15 @@ public class WorkPackageService {
         if (businessDate != null) {
             predicates.add("x.business_date = :businessDate");
             params.addValue("businessDate", businessDate);
+        } else {
+            if (fromBusinessDate != null) {
+                predicates.add("x.business_date >= :fromBusinessDate");
+                params.addValue("fromBusinessDate", fromBusinessDate);
+            }
+            if (toBusinessDate != null) {
+                predicates.add("x.business_date <= :toBusinessDate");
+                params.addValue("toBusinessDate", toBusinessDate);
+            }
         }
         if (mineOnly) {
             predicates.add("""
@@ -808,7 +843,8 @@ public class WorkPackageService {
                        d.id as work_package_id, d.code as work_package_code, d.name as work_package_name,
                        v.id as work_package_version_id, v.version_no,
                        latest_record.id as record_id, latest_record.attempt_no as latest_attempt_no,
-                       latest_record.submitted_at as latest_submitted_at
+                       latest_record.submitted_at as latest_submitted_at,
+                       first_record.submitted_at as first_submitted_at
                 from work_expectation x
                 join work_package_item i on i.tenant_id = x.tenant_id and i.id = x.work_package_item_id
                 join work_package_version v on v.tenant_id = i.tenant_id and v.id = i.work_package_version_id
@@ -861,6 +897,13 @@ public class WorkPackageService {
                     order by w.attempt_no desc, w.created_at desc
                     limit 1
                 ) latest_record on true
+                left join lateral (
+                    select min(w.submitted_at) as submitted_at
+                    from work_record w
+                    where w.tenant_id = x.tenant_id
+                      and w.work_expectation_id = x.id
+                      and w.submitted_at is not null
+                ) first_record on true
                 where x.tenant_id = :tenantId
                 """ + visibility + filters + " order by case "
                 + "when x.business_date = current_date and x.status = 'SUBMITTED' then 0 "
@@ -868,7 +911,8 @@ public class WorkPackageService {
                 + "when i.period_type <> 'DAY' and x.status in ('OVERDUE', 'MISSED', 'FAILED') then 2 "
                 + "when x.status = 'SUBMITTED' then 3 else 4 end, "
                 + "latest_record.submitted_at desc nulls last, x.business_date desc, "
-                + "x.due_at desc, x.created_at desc limit 500", params);
+                + "x.due_at desc, x.created_at desc, x.id desc "
+                + "limit :pageSize offset :pageOffset", params);
     }
 
     @Transactional(readOnly = true)

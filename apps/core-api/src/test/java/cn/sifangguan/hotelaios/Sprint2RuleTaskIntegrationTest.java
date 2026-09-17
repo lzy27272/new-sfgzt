@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -40,6 +41,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class Sprint2RuleTaskIntegrationTest {
     private static final String TENANT = "10000000-0000-0000-0000-000000000001";
     private static final String CEO = "19000000-0000-0000-0000-000000000001";
+    private static final String PLATFORM_ADMIN = PlatformAdminTestFixture.ACCOUNT_ID;
     private static final String FRONT_DESK_ACCOUNT = "19000000-0000-0000-0000-000000000003";
     private static final String FRONT_OFFICE_SUPERVISOR = "19000000-0000-0000-0000-000000000005";
     private static final String FRONT_DESK_ASSIGNMENT = "19200000-0000-0000-0000-000000000002";
@@ -75,6 +77,11 @@ class Sprint2RuleTaskIntegrationTest {
         registry.add("spring.flyway.password", () -> "postgres");
         registry.add("app.security.development-header-auth-enabled", () -> true);
         registry.add("app.database.rls-enabled", () -> true);
+    }
+
+    @BeforeEach
+    void ensurePlatformAdministrator() {
+        PlatformAdminTestFixture.ensure(jdbc, TENANT, CEO);
     }
 
     @AfterAll
@@ -164,12 +171,12 @@ class Sprint2RuleTaskIntegrationTest {
 
     @Test
     void simulatesAndConsumesRuleExactlyOnce() throws Exception {
-        MvcResult createdRule = postJson("/api/v1/rules", CEO, null, """
+        MvcResult createdRule = postJson("/api/v1/rules", PLATFORM_ADMIN, null, """
                 {"code":"RULE-OTA-RISK","name":"OTA评分风险提醒","eventType":"OTA_SCORE_RISK"}
                 """);
         String ruleId = json(createdRule).path("id").asText();
 
-        MvcResult createdVersion = postJson("/api/v1/rules/" + ruleId + "/versions", CEO, null, """
+        MvcResult createdVersion = postJson("/api/v1/rules/" + ruleId + "/versions", PLATFORM_ADMIN, null, """
                 {
                   "conditionAst":{"op":"LT","fact":"score","value":4.9},
                   "actions":[{
@@ -184,11 +191,11 @@ class Sprint2RuleTaskIntegrationTest {
         JsonNode version = json(createdVersion);
         String versionId = version.path("id").asText();
 
-        postJson("/api/v1/rules/" + ruleId + "/versions/" + versionId + "/simulate", CEO, null, """
+        postJson("/api/v1/rules/" + ruleId + "/versions/" + versionId + "/simulate", PLATFORM_ADMIN, null, """
                 {"facts":{"score":4.8}}
                 """).getResponse().getContentAsString();
 
-        postJson("/api/v1/rules/" + ruleId + "/versions/" + versionId + "/publish", CEO, null, """
+        postJson("/api/v1/rules/" + ruleId + "/versions/" + versionId + "/publish", PLATFORM_ADMIN, null, """
                 {"expectedVersion":0,"effectiveFrom":"%s"}
                 """.formatted(OffsetDateTime.now().minusMinutes(1)));
 
@@ -206,14 +213,14 @@ class Sprint2RuleTaskIntegrationTest {
                 values (?, ?::uuid, ?, 'OTA_SCORE_RISK', ?::uuid, ?::uuid, now(), '{"score":4.8}'::jsonb)
                 """, eventId, TENANT, sourceEventId, FRONT_OFFICE_DEPARTMENT, FRONT_DESK_ASSIGNMENT);
 
-        MvcResult consumed = postJson("/api/v1/management-events/" + eventId + "/consume", CEO, null, "{}");
+        MvcResult consumed = postJson("/api/v1/management-events/" + eventId + "/consume", PLATFORM_ADMIN, null, "{}");
         JsonNode result = json(consumed);
         assertThat(result.path("event").path("processing_status").asText()).isEqualTo("PROCESSED");
         assertThat(result.path("evaluations")).hasSize(1);
         assertThat(result.path("actions")).hasSize(1);
         assertThat(result.path("actions").get(0).path("status").asText()).isEqualTo("SUCCEEDED");
 
-        MvcResult replay = postJson("/api/v1/management-events/" + eventId + "/consume", CEO, null, "{}");
+        MvcResult replay = postJson("/api/v1/management-events/" + eventId + "/consume", PLATFORM_ADMIN, null, "{}");
         assertThat(json(replay).path("actions")).hasSize(1);
     }
 
@@ -268,7 +275,7 @@ class Sprint2RuleTaskIntegrationTest {
                 set position_assignment_id = ?::uuid, locked_until = now()
                 where id = ?
                 """, FRONT_DESK_ASSIGNMENT, managementEventId);
-        postJson("/api/v1/management-events/actions/project-outbox?limit=20", CEO, null, "{}");
+        postJson("/api/v1/management-events/actions/project-outbox?limit=20", PLATFORM_ADMIN, null, "{}");
 
         assertThat(jdbc.queryForObject(
                 "select processing_status from management_event where id = ?", String.class, managementEventId))
@@ -316,11 +323,11 @@ class Sprint2RuleTaskIntegrationTest {
             String recipientResolver,
             int cooldownMinutes
     ) throws Exception {
-        MvcResult createdRule = postJson("/api/v1/rules", CEO, null, """
+        MvcResult createdRule = postJson("/api/v1/rules", PLATFORM_ADMIN, null, """
                 {"code":"%s","name":"P0 rule","eventType":"%s"}
                 """.formatted(code, eventType));
         String ruleId = json(createdRule).path("id").asText();
-        MvcResult createdVersion = postJson("/api/v1/rules/" + ruleId + "/versions", CEO, null, """
+        MvcResult createdVersion = postJson("/api/v1/rules/" + ruleId + "/versions", PLATFORM_ADMIN, null, """
                 {
                   "conditionAst":{"op":"EXISTS","fact":"workRecordId"},
                   "actions":[{
@@ -334,7 +341,7 @@ class Sprint2RuleTaskIntegrationTest {
                 """.formatted(recipientResolver, cooldownMinutes));
         JsonNode version = json(createdVersion);
         String versionId = version.path("id").asText();
-        postJson("/api/v1/rules/" + ruleId + "/versions/" + versionId + "/publish", CEO, null, """
+        postJson("/api/v1/rules/" + ruleId + "/versions/" + versionId + "/publish", PLATFORM_ADMIN, null, """
                 {"expectedVersion":0,"effectiveFrom":"%s"}
                 """.formatted(OffsetDateTime.now().minusMinutes(1)));
         return ruleId;

@@ -22,28 +22,42 @@ public class WorkExpectationController {
 
     @GetMapping("/api/v1/work-expectations")
     public List<Map<String, Object>> list(
-            @RequestParam(required = false) String status,
-            @RequestParam(required = false) UUID positionAssignmentId,
-            @RequestParam(required = false) UUID targetOrgUnitId,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate
+            @RequestParam(name = "status", required = false) String status,
+            @RequestParam(name = "positionAssignmentId", required = false) UUID positionAssignmentId,
+            @RequestParam(name = "targetOrgUnitId", required = false) UUID targetOrgUnitId,
+            @RequestParam(name = "businessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate,
+            @RequestParam(name = "fromBusinessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fromBusinessDate,
+            @RequestParam(name = "toBusinessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate toBusinessDate,
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "100") int size
     ) {
-        return service.expectations(status, positionAssignmentId, targetOrgUnitId, businessDate, false);
+        return service.expectations(status, positionAssignmentId, targetOrgUnitId, businessDate,
+                fromBusinessDate, toBusinessDate, false, page, size);
     }
 
     @GetMapping("/api/v1/my/work-expectations")
     public List<Map<String, Object>> mine(
-            @RequestParam(required = false) String status,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate
+            @RequestParam(name = "status", required = false) String status,
+            @RequestParam(name = "businessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate,
+            @RequestParam(name = "fromBusinessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fromBusinessDate,
+            @RequestParam(name = "toBusinessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate toBusinessDate,
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "100") int size
     ) {
-        return service.expectations(status, null, null, businessDate, true);
+        return service.expectations(status, null, null, businessDate,
+                fromBusinessDate, toBusinessDate, true, page, size);
     }
 
     @GetMapping("/api/v1/team/work-expectations")
     public List<Map<String, Object>> team(
-            @RequestParam(required = false) String status,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate
+            @RequestParam(name = "status", required = false) String status,
+            @RequestParam(name = "businessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate businessDate,
+            @RequestParam(name = "fromBusinessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fromBusinessDate,
+            @RequestParam(name = "toBusinessDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate toBusinessDate,
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "100") int size
     ) {
-        return service.teamExpectations(status, businessDate);
+        return service.teamExpectations(status, businessDate, fromBusinessDate, toBusinessDate, page, size);
     }
 
     @GetMapping("/api/v1/team/workbench-summary")

@@ -1,9 +1,11 @@
 package cn.sifangguan.hotelaios.workpackage;
 
+import cn.sifangguan.hotelaios.PlatformAdminTestFixture;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -32,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class WorkPackageFlowIntegrationTest {
     private static final String TENANT = "10000000-0000-0000-0000-000000000001";
     private static final String CEO = "19000000-0000-0000-0000-000000000001";
+    private static final String PLATFORM_ADMIN = PlatformAdminTestFixture.ACCOUNT_ID;
     private static final String FRONT_ACCOUNT = "19000000-0000-0000-0000-000000000003";
     private static final String FRONT_EMPLOYEE = "19100000-0000-0000-0000-000000000002";
     private static final String FRONT_ASSIGNMENT = "19200000-0000-0000-0000-000000000002";
@@ -66,6 +69,11 @@ class WorkPackageFlowIntegrationTest {
         registry.add("app.database.rls-enabled", () -> true);
     }
 
+    @BeforeEach
+    void ensurePlatformAdministrator() {
+        PlatformAdminTestFixture.ensure(jdbc, TENANT, CEO);
+    }
+
     @AfterAll
     static void stopPostgres() throws Exception {
         POSTGRES.close();
@@ -76,14 +84,14 @@ class WorkPackageFlowIntegrationTest {
         LocalDate date = LocalDate.now();
         OffsetDateTime now = OffsetDateTime.now().withNano(0);
 
-        JsonNode rule = response(identity(post("/api/v1/rules"), CEO)
+        JsonNode rule = response(identity(post("/api/v1/rules"), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {"code":"WP-REAL-SUBMIT-RULE","name":"Work record submitted rule",
                          "eventType":"WorkRecordSubmitted"}
                         """), 201);
         String ruleId = rule.path("id").asText();
-        JsonNode ruleVersion = response(identity(post("/api/v1/rules/{id}/versions", ruleId), CEO)
+        JsonNode ruleVersion = response(identity(post("/api/v1/rules/{id}/versions", ruleId), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {
@@ -99,11 +107,11 @@ class WorkPackageFlowIntegrationTest {
                         }
                         """), 201);
         String ruleVersionId = ruleVersion.path("id").asText();
-        response(identity(post("/api/v1/rules/{id}/versions/{versionId}/publish", ruleId, ruleVersionId), CEO)
+        response(identity(post("/api/v1/rules/{id}/versions/{versionId}/publish", ruleId, ruleVersionId), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"expectedVersion\":0,\"effectiveFrom\":\"" + now.minusMinutes(1) + "\"}"), 200);
 
-        JsonNode definition = response(identity(post("/api/v1/work-packages"), CEO)
+        JsonNode definition = response(identity(post("/api/v1/work-packages"), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {
@@ -115,12 +123,12 @@ class WorkPackageFlowIntegrationTest {
                         """.formatted(FRONT_POSITION, HANGZHOU_HOTEL)), 201);
         String workPackageId = definition.path("id").asText();
 
-        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", workPackageId), CEO)
+        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", workPackageId), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"前台班次测试工作包 V1\"}"), 201);
         String versionId = version.path("id").asText();
 
-        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), CEO)
+        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -150,24 +158,24 @@ class WorkPackageFlowIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.itemCount").value(1));
 
-        mockMvc.perform(identity(get("/api/v1/work-packages/{id}", workPackageId), CEO))
+        mockMvc.perform(identity(get("/api/v1/work-packages/{id}", workPackageId), PLATFORM_ADMIN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.latestVersion.items[0].weekdays").isArray())
                 .andExpect(jsonPath("$.latestVersion.items[0].weekdays").isEmpty());
 
         mockMvc.perform(identity(post("/api/v1/work-packages/{id}/versions/{versionId}/validate",
-                        workPackageId, versionId), CEO))
+                        workPackageId, versionId), PLATFORM_ADMIN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.valid").value(true));
 
         mockMvc.perform(identity(post("/api/v1/work-packages/{id}/versions/{versionId}/publish",
-                        workPackageId, versionId), CEO)
+                        workPackageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"effectiveFrom\":\"" + now.minusMinutes(1) + "\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("PUBLISHED"));
 
-        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/allocations", workPackageId), CEO)
+        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/allocations", workPackageId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -180,7 +188,7 @@ class WorkPackageFlowIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.status").value("ACTIVE"));
 
-        JsonNode duty = response(identity(post("/api/v1/work-duty-periods"), CEO)
+        JsonNode duty = response(identity(post("/api/v1/work-duty-periods"), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {
@@ -260,7 +268,7 @@ class WorkPackageFlowIntegrationTest {
         LocalDate businessDate = LocalDate.now().plusYears(2);
         int otherWeekday = businessDate.getDayOfWeek().getValue() % 7 + 1;
         OffsetDateTime effectiveFrom = OffsetDateTime.now().minusMinutes(1).withNano(0);
-        JsonNode definition = response(identity(post("/api/v1/work-packages"), CEO)
+        JsonNode definition = response(identity(post("/api/v1/work-packages"), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {
@@ -271,12 +279,12 @@ class WorkPackageFlowIntegrationTest {
                         }
                         """.formatted(FRONT_POSITION, HANGZHOU_HOTEL)), 201);
         String workPackageId = definition.path("id").asText();
-        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", workPackageId), CEO)
+        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", workPackageId), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"All position configuration test V1\"}"), 201);
         String versionId = version.path("id").asText();
 
-        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), CEO)
+        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -326,11 +334,11 @@ class WorkPackageFlowIntegrationTest {
                 .andExpect(jsonPath("$.itemCount").value(4));
 
         mockMvc.perform(identity(post("/api/v1/work-packages/{id}/versions/{versionId}/publish",
-                        workPackageId, versionId), CEO)
+                        workPackageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"effectiveFrom\":\"" + effectiveFrom + "\"}"))
                 .andExpect(status().isOk());
-        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/allocations", workPackageId), CEO)
+        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/allocations", workPackageId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -339,7 +347,7 @@ class WorkPackageFlowIntegrationTest {
                                 }
                                 """.formatted(versionId, FRONT_ASSIGNMENT, FRONT_DEPARTMENT, businessDate.minusDays(1))))
                 .andExpect(status().isCreated());
-        mockMvc.perform(identity(post("/api/v1/work-expectations/actions/generate"), CEO)
+        mockMvc.perform(identity(post("/api/v1/work-expectations/actions/generate"), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -372,7 +380,7 @@ class WorkPackageFlowIntegrationTest {
 
     @Test
     void draftVersionCanReplaceExistingItemsAndTheirGuardedRelations() throws Exception {
-        JsonNode definition = response(identity(post("/api/v1/work-packages"), CEO)
+        JsonNode definition = response(identity(post("/api/v1/work-packages"), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {
@@ -381,7 +389,7 @@ class WorkPackageFlowIntegrationTest {
                         }
                         """.formatted(FRONT_POSITION, HANGZHOU_HOTEL)), 201);
         String workPackageId = definition.path("id").asText();
-        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", workPackageId), CEO)
+        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", workPackageId), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"Draft replacement test V1\"}"), 201);
         String versionId = version.path("id").asText();
@@ -402,11 +410,11 @@ class WorkPackageFlowIntegrationTest {
                   }]
                 }
                 """.formatted(HANGZHOU_HOTEL, FRONT_FORM_VERSION, FRONT_STANDARD_VERSION, SUPERVISOR_POSITION);
-        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), CEO)
+        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON).content(firstPayload))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.itemCount").value(1));
-        mockMvc.perform(identity(get("/api/v1/work-packages/{id}", workPackageId), CEO))
+        mockMvc.perform(identity(get("/api/v1/work-packages/{id}", workPackageId), PLATFORM_ADMIN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.latestVersion.items[0].submission_policy.maxAttachments").value(10))
                 .andExpect(jsonPath("$.latestVersion.items[0].report_policy").isMap())
@@ -431,7 +439,7 @@ class WorkPackageFlowIntegrationTest {
                   ]
                 }
                 """.formatted(HANGZHOU_HOTEL, FRONT_FORM_VERSION, FRONT_FORM_VERSION);
-        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), CEO)
+        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}", workPackageId, versionId), PLATFORM_ADMIN)
                         .contentType(MediaType.APPLICATION_JSON).content(replacementPayload))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.itemCount").value(2));

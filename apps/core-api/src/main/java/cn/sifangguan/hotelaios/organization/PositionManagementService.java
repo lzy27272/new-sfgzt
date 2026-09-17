@@ -36,6 +36,11 @@ public class PositionManagementService {
     );
     private static final Set<String> PROTECTED_SYSTEM_POSITION_ROLES =
             Set.of("CEO", "PLATFORM_ADMIN", "HR_KPI_ADMIN");
+    private static final Set<String> ADMIN_ONLY_CONFIGURATION_PERMISSIONS = Set.of(
+            "ui.module.rules", "ui.module.work-packages",
+            "rule.manage", "rule.simulate", "rule.publish",
+            "work-package.manage", "work-package.publish", "work-package.allocate"
+    );
 
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
@@ -1174,7 +1179,8 @@ public class PositionManagementService {
     }
 
     private static boolean isPositionRestrictedPermission(String permissionCode) {
-        return "executive-task.read".equals(permissionCode)
+        return ADMIN_ONLY_CONFIGURATION_PERMISSIONS.contains(permissionCode)
+                || "executive-task.read".equals(permissionCode)
                 || "executive-task.assign".equals(permissionCode)
                 || "dashboard.ceo".equals(permissionCode);
     }
@@ -1190,6 +1196,10 @@ public class PositionManagementService {
                 && (position == null || !Set.of("CEO", "GROUP_CHAIRMAN").contains(position.roleCode()))) {
             return "仅集团总经理或董事长岗位可配置";
         }
+        if (ADMIN_ONLY_CONFIGURATION_PERMISSIONS.contains(permissionCode)
+                && (position == null || !Set.of("PLATFORM_ADMIN", "GROUP_ADMIN").contains(position.roleCode()))) {
+            return "仅平台管理员岗位可配置";
+        }
         return null;
     }
 
@@ -1200,6 +1210,10 @@ public class PositionManagementService {
     ) {
         Set<String> restricted = new LinkedHashSet<>();
         for (String permissionCode : requested) {
+            if (ADMIN_ONLY_CONFIGURATION_PERMISSIONS.contains(permissionCode)
+                    && !Set.of("PLATFORM_ADMIN", "GROUP_ADMIN").contains(roleCode)) {
+                restricted.add(permissionCode);
+            }
             if (("executive-task.read".equals(permissionCode)
                     || "executive-task.assign".equals(permissionCode))
                     && !("GROUP_CHAIRMAN".equals(positionCode)
@@ -1221,6 +1235,9 @@ public class PositionManagementService {
     ) {
         Set<String> restricted = restrictedPermissionCodes(positionCode, roleCode, requested);
         if (restricted.isEmpty()) return;
+        if (restricted.stream().anyMatch(ADMIN_ONLY_CONFIGURATION_PERMISSIONS::contains)) {
+            throw new IllegalArgumentException("企业规则中心和工作包中心仅允许平台管理员岗位配置");
+        }
         if (restricted.contains("executive-task.read")
                 || restricted.contains("executive-task.assign")) {
             throw new IllegalArgumentException(

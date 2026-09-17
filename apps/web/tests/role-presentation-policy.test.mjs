@@ -46,6 +46,14 @@ function migrationRoleModuleMatrix() {
     generalManagerModules.splice(generalManagerModules.indexOf('hotel-dashboard') + 1, 0, 'my-work')
     result.set('GENERAL_MANAGER', [...new Set(generalManagerModules)])
   }
+  const adminOnlyMigration = readFileSync(new URL('../../../database/migrations/V54__workbench_pagination_indexes_and_admin_only_configuration.sql', import.meta.url), 'utf8')
+  if (adminOnlyMigration.includes("'ui.module.rules', 'ui.module.work-packages'")) {
+    for (const [roleCode, moduleIds] of result) {
+      if (!['PLATFORM_ADMIN', 'GROUP_ADMIN'].includes(roleCode)) {
+        result.set(roleCode, moduleIds.filter((moduleId) => !['rules', 'work-packages'].includes(moduleId)))
+      }
+    }
+  }
   return result
 }
 
@@ -104,8 +112,10 @@ test('mobile five-tab labels and targets match the consolidated workbench matrix
     GENERAL_MANAGER: [['工作台', 'workbench'], ['日报', 'daily-reports-my'], ['日运营', 'daily-operations'], ['KPI', 'kpi-center'], ['我的', 'all-functions']],
     OTA_OPERATION_MANAGER: [['工作台', 'workbench'], ['日报', 'daily-reports-my'], ['日运营', 'daily-operations'], ['KPI', 'kpi-center'], ['我的', 'all-functions']],
     HR_KPI_ADMIN: [['工作台', 'workbench'], ['人员', 'organization'], ['入职', 'wecom-onboarding'], ['KPI', 'kpi-center'], ['我的', 'all-functions']],
+    HR_ADMINISTRATION_SUPERVISOR: [['工作台', 'workbench'], ['人员', 'organization'], ['团队', 'team-work'], ['消息', 'notifications'], ['我的', 'all-functions']],
+    HR_ADMINISTRATION: [['工作台', 'workbench'], ['人员', 'organization'], ['企微绑定', 'wecom-bindings'], ['消息', 'notifications'], ['我的', 'all-functions']],
     GROUP_VICE_PRESIDENT: [['工作台', 'workbench'], ['日报', 'daily-reports-my'], ['日运营', 'daily-operations'], ['KPI', 'kpi-center'], ['我的', 'all-functions']],
-    GROUP_CHAIRMAN: [['工作台', 'workbench'], ['日报', 'daily-reports-my'], ['日运营', 'daily-operations'], ['KPI', 'kpi-center'], ['我的', 'account-self-service']],
+    GROUP_CHAIRMAN: [['工作台', 'workbench'], ['日报', 'daily-reports-my'], ['日运营', 'daily-operations'], ['消息', 'notifications'], ['我的', 'account-self-service']],
     CEO: [['工作台', 'workbench'], ['日报', 'daily-reports-my'], ['日运营', 'daily-operations'], ['KPI', 'kpi-center'], ['我的', 'all-functions']],
     PLATFORM_ADMIN: [['工作台', 'workbench'], ['工作包', 'work-packages'], ['系统配置', 'organization'], ['规则', 'rules'], ['我的', 'all-functions']],
   }
@@ -120,6 +130,20 @@ test('mobile five-tab labels and targets match the consolidated workbench matrix
   assert.deepEqual(ceoTabs.map((tab) => tab.slot), ['primary', 'secondary', 'domain', 'notifications', 'profile'])
 })
 
+test('every frozen mobile tab resolves to a module available to that role', () => {
+  const specialTargets = new Set(['all-functions', 'account-self-service'])
+  for (const roleCode of Object.keys(expectedCodes)) {
+    const policy = resolveRolePresentationPolicy(roleCode)
+    const modules = new Set(policy.desktopModuleIds ?? [])
+    for (const tab of policy.mobileTabs) {
+      assert.ok(
+        specialTargets.has(tab.target) || modules.has(desktopModuleForRoute(tab.target)),
+        `${roleCode}: ${tab.label} -> ${tab.target}`,
+      )
+    }
+  }
+})
+
 test('desktop module allowlists match every frozen role template', () => {
   const cases = {
     FRONT_DESK: ['workbench', 'my-work', 'tasks', 'daily-reports-my', 'evaluations', 'kpi-center', 'notifications', 'all-functions'],
@@ -128,12 +152,12 @@ test('desktop module allowlists match every frozen role template', () => {
     FRONT_OFFICE_SUPERVISOR: ['workbench', 'my-work', 'team-work', 'tasks', 'daily-reports-my', 'daily-operations', 'evaluations', 'kpi-center', 'notifications', 'all-functions'],
     HOUSEKEEPING_SUPERVISOR: ['workbench', 'my-work', 'team-work', 'tasks', 'daily-reports-my', 'daily-operations', 'evaluations', 'kpi-center', 'notifications', 'all-functions'],
     ASSISTANT_GENERAL_MANAGER: ['workbench', 'hotel-dashboard', 'team-work', 'tasks', 'daily-reports-my', 'daily-report-templates', 'daily-operations', 'evaluations', 'kpi-center', 'notifications', 'all-functions'],
-    GENERAL_MANAGER: ['workbench', 'hotel-dashboard', 'my-work', 'team-work', 'tasks', 'daily-reports-my', 'daily-operations', 'kpi-center', 'rules', 'evaluations', 'notifications', 'all-functions'],
-    OTA_OPERATION_MANAGER: ['workbench', 'operations-dashboard', 'tasks', 'daily-reports-my', 'daily-operations', 'kpi-center', 'rules', 'notifications', 'all-functions'],
+    GENERAL_MANAGER: ['workbench', 'hotel-dashboard', 'my-work', 'team-work', 'tasks', 'daily-reports-my', 'daily-operations', 'kpi-center', 'evaluations', 'notifications', 'all-functions'],
+    OTA_OPERATION_MANAGER: ['workbench', 'operations-dashboard', 'tasks', 'daily-reports-my', 'daily-operations', 'kpi-center', 'notifications', 'all-functions'],
     HR_KPI_ADMIN: ['workbench', 'tasks', 'organization', 'wecom-bindings', 'wecom-onboarding', 'kpi-center', 'notifications', 'all-functions'],
-    GROUP_VICE_PRESIDENT: ['workbench', 'operations-dashboard', 'tasks', 'daily-reports-my', 'daily-operations', 'kpi-center', 'work-packages', 'rules', 'notifications', 'all-functions'],
+    GROUP_VICE_PRESIDENT: ['workbench', 'operations-dashboard', 'tasks', 'daily-reports-my', 'daily-operations', 'kpi-center', 'notifications', 'all-functions'],
     GROUP_CHAIRMAN: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'team-work', 'tasks', 'daily-reports-my', 'daily-operations', 'evaluations', 'notifications'],
-    CEO: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'investments', 'work-packages', 'team-work', 'tasks', 'daily-reports-my', 'daily-report-templates', 'daily-operations', 'kpi-center', 'rules', 'evaluations', 'templates', 'organization', 'wecom-bindings', 'wecom-onboarding', 'notifications', 'all-functions'],
+    CEO: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'investments', 'team-work', 'tasks', 'daily-reports-my', 'daily-report-templates', 'daily-operations', 'kpi-center', 'evaluations', 'templates', 'organization', 'wecom-bindings', 'wecom-onboarding', 'notifications', 'all-functions'],
     PLATFORM_ADMIN: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'investments', 'work-packages', 'my-work', 'team-work', 'tasks', 'daily-reports-my', 'daily-report-templates', 'daily-operations', 'kpi-center', 'rules', 'evaluations', 'templates', 'organization', 'wecom-webhooks', 'wecom-bindings', 'wecom-onboarding', 'notifications', 'all-functions'],
   }
   for (const [roleCode, expected] of Object.entries(cases)) {

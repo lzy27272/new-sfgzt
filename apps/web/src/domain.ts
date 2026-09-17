@@ -121,6 +121,7 @@ export type WorkExpectation = {
   workPackageVersionId?: string
   workPackageItemId?: string
   recordId?: string
+  firstSubmittedAt?: string
   latestSubmittedAt?: string
   rowVersion?: number
   evaluationOutcome?: string

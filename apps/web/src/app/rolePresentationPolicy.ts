@@ -69,7 +69,7 @@ const chairmanTabs = (): readonly MobilePresentationTab[] => Object.freeze([
   Object.freeze({ slot: 'primary', label: '工作台', target: 'workbench' }),
   Object.freeze({ slot: 'secondary', label: '日报', target: 'daily-reports-my' }),
   Object.freeze({ slot: 'domain', label: '日运营', target: 'daily-operations' }),
-  Object.freeze({ slot: 'notifications', label: 'KPI', target: 'kpi-center' }),
+  Object.freeze({ slot: 'notifications', label: '消息', target: 'notifications' }),
   Object.freeze({ slot: 'profile', label: '我的', target: 'account-self-service' }),
 ])
 
@@ -81,11 +81,19 @@ const platformTabs = (): readonly MobilePresentationTab[] => Object.freeze([
   Object.freeze({ slot: 'profile', label: '我的', target: 'all-functions' }),
 ])
 
-const hrTabs = (domainLabel: string, domainTarget: MobilePresentationTarget): readonly MobilePresentationTab[] => Object.freeze([
+const hrTabs = (
+  domainLabel: string,
+  domainTarget: MobilePresentationTarget,
+  performanceTarget = true,
+): readonly MobilePresentationTab[] => Object.freeze([
   Object.freeze({ slot: 'primary', label: '工作台', target: 'workbench' }),
   Object.freeze({ slot: 'secondary', label: '人员', target: 'organization' }),
   Object.freeze({ slot: 'domain', label: domainLabel, target: domainTarget }),
-  Object.freeze({ slot: 'notifications', label: 'KPI', target: 'kpi-center' }),
+  Object.freeze({
+    slot: 'notifications',
+    label: performanceTarget ? 'KPI' : '消息',
+    target: performanceTarget ? 'kpi-center' : 'notifications',
+  }),
   Object.freeze({ slot: 'profile', label: '我的', target: 'all-functions' }),
 ])
 
@@ -135,10 +143,10 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
   HOTEL_MANAGER: Object.freeze({
     key: 'HOTEL_MANAGER',
     knownRole: true,
-    focus: '全店任务、日报、经营指标、规则与验收',
+    focus: '全店任务、日报、经营指标与验收',
     desktopModuleIds: modules(
       'workbench', 'hotel-dashboard', 'my-work', 'team-work', 'tasks', 'daily-reports-my',
-      'daily-operations', 'kpi-center', 'rules', 'evaluations', 'notifications',
+      'daily-operations', 'kpi-center', 'evaluations', 'notifications',
       'all-functions',
     ),
     mobileTabs: tabs('日运营', 'daily-operations'),
@@ -149,7 +157,7 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
     focus: '授权区域的跨店任务、日运营、OTA巡检与汇总',
     desktopModuleIds: modules(
       'workbench', 'operations-dashboard', 'tasks', 'daily-reports-my',
-      'daily-operations', 'kpi-center', 'rules', 'notifications', 'all-functions',
+      'daily-operations', 'kpi-center', 'notifications', 'all-functions',
     ),
     mobileTabs: tabs('日运营', 'daily-operations'),
   }),
@@ -171,7 +179,7 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
       'workbench', 'team-work', 'tasks', 'organization', 'wecom-bindings',
       'wecom-onboarding', 'notifications', 'all-functions',
     ),
-    mobileTabs: hrTabs('团队', 'team-work'),
+    mobileTabs: hrTabs('团队', 'team-work', false),
   }),
   HR_ADMINISTRATION: Object.freeze({
     key: 'HR_ADMINISTRATION',
@@ -181,7 +189,7 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
       'workbench', 'tasks', 'organization', 'wecom-bindings',
       'wecom-onboarding', 'notifications', 'all-functions',
     ),
-    mobileTabs: hrTabs('企微绑定', 'wecom-bindings'),
+    mobileTabs: hrTabs('企微绑定', 'wecom-bindings', false),
   }),
   GROUP_CHAIRMAN: Object.freeze({
     key: 'GROUP_CHAIRMAN',
@@ -197,10 +205,10 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
   GROUP_VICE_PRESIDENT: Object.freeze({
     key: 'GROUP_VICE_PRESIDENT',
     knownRole: true,
-    focus: '授权范围的集团经营、跨店任务、日报与规则',
+    focus: '授权范围的集团经营、跨店任务与日报',
     desktopModuleIds: modules(
       'workbench', 'operations-dashboard', 'tasks', 'daily-reports-my',
-      'daily-operations', 'kpi-center', 'work-packages', 'rules',
+      'daily-operations', 'kpi-center',
       'notifications', 'all-functions',
     ),
     mobileTabs: tabs('日运营', 'daily-operations'),
@@ -208,11 +216,11 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
   CEO: Object.freeze({
     key: 'CEO',
     knownRole: true,
-    focus: '集团经营决策、投资测算、标准规则与重大审批',
+    focus: '集团经营决策、投资测算与重大审批',
     desktopModuleIds: modules(
       'workbench', 'hotel-dashboard', 'operations-dashboard', 'investments',
-      'work-packages', 'team-work', 'tasks', 'daily-reports-my',
-      'daily-report-templates', 'daily-operations', 'kpi-center', 'rules',
+      'team-work', 'tasks', 'daily-reports-my',
+      'daily-report-templates', 'daily-operations', 'kpi-center',
       'evaluations', 'templates',
       'organization', 'wecom-bindings', 'wecom-onboarding', 'notifications',
       'all-functions',
