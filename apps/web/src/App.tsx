@@ -1,7 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, demoFallbackEnabled, establishFederatedSession, hasAccessToken, login, logout } from './api/client'
 import { consumeLogoutEntry } from './app/logoutEntry'
-import { bootstrapAssignmentId, bootstrapAssignments, canLoadSecondaryResources } from './app/authBootstrap'
+import {
+  bootstrapAssignmentId,
+  bootstrapAssignments,
+  canLoadSecondaryResources,
+  canRenderAuthenticatedShell,
+  canUseStoredAcceptanceRole,
+} from './app/authBootstrap'
 import { validateLandscapeEvidence } from './app/imageEvidence'
 import {
   addWorkRecordSupplement,
@@ -1009,6 +1015,33 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
   </main>
 }
 
+function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
+  error?: string
+  onRetry: () => void
+  onReturnToLogin?: () => void
+}) {
+  return <main className="login-auth-screen">
+    <div className="login-auth-layout">
+      <section className="login-auth-brand" aria-label={product.name}>
+        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
+        <div className="login-auth-intro"><h1>{product.name}</h1><p>系统正在根据登录账号解析组织、任职与功能权限。</p></div>
+        <small className="login-auth-version">{product.version}</small>
+      </section>
+      <section className="login-auth-panel">
+        <div className="login-auth-card" role="status" aria-live="polite">
+          <header><h2>{error ? '无法读取账号权限' : '正在验证登录状态'}</h2><p>{error ?? '验证完成后将自动进入当前账号对应的岗位工作台。'}</p></header>
+          {!error && <div className="state-card"><div className="spinner" /><strong>正在读取身份与权限</strong></div>}
+          {error && <>
+            <button type="button" className="primary login-auth-submit" onClick={onRetry}>重新验证</button>
+            {onReturnToLogin && <button type="button" className="secondary" onClick={onReturnToLogin}>返回账号登录</button>}
+          </>}
+        </div>
+        {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
+      </section>
+    </div>
+  </main>
+}
+
 function ChangePasswordDialog({ identity, onClose, onChanged }: { identity: RoleContext; onClose: () => void; onChanged: () => void }) {
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -1061,7 +1094,9 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const [route, navigate] = useHashRoute()
   const { view, params: routeParams, sectionId } = route
   let storedRole: string | null = null
-  try { storedRole = localStorage.getItem(roleStorageKey) } catch { /* private mode may disable storage */ }
+  if (canUseStoredAcceptanceRole(authMode)) {
+    try { storedRole = localStorage.getItem(roleStorageKey) } catch { /* private mode may disable storage */ }
+  }
   const [identity, setIdentity] = useState<RoleContext>(() => roleContexts.find((role) => role.key === storedRole) ?? roleContexts.find((role) => role.key === 'front-desk') ?? roleContexts[0])
   const fallbackIdentity: IdentitySnapshot = useMemo(() => ({
     accountId: identity.actorId,
@@ -1213,7 +1248,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     || !useRoleDefaultsFallback
     || isRouteAllowedByRoleDefaults(presentationRoleCode, view, true)
   const page = useMemo(() => {
-    if (authMode === 'bearer' && (me.loading || me.error)) {
+    if (!canRenderAuthenticatedShell(authMode, me.loading, me.error)) {
       return <section className="page-section"><div className="empty-state"><strong>{me.error ? '身份与权限读取失败' : '正在读取身份与权限'}</strong><span>{me.error ?? '系统将在权限解析完成后加载业务页面，避免使用错误的岗位或组织范围。'}</span></div></section>
     }
     if (isInvestmentFeatureRoute(view)) {
@@ -1254,10 +1289,10 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
         orgName={activeIdentity.orgName}
         go={navigate}
         resolveTarget={navigationTarget}
-        onChangePassword={authMode === 'bearer' ? () => setChangingPassword(true) : undefined}
-        onLogout={authMode === 'bearer' ? onLogout : undefined}
+        onChangePassword={authMode !== 'dev-header' ? () => setChangingPassword(true) : undefined}
+        onLogout={authMode !== 'dev-header' ? onLogout : undefined}
       />; break
-      case 'account-self-service': legacyPage = <AccountSelfService roleLabel={activeIdentity.label} orgName={activeIdentity.orgName} onChangePassword={authMode === 'bearer' ? () => setChangingPassword(true) : undefined} onLogout={authMode === 'bearer' ? onLogout : undefined} />; break
+      case 'account-self-service': legacyPage = <AccountSelfService roleLabel={activeIdentity.label} orgName={activeIdentity.orgName} onChangePassword={authMode !== 'dev-header' ? () => setChangingPassword(true) : undefined} onLogout={authMode !== 'dev-header' ? onLogout : undefined} />; break
       case 'hotel-dashboard': legacyPage = <HotelDashboardPage identity={activeIdentity} routeParams={routeParams} go={navigate} />; break
       case 'operations-dashboard': legacyPage = <OperationsDashboardPage identity={activeIdentity} />; break
       case 'work-packages': legacyPage = <WorkPackageCenter identity={activeIdentity} permissions={activePermissions} />; break
@@ -1331,6 +1366,10 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     navigate('workbench')
   }
 
+  if (!canRenderAuthenticatedShell(authMode, me.loading, me.error)) {
+    return <SessionBootstrapPage error={me.error} onRetry={me.reload} onReturnToLogin={onLogout} />
+  }
+
   return <div className="shell">
     <aside className="sidebar"><div className="brand-mark"><div>四</div><span><strong>{product.name}</strong><small>{product.edition} · {product.editionLabel}</small></span></div>
       <nav>{visibleNavigation.map((item, index) => <div key={item.id}>{item.group && <span className="nav-group">{item.group}</span>}<button className={sectionId === (item.sectionId ?? item.id) ? 'active' : ''} onClick={() => navigate(navigationTarget(item.id))}><i>{item.icon}</i><span>{item.id === 'workbench' ? `${activeIdentity.label}工作台` : item.label}</span>{item.id === 'notifications' && unreadCount > 0 && <b>{unreadCount}</b>}</button>{index === 0 && <div className="nav-separator" />}</div>)}</nav>
@@ -1342,8 +1381,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       {isFullAccountLevel && <span className="mobile-current-context">{activeIdentity.label}</span>}
       {canReadSidebarNotifications && <button className="bell" onClick={() => navigate('notifications')} aria-label={unreadCount > 0 ? `消息，${unreadCount}条未读` : '消息'}>消息{unreadCount > 0 && <b>{unreadCount}</b>}</button>}
       <div className="user"><span>{activeIdentity.userName.slice(-1)}</span><div><strong>{activeIdentity.userName}</strong><small>{activeIdentity.label}</small></div></div>
-      {authMode === 'bearer' && <button className="logout-button" onClick={() => setChangingPassword(true)}>修改密码</button>}
-      {authMode === 'bearer' && <button className="logout-button" onClick={onLogout}>退出</button>}
+      {authMode !== 'dev-header' && <button className="logout-button" onClick={() => setChangingPassword(true)}>修改密码</button>}
+      {authMode !== 'dev-header' && <button className="logout-button" onClick={onLogout}>退出</button>}
     </header>
       {demoFallbackEnabled && <div className="demo-warning">已显式启用演示回退：仅当真实 API 请求失败时展示演示数据；API 返回空结果时仍显示空状态。</div>}
       <div className="canvas">{page}</div>
@@ -1360,7 +1399,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(() => {
-    if (authMode === 'bearer' && consumeLogoutEntry(clearAccessToken)) return false
+    if (authMode !== 'dev-header' && consumeLogoutEntry(clearAccessToken)) return false
     return authMode !== 'bearer' || initialWecomSessionBootstrap || hasAccessToken()
   })
   const [wecomTaskEntry, setWecomTaskEntry] = useState(initialWecomTaskEntry)

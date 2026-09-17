@@ -64,5 +64,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Run frontend regression tests
         run: pnpm test
-      - name: Type-check and build production bundle
-        run: pnpm build
+      - name: Type-check and build Pilot production bundle
+        run: pnpm build:pilot
+      - name: Verify Pilot authentication bundle
+        run: grep -R --include='*.js' -Fq 'X-Hotel-AI-Authorization' dist/assets

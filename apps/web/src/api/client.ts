@@ -1,3 +1,5 @@
+import { shouldExpireAuthenticatedSession } from '../app/authBootstrap'
+
 export type ApiIdentity = {
   tenantId: string
   actorId: string
@@ -32,6 +34,8 @@ const TENANT_ID = import.meta.env.VITE_TENANT_ID ?? '10000000-0000-0000-0000-000
 // Federated entry tokens are intentionally scoped to the current page lifetime.
 // Unlike the internal Pilot login token, they must never be written to browser storage.
 let ephemeralAccessToken: string | undefined
+let sessionExpiryNotified = false
+let sessionGeneration = 0
 
 const allowDemoQuery = import.meta.env.VITE_ALLOW_DEMO_QUERY === 'true' ||
   (import.meta.env.VITE_ALLOW_DEMO_QUERY === undefined && import.meta.env.DEV)
@@ -74,6 +78,7 @@ export function hasAccessToken(): boolean {
 
 export function clearAccessToken(): void {
   ephemeralAccessToken = undefined
+  sessionGeneration += 1
   try {
     window.localStorage.removeItem(UAT_ACCESS_TOKEN_STORAGE_KEY)
     window.localStorage.removeItem(FEDERATED_SESSION_STORAGE_KEY)
@@ -83,6 +88,8 @@ export function clearAccessToken(): void {
 
 export function establishFederatedSession(accessToken?: string, expiresAt?: string): void {
   ephemeralAccessToken = accessToken || undefined
+  sessionExpiryNotified = false
+  sessionGeneration += 1
   try { window.localStorage.removeItem(UAT_ACCESS_TOKEN_STORAGE_KEY) } catch { /* storage may be disabled */ }
   const expiry = expiresAt ? Date.parse(expiresAt) : Number.NaN
   if (Number.isFinite(expiry) && expiry > Date.now()) {
@@ -125,6 +132,8 @@ export async function login(loginName: string, password: string): Promise<LoginR
   }
   const session = await response.json() as LoginResponse
   ephemeralAccessToken = session.accessToken
+  sessionExpiryNotified = false
+  sessionGeneration += 1
   try { window.sessionStorage.removeItem(FEDERATED_SESSION_STORAGE_KEY) } catch { /* storage may be disabled */ }
   window.localStorage.removeItem(UAT_ACCESS_TOKEN_STORAGE_KEY)
   return session
@@ -164,11 +173,36 @@ function authenticationHeaders(identity: ApiIdentity): HeadersInit {
       ...assignmentHeader,
     }
   }
-  return assignmentHeader
+  // Cookie/SSO deployments still expose the local account login page as a
+  // recovery path. When that endpoint returns a page-scoped JWT, use the
+  // standard header while continuing to accept the HttpOnly cookie normally.
+  return {
+    ...(ephemeralAccessToken ? { Authorization: `Bearer ${ephemeralAccessToken}` } : {}),
+    ...assignmentHeader,
+  }
+}
+
+function expireAuthenticatedSession(requestSessionGeneration: number): void {
+  // A request started under a previous login must not invalidate a newer
+  // session if its delayed 401 arrives after the user signs in again.
+  if (requestSessionGeneration !== sessionGeneration) return
+  clearAccessToken()
+  if (sessionExpiryNotified) return
+  sessionExpiryNotified = true
+  window.dispatchEvent(new Event('hotel-ai-os:auth-expired'))
+  // The browser cannot delete an HttpOnly session cookie itself. Logout is a
+  // best-effort same-origin cleanup and deliberately bypasses apiRequest so a
+  // rejected session cannot recurse through this handler.
+  void fetch(`${API_BASE}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { Accept: 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
+  }).catch(() => undefined)
 }
 
 export async function apiRequest<T>(path: string, identity: ApiIdentity, init: RequestInit = {}): Promise<T> {
   const correlationId = crypto.randomUUID()
+  const requestSessionGeneration = sessionGeneration
   const hasJsonBody = Boolean(init.body) && !(init.body instanceof FormData)
   const response = await fetch(`${API_BASE}${path.startsWith('/') ? path : `/${path}`}`, {
     ...init,
@@ -185,9 +219,8 @@ export async function apiRequest<T>(path: string, identity: ApiIdentity, init: R
   if (!response.ok) {
     const problem = await response.json().catch(() => ({ detail: response.statusText })) as Record<string, unknown>
     const message = String(problem.detail ?? problem.message ?? `请求失败（HTTP ${response.status}）`)
-    if (response.status === 401 && AUTH_MODE === 'bearer') {
-      clearAccessToken()
-      window.dispatchEvent(new Event('hotel-ai-os:auth-expired'))
+    if (shouldExpireAuthenticatedSession(AUTH_MODE, response.status)) {
+      expireAuthenticatedSession(requestSessionGeneration)
     }
     throw new ApiError(response.status, message, problem)
   }
@@ -197,6 +230,7 @@ export async function apiRequest<T>(path: string, identity: ApiIdentity, init: R
 }
 
 export async function apiBlob(path: string, identity: ApiIdentity, init: RequestInit = {}): Promise<Blob> {
+  const requestSessionGeneration = sessionGeneration
   const hasJsonBody = Boolean(init.body) && !(init.body instanceof FormData)
   const response = await fetch(`${API_BASE}${path.startsWith('/') ? path : `/${path}`}`, {
     ...init,
@@ -211,9 +245,8 @@ export async function apiBlob(path: string, identity: ApiIdentity, init: Request
   })
   if (!response.ok) {
     const problem = await response.json().catch(() => ({ detail: response.statusText })) as Record<string, unknown>
-    if (response.status === 401 && AUTH_MODE === 'bearer') {
-      clearAccessToken()
-      window.dispatchEvent(new Event('hotel-ai-os:auth-expired'))
+    if (shouldExpireAuthenticatedSession(AUTH_MODE, response.status)) {
+      expireAuthenticatedSession(requestSessionGeneration)
     }
     throw new ApiError(response.status, String(problem.detail ?? problem.message ?? `请求失败（HTTP ${response.status}）`), problem)
   }

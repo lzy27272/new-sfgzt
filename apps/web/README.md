@@ -45,7 +45,7 @@ Vite 将 `/api` 代理到 `http://localhost:8080`。
 - 前端首先调用 `GET /api/v1/iam/me`。
 - 菜单、账号名称、有效任职和组织上下文以服务端返回结果为准。
 - `pnpm dev` 默认使用 `VITE_AUTH_MODE=dev-header`，只发送 `X-Tenant-Id` 与 `X-Actor-Id`。角色、权限和组织范围仍由服务端数据库解析。
-- 生产构建默认使用 `VITE_AUTH_MODE=server`；公网 Bearer JWT 默认通过 `X-Hotel-AI-Authorization` 发送，由 Caddy 转换为后端 `Authorization`。如部署环境直接连接 Core API，可用 `VITE_BEARER_HEADER` 显式覆盖。生产界面不会显示验收账号切换器。
+- 普通 `pnpm build` 默认使用 `VITE_AUTH_MODE=server`，仅适用于明确采用服务端 Cookie/SSO 会话的部署。当前公网 Pilot 必须使用 `pnpm build:pilot`；Bearer JWT 通过 `X-Hotel-AI-Authorization` 发送，由 Caddy 转换为后端 `Authorization`。如部署环境直接连接 Core API，可用 `VITE_BEARER_HEADER` 显式覆盖。生产界面不会显示验收账号切换器。
 - 切换任职只改变工作业务上下文，不在客户端授予权限。
 
 ### 企业微信任务入口 V1
@@ -70,7 +70,7 @@ pnpm dev
 ## 构建
 
 ```powershell
-pnpm build
+pnpm build:pilot
 ```
 
-`vite --configLoader runner` 用于兼容 Windows 受限工作区，不改变产物格式。
+该命令读取 `.env.pilot` 并强制 Bearer 登录；当前公网 Pilot 发布不得用普通 `pnpm build` 替代。`vite --configLoader runner` 用于兼容 Windows 受限工作区，不改变产物格式。

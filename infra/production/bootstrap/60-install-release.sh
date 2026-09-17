@@ -25,6 +25,11 @@ actual_index_sha="$(sha256sum "${stage_root}/web/index.html" | awk '{print $1}')
 test "${actual_jar_sha}" = "${expected_jar_sha}"
 test "${actual_index_sha}" = "${expected_index_sha}"
 
+if ! grep -R --include='*.js' -Fq 'X-Hotel-AI-Authorization' "${stage_root}/web/assets"; then
+  printf '%s\n' 'Refusing to install a Web bundle without the Pilot bearer-login contract. Build with pnpm build:pilot.' >&2
+  exit 1
+fi
+
 if test -e /opt/hotel-ai-os/current && test ! -L /opt/hotel-ai-os/current; then
   printf '%s\n' '/opt/hotel-ai-os/current is not a symlink.' >&2
   exit 1

@@ -192,7 +192,7 @@ try {
 
         Push-Location $webDir
         try {
-            & $pnpm build
+            & $pnpm 'build:pilot'
             if ($LASTEXITCODE -ne 0) { throw 'Frontend release build failed.' }
         } finally { Pop-Location }
     }
@@ -204,6 +204,13 @@ try {
     if (-not $jar) { throw 'Backend JAR was not found.' }
     if (-not (Test-Path -LiteralPath (Join-Path $webDir 'dist\index.html'))) {
         throw 'Frontend dist/index.html was not found.'
+    }
+    $webScripts = @(Get-ChildItem -LiteralPath (Join-Path $webDir 'dist\assets') -Filter '*.js' -File -ErrorAction SilentlyContinue)
+    $bearerHeaderPresent = $webScripts.Count -gt 0 -and [bool](
+        $webScripts | Select-String -SimpleMatch 'X-Hotel-AI-Authorization' -Quiet
+    )
+    if (-not $bearerHeaderPresent) {
+        throw 'Frontend release does not enforce the Pilot bearer-login contract. Run pnpm build:pilot in apps\web.'
     }
     if (-not (Test-Path -LiteralPath $openApiFile)) { throw 'docs/openapi.yaml was not found.' }
 

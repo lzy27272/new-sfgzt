@@ -54,13 +54,15 @@ cd apps/core-api
 mvn test
 ```
 
-前端生产构建：
+当前公网 Pilot 的前端生产构建（强制 Bearer 登录）：
 
 ```powershell
 cd apps/web
 pnpm install
-pnpm build
+pnpm build:pilot
 ```
+
+普通 `pnpm build` 使用服务端 Cookie/SSO 模式，只能用于明确采用该认证模式的部署，不能作为当前公网 Pilot 发布包。
 
 无依赖页面原型仍可直接打开：
 
