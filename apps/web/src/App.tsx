@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, demoFallbackEnabled, establishFederatedSession, hasAccessToken, login, logout } from './api/client'
 import { consumeLogoutEntry } from './app/logoutEntry'
 import {
@@ -88,6 +88,16 @@ import { WecomTaskEntryPage } from './features/wecom/WecomTaskEntry'
 import { buildAppHashLocation, consumeWecomSessionBootstrap, consumeWecomTaskEntry } from './features/wecom/entryRoute'
 import { consumeWecomBindingEntry } from './features/wecom/bindingEntryRoute'
 import { WecomBindingEnrollmentEntry } from './features/wecom/WecomBindingEnrollmentEntry'
+import {
+  buildResumableDraftKey,
+  fromStoredDraftFile,
+  isStoredDraftFile,
+  readResumableDraft,
+  removeResumableDraft,
+  toStoredDraftFile,
+  writeResumableDraft,
+  type StoredDraftFile,
+} from './app/resumableDrafts'
 import {
   AllFunctionsPage,
   MobileBottomNavigation,
@@ -304,12 +314,15 @@ function WorkTable({ items, own = false, onFill }: { items: WorkExpectation[]; o
 }
 
 type PendingWorkEvidence = {
+  draftFileId: string
   file: File
   captureSource: 'CAMERA' | 'FILE_PICKER'
   checkpointCode?: string
   evidenceInstanceKey?: string
   capturedAtClient?: string
 }
+
+type NewWorkEvidence = Omit<PendingWorkEvidence, 'draftFileId'>
 
 type WorkRecordFieldValue = string | number | boolean | string[]
 
@@ -319,6 +332,45 @@ type WorkRecordSaveProgress = {
   total: number
 }
 
+type WorkRecordFormDraft = {
+  schemaVersion: 1
+  completion: string
+  exception: string
+  nextAction: string
+  payload: Record<string, WorkRecordFieldValue>
+  serverRecordId?: string
+  serverRowVersion?: number
+}
+
+type StoredWorkEvidence = StoredDraftFile & Omit<PendingWorkEvidence, 'draftFileId' | 'file'>
+
+const hasWorkRecordDraftContent = (draft: WorkRecordFormDraft) => Boolean(
+  draft.serverRecordId
+  || draft.completion.length
+  || draft.exception.length
+  || draft.nextAction.length
+  || Object.values(draft.payload).some((value) => Array.isArray(value)
+    ? value.some((entry) => entry.length > 0)
+    : typeof value === 'string' ? value.length > 0 : value !== undefined),
+)
+
+const workEvidenceToStored = (entry: PendingWorkEvidence): StoredWorkEvidence => ({
+  ...toStoredDraftFile(entry.file, entry.draftFileId),
+  captureSource: entry.captureSource,
+  checkpointCode: entry.checkpointCode,
+  evidenceInstanceKey: entry.evidenceInstanceKey,
+  capturedAtClient: entry.capturedAtClient,
+})
+
+const storedToWorkEvidence = (entry: StoredWorkEvidence): PendingWorkEvidence => ({
+  draftFileId: entry.id,
+  file: fromStoredDraftFile(entry),
+  captureSource: entry.captureSource,
+  checkpointCode: entry.checkpointCode,
+  evidenceInstanceKey: entry.evidenceInstanceKey,
+  capturedAtClient: entry.capturedAtClient,
+})
+
 function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpectation; identity: RoleContext; onClose: () => void; onSaved: () => void }) {
   const [completion, setCompletion] = useState('')
   const [exception, setException] = useState('')
@@ -327,7 +379,10 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
   const [attachments, setAttachments] = useState<PendingWorkEvidence[]>([])
   const [validatingAttachments, setValidatingAttachments] = useState(false)
   const [existing, setExisting] = useState<WorkRecordDetail>()
-  const [loadingRecord, setLoadingRecord] = useState(Boolean(item.recordId))
+  const [loadingRecord, setLoadingRecord] = useState(true)
+  const [recordLoadFailed, setRecordLoadFailed] = useState(false)
+  const [draftHydrated, setDraftHydrated] = useState(false)
+  const [conflictingLocalForm, setConflictingLocalForm] = useState<WorkRecordFormDraft>()
   const [supplement, setSupplement] = useState('')
   const [saving, setSaving] = useState<'draft' | 'submit' | 'supplement'>()
   const [saveProgress, setSaveProgress] = useState<WorkRecordSaveProgress>()
@@ -337,10 +392,18 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
   const [ownerResting, setOwnerResting] = useState(false)
   const [delegationReason, setDelegationReason] = useState('')
   const [message, setMessage] = useState<string>()
+  const [draftNotice, setDraftNotice] = useState<string>()
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview>()
   const employeeId = identity.employeeId ?? item.employeeId
   const executionAssignmentId = identity.businessActorAssignmentId ?? item.assignmentId
   const assignmentOrgUnitId = identity.assignmentOrgUnitId
+  const workDraftParts = [identity.tenantId, identity.actorId, executionAssignmentId, item.id, item.businessDate]
+  const formDraftKey = buildResumableDraftKey('work-record-form', workDraftParts)
+  const filesDraftKey = buildResumableDraftKey('work-record-files', workDraftParts)
+  const activeRecordIdRef = useRef<string | undefined>(item.recordId)
+  const formDraftRef = useRef<WorkRecordFormDraft>({ schemaVersion: 1, completion: '', exception: '', nextAction: '', payload: {}, serverRecordId: item.recordId })
+  const filesDraftRef = useRef<StoredWorkEvidence[]>([])
+  const draftStorageReadyRef = useRef(false)
   const executionAllowed = !item.delegateAssignmentId || item.delegateAssignmentId === executionAssignmentId
   const canSubmit = item.orgUnitId && assignmentOrgUnitId && employeeId && executionAssignmentId && item.formVersionId && executionAllowed
   const properties = item.formSchema?.properties ?? {}
@@ -382,22 +445,48 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
       return { ...current, [requirement.instanceField!]: values }
     })
   }
+  const persistWorkFiles = (entries: PendingWorkEvidence[]) => {
+    const stored = entries.map(workEvidenceToStored)
+    filesDraftRef.current = stored
+    if (!draftStorageReadyRef.current) {
+      setMessage('设备草稿暂时无法读取，新增附件尚未在本机自动暂存；请保持页面打开并点击“保存草稿”。')
+      return
+    }
+    const operation = stored.length
+      ? writeResumableDraft(filesDraftKey, stored)
+      : removeResumableDraft(filesDraftKey)
+    void operation.catch((reason) => setMessage(reason instanceof Error ? reason.message : '照片暂存失败'))
+  }
   const appendAttachments = (entries: PendingWorkEvidence[]) => {
     const storedCount = existing?.status === 'DRAFT' ? existing.attachments.length : 0
-    const available = Math.max(0, policy.maxAttachments - storedCount - attachments.length)
-    if (entries.length > available) {
-      setMessage(`整单安全上限为 ${policy.maxAttachments} 个附件，本次仅保留前 ${available} 个。`)
-    }
-    if (!available) return
-    setAttachments((current) => [...current, ...entries.slice(0, available)])
+    setAttachments((current) => {
+      const available = Math.max(0, policy.maxAttachments - storedCount - current.length)
+      if (entries.length > available) {
+        setMessage(`整单安全上限为 ${policy.maxAttachments} 个附件，本次仅保留前 ${available} 个。`)
+      }
+      if (!available) return current
+      const next = [...current, ...entries.slice(0, available)]
+      persistWorkFiles(next)
+      return next
+    })
   }
-  const appendValidatedAttachments = async (entries: PendingWorkEvidence[]) => {
+  const removePendingAttachment = (draftFileId: string) => {
+    setAttachments((current) => {
+      const next = current.filter((entry) => entry.draftFileId !== draftFileId)
+      persistWorkFiles(next)
+      return next
+    })
+  }
+  const appendValidatedAttachments = async (entries: NewWorkEvidence[]) => {
     if (!entries.length) return
     setValidatingAttachments(true)
     setMessage(undefined)
     try {
       const result = await validateLandscapeEvidence(entries)
-      if (result.accepted.length) appendAttachments(result.accepted)
+      if (result.accepted.length) appendAttachments(result.accepted.map((entry) => ({
+        ...entry,
+        draftFileId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      })))
       if (result.rejected.length) {
         const first = result.rejected[0]
         const remaining = result.rejected.length - 1
@@ -408,20 +497,235 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
     }
   }
   useEffect(() => {
-    if (!item.recordId) return
+    let active = true
     setLoadingRecord(true)
-    void loadWorkRecord(identity, item.recordId).then((resource) => {
-      setExisting(resource.data)
-      if (['DRAFT', 'REJECTED'].includes(resource.data.status)) {
-        setCompletion(resource.data.completionStatement ?? '')
-        setException(resource.data.exceptionStatement ?? '')
-        setNextAction(resource.data.nextAction ?? '')
-        setPayload(Object.fromEntries(Object.entries(resource.data.payload).filter((entry): entry is [string, WorkRecordFieldValue] =>
-          ['string', 'number', 'boolean'].includes(typeof entry[1])
-          || (Array.isArray(entry[1]) && entry[1].every((value) => typeof value === 'string')))))
+    setDraftHydrated(false)
+    setConflictingLocalForm(undefined)
+    setRecordLoadFailed(false)
+    draftStorageReadyRef.current = false
+    void Promise.all([
+      readResumableDraft<WorkRecordFormDraft>(formDraftKey),
+      readResumableDraft<StoredWorkEvidence[]>(filesDraftKey),
+    ]).then(async ([localForm, localFiles]) => {
+      const localRecordId = localForm?.schemaVersion === 1 ? localForm.serverRecordId : undefined
+      const recordId = item.recordId ?? localRecordId
+      let serverRecord: WorkRecordDetail | undefined
+      let loadError: unknown
+      if (recordId) {
+        try { serverRecord = (await loadWorkRecord(identity, recordId)).data }
+        catch (reason) { loadError = reason }
       }
-    }).catch((error) => setMessage(error instanceof Error ? error.message : '工作记录加载失败')).finally(() => setLoadingRecord(false))
-  }, [identity.key, item.recordId])
+      if (!active) return
+      activeRecordIdRef.current = serverRecord?.id ?? recordId
+      setExisting(serverRecord)
+      const serverLocked = Boolean(serverRecord && ['SUBMITTED', 'APPROVED'].includes(serverRecord.status) && item.status !== 'FAILED')
+      const serverPayload = serverRecord ? Object.fromEntries(Object.entries(serverRecord.payload).filter((entry): entry is [string, WorkRecordFieldValue] =>
+        ['string', 'number', 'boolean'].includes(typeof entry[1])
+        || (Array.isArray(entry[1]) && entry[1].every((value) => typeof value === 'string')))) : {}
+      const serverForm: WorkRecordFormDraft | undefined = serverRecord ? {
+        schemaVersion: 1,
+        completion: serverRecord.completionStatement ?? '',
+        exception: serverRecord.exceptionStatement ?? '',
+        nextAction: serverRecord.nextAction ?? '',
+        payload: serverPayload,
+        serverRecordId: serverRecord.id,
+        serverRowVersion: serverRecord.rowVersion,
+      } : undefined
+      const validLocalForm = localForm?.schemaVersion === 1 ? localForm : undefined
+      const localHasContent = Boolean(validLocalForm && hasWorkRecordDraftContent(validLocalForm))
+      const localConflictsWithServer = Boolean(
+        serverRecord
+        && ['DRAFT', 'REJECTED'].includes(serverRecord.status)
+        && localHasContent
+        && (validLocalForm?.serverRecordId !== serverRecord.id
+          || validLocalForm.serverRowVersion !== serverRecord.rowVersion),
+      )
+      if (serverLocked) {
+        setCompletion(serverForm?.completion ?? '')
+        setException(serverForm?.exception ?? '')
+        setNextAction(serverForm?.nextAction ?? '')
+        setPayload(serverForm?.payload ?? {})
+        if (serverForm) formDraftRef.current = serverForm
+        await removeResumableDraft(formDraftKey)
+      } else if (localConflictsWithServer && validLocalForm && serverForm) {
+        setCompletion(serverForm.completion)
+        setException(serverForm.exception)
+        setNextAction(serverForm.nextAction)
+        setPayload(serverForm.payload)
+        formDraftRef.current = validLocalForm
+        setConflictingLocalForm(validLocalForm)
+      } else if (validLocalForm) {
+        const currentLocalForm = {
+          ...validLocalForm,
+          serverRecordId: serverRecord?.id ?? validLocalForm.serverRecordId,
+          serverRowVersion: serverRecord?.rowVersion ?? validLocalForm.serverRowVersion,
+        }
+        setCompletion(currentLocalForm.completion)
+        setException(currentLocalForm.exception)
+        setNextAction(currentLocalForm.nextAction)
+        setPayload(currentLocalForm.payload)
+        formDraftRef.current = currentLocalForm
+      } else if (serverForm && ['DRAFT', 'REJECTED'].includes(serverRecord?.status ?? '')) {
+        setCompletion(serverForm.completion)
+        setException(serverForm.exception)
+        setNextAction(serverForm.nextAction)
+        setPayload(serverForm.payload)
+        formDraftRef.current = serverForm
+      }
+      const restoredFiles = (localFiles ?? [])
+        .filter((entry): entry is StoredWorkEvidence => isStoredDraftFile(entry)
+          && ['CAMERA', 'FILE_PICKER'].includes(entry.captureSource))
+        .map(storedToWorkEvidence)
+      setAttachments(restoredFiles)
+      filesDraftRef.current = restoredFiles.map(workEvidenceToStored)
+      if (!localConflictsWithServer && ((localForm?.schemaVersion === 1 && hasWorkRecordDraftContent(localForm)) || restoredFiles.length) && !serverLocked) {
+        setDraftNotice(`已恢复上次未完成的内容${restoredFiles.length ? `和 ${restoredFiles.length} 个待上传附件` : ''}。`)
+      } else if (loadError) {
+        setMessage(loadError instanceof Error ? loadError.message : '工作记录加载失败')
+      }
+      setRecordLoadFailed(Boolean(loadError && recordId))
+      draftStorageReadyRef.current = true
+      setDraftHydrated(true)
+    }).catch(async (error) => {
+      if (active) {
+        let serverLoadError: unknown
+        if (item.recordId) {
+          try {
+            const serverRecord = (await loadWorkRecord(identity, item.recordId)).data
+            if (!active) return
+            activeRecordIdRef.current = serverRecord.id
+            setExisting(serverRecord)
+            const recoveredPayload = Object.fromEntries(Object.entries(serverRecord.payload).filter((entry): entry is [string, WorkRecordFieldValue] =>
+              ['string', 'number', 'boolean'].includes(typeof entry[1])
+              || (Array.isArray(entry[1]) && entry[1].every((value) => typeof value === 'string'))))
+            setCompletion(serverRecord.completionStatement ?? '')
+            setException(serverRecord.exceptionStatement ?? '')
+            setNextAction(serverRecord.nextAction ?? '')
+            setPayload(recoveredPayload)
+            formDraftRef.current = {
+              schemaVersion: 1,
+              completion: serverRecord.completionStatement ?? '',
+              exception: serverRecord.exceptionStatement ?? '',
+              nextAction: serverRecord.nextAction ?? '',
+              payload: recoveredPayload,
+              serverRecordId: serverRecord.id,
+              serverRowVersion: serverRecord.rowVersion,
+            }
+          } catch (reason) {
+            serverLoadError = reason
+          }
+        }
+        if (!active) return
+        setRecordLoadFailed(Boolean(item.recordId && serverLoadError))
+        draftStorageReadyRef.current = false
+        setMessage(`设备草稿暂时无法读取。为避免覆盖已保存内容，本页不会自动改写设备草稿；${serverLoadError ? '服务器草稿也读取失败，请刷新后重试。' : '可点击“保存草稿”写入服务端。'}${error instanceof Error ? `（${error.message}）` : ''}`)
+      }
+    }).finally(() => {
+      if (active) setLoadingRecord(false)
+    })
+    return () => { active = false }
+  }, [identity.key, item.id, item.recordId, formDraftKey, filesDraftKey])
+  const chooseServerDraft = () => {
+    if (!existing) return
+    const serverForm: WorkRecordFormDraft = {
+      schemaVersion: 1,
+      completion: existing.completionStatement ?? '',
+      exception: existing.exceptionStatement ?? '',
+      nextAction: existing.nextAction ?? '',
+      payload: Object.fromEntries(Object.entries(existing.payload).filter((entry): entry is [string, WorkRecordFieldValue] =>
+        ['string', 'number', 'boolean'].includes(typeof entry[1])
+        || (Array.isArray(entry[1]) && entry[1].every((value) => typeof value === 'string')))),
+      serverRecordId: existing.id,
+      serverRowVersion: existing.rowVersion,
+    }
+    setCompletion(serverForm.completion)
+    setException(serverForm.exception)
+    setNextAction(serverForm.nextAction)
+    setPayload(serverForm.payload)
+    formDraftRef.current = serverForm
+    setConflictingLocalForm(undefined)
+    setDraftNotice('已使用服务器上的最新草稿。')
+    void writeResumableDraft(formDraftKey, serverForm).catch((reason) =>
+      setMessage(reason instanceof Error ? reason.message : '服务器草稿暂存失败'))
+  }
+  const chooseLocalDraft = () => {
+    if (!conflictingLocalForm) return
+    const restored: WorkRecordFormDraft = {
+      ...conflictingLocalForm,
+      serverRecordId: existing?.id ?? conflictingLocalForm.serverRecordId,
+      serverRowVersion: existing?.rowVersion ?? conflictingLocalForm.serverRowVersion,
+    }
+    setCompletion(restored.completion)
+    setException(restored.exception)
+    setNextAction(restored.nextAction)
+    setPayload(restored.payload)
+    formDraftRef.current = restored
+    setConflictingLocalForm(undefined)
+    setDraftNotice('已恢复本机未提交内容；保存时会基于服务器最新版本更新。')
+    void writeResumableDraft(formDraftKey, restored).catch((reason) =>
+      setMessage(reason instanceof Error ? reason.message : '本机草稿暂存失败'))
+  }
+  const downloadPendingAttachment = (entry: PendingWorkEvidence) => {
+    const url = URL.createObjectURL(entry.file)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = entry.file.name
+    anchor.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+  const discardLockedPendingAttachments = async () => {
+    if (!window.confirm(`确认丢弃本机保留的 ${attachments.length} 个未上传附件吗？此操作不可恢复。`)) return
+    try {
+      await removeResumableDraft(filesDraftKey)
+      filesDraftRef.current = []
+      setAttachments([])
+      setDraftNotice('本机未上传附件已按你的确认清除。')
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : '本机附件清除失败')
+    }
+  }
+  useEffect(() => {
+    if (!draftHydrated || viewOnly || conflictingLocalForm) return
+    const snapshot: WorkRecordFormDraft = {
+      schemaVersion: 1,
+      completion,
+      exception,
+      nextAction,
+      payload,
+      serverRecordId: activeRecordIdRef.current,
+      serverRowVersion: existing?.rowVersion,
+    }
+    formDraftRef.current = snapshot
+    const timeout = window.setTimeout(() => {
+      const operation = hasWorkRecordDraftContent(snapshot)
+        ? writeResumableDraft(formDraftKey, snapshot)
+        : removeResumableDraft(formDraftKey)
+      void operation.catch((reason) =>
+        setMessage(reason instanceof Error ? reason.message : '文字草稿暂存失败'))
+    }, 250)
+    return () => window.clearTimeout(timeout)
+  }, [completion, conflictingLocalForm, draftHydrated, exception, existing?.rowVersion, formDraftKey, nextAction, payload, viewOnly])
+  useEffect(() => {
+    if (!draftHydrated || viewOnly) return
+    persistWorkFiles(attachments)
+  }, [attachments, draftHydrated, filesDraftKey, viewOnly])
+  useEffect(() => {
+    if (!draftHydrated || viewOnly) return
+    const flushDraft = () => {
+      const form = formDraftRef.current
+      void (hasWorkRecordDraftContent(form) ? writeResumableDraft(formDraftKey, form) : removeResumableDraft(formDraftKey))
+      const stored = filesDraftRef.current
+      void (stored.length ? writeResumableDraft(filesDraftKey, stored) : removeResumableDraft(filesDraftKey))
+    }
+    const flushWhenHidden = () => { if (document.visibilityState === 'hidden') flushDraft() }
+    window.addEventListener('pagehide', flushDraft)
+    document.addEventListener('visibilitychange', flushWhenHidden)
+    return () => {
+      window.removeEventListener('pagehide', flushDraft)
+      document.removeEventListener('visibilitychange', flushWhenHidden)
+      flushDraft()
+    }
+  }, [conflictingLocalForm, draftHydrated, filesDraftKey, formDraftKey, viewOnly])
   useEffect(() => {
     if (!isOwner || !item.executionPolicy?.delegationAllowed) return
     void loadDelegationCandidates(identity, item.id).then(setCandidates).catch(() => setCandidates([]))
@@ -475,6 +779,14 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
     if (forSubmission && policy.attachmentRequired && totalAttachments === 0) throw new Error('该岗位工作要求必须上传附件证据。')
   }
   const persist = async (submitAfterUpload: boolean) => {
+    if (recordLoadFailed) {
+      setMessage('服务器草稿尚未成功读取。为避免生成重复记录，请刷新后重试。')
+      return
+    }
+    if (conflictingLocalForm) {
+      setMessage('服务器草稿与本机内容不一致，请先选择要继续使用的版本。')
+      return
+    }
     try { validate(submitAfterUpload) } catch (reason) { setMessage(reason instanceof Error ? reason.message : '提交校验失败'); return }
     const pendingAttachments = [...attachments]
     let activeRecordId: string | undefined
@@ -496,6 +808,13 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
       const recordId = existing?.status === 'DRAFT' ? existing.id : String(created.id ?? created.recordId ?? '')
       if (!recordId) throw new Error('服务端未返回工作记录编号。')
       activeRecordId = recordId
+      activeRecordIdRef.current = recordId
+      formDraftRef.current = {
+        ...formDraftRef.current,
+        serverRecordId: recordId,
+        serverRowVersion: Number(created.rowVersion ?? created.row_version ?? existing?.rowVersion ?? 0),
+      }
+      await writeResumableDraft(formDraftKey, formDraftRef.current)
       for (const [index, entry] of pendingAttachments.entries()) {
         setSaveProgress({ phase: 'upload', completed: index, total: pendingAttachments.length })
         await uploadWorkRecordAttachment(identity, recordId, entry.file, {
@@ -505,14 +824,17 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
           capturedAtClient: entry.capturedAtClient,
         })
         uploadedCount = index + 1
-        setAttachments((current) => {
-          const uploadedIndex = current.indexOf(entry)
-          return uploadedIndex < 0 ? current : current.filter((_, currentIndex) => currentIndex !== uploadedIndex)
-        })
+        const remaining = pendingAttachments.slice(index + 1)
+        filesDraftRef.current = remaining.map(workEvidenceToStored)
+        await (remaining.length
+          ? writeResumableDraft(filesDraftKey, filesDraftRef.current)
+          : removeResumableDraft(filesDraftKey))
+        setAttachments((current) => current.filter((candidate) => candidate.draftFileId !== entry.draftFileId))
       }
       if (submitAfterUpload) {
         setSaveProgress({ phase: 'submit', completed: uploadedCount, total: pendingAttachments.length })
         await submitWorkRecordDraft(identity, recordId, Number(created.rowVersion ?? created.row_version ?? 0))
+        await Promise.all([removeResumableDraft(formDraftKey), removeResumableDraft(filesDraftKey)])
       }
       await Promise.resolve(onSaved()); onClose()
     } catch (error) {
@@ -525,7 +847,7 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
       const reason = error instanceof Error ? error.message : '工作记录保存失败'
       const remainingCount = Math.max(0, pendingAttachments.length - uploadedCount)
       setMessage(uploadedCount > 0
-        ? `已安全保存 ${uploadedCount} 个附件，剩余 ${remainingCount} 个未上传；请在当前页面重试。${reason}`
+        ? `已安全保存 ${uploadedCount} 个附件，剩余 ${remainingCount} 个已保存在设备草稿；可直接重试或稍后返回继续。${reason}`
         : reason)
     } finally {
       setSaving(undefined)
@@ -585,9 +907,11 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
       {item.delegateAssignmentId && <div className="inline-warning">本事项已转交给 {item.delegatedEmployeeName ?? '指定员工'}{item.ownerResting ? '，店长今日休息' : ''}。</div>}
       {isOwner && item.executionPolicy?.delegationAllowed && !viewOnly && <section className="action-box"><label>转交本项工作<select value={delegateAssignmentId} onChange={(event) => setDelegateAssignmentId(event.target.value)}><option value="">请选择同店员工</option>{candidates.map((candidate) => <option value={candidate.assignmentId} key={candidate.assignmentId}>{candidate.employeeName} · {candidate.positionName}</option>)}</select></label><label className="checkbox-line"><input type="checkbox" checked={ownerResting} onChange={(event) => setOwnerResting(event.target.checked)} />店长今日休息</label><label>转交说明<input value={delegationReason} onChange={(event) => setDelegationReason(event.target.value)} placeholder="选填" /></label><div className="button-row"><button className="secondary" disabled={delegating || !delegateAssignmentId} onClick={() => void saveDelegation()}>{delegating ? '处理中…' : '确认转交'}</button>{item.delegateAssignmentId && <button className="secondary" disabled={delegating} onClick={() => void revokeDelegation()}>撤销转交</button>}</div></section>}
       {loadingRecord && <div className="state-card"><div className="spinner" /><strong>正在读取已提交记录</strong></div>}
+      {conflictingLocalForm && <div className="inline-warning"><strong>发现两个版本的未提交内容</strong><p>服务器草稿已在其他页面或设备更新，本机仍保留一份未提交内容。请选择一个版本后再继续，系统不会自动覆盖。</p><div className="button-row"><button className="secondary" onClick={chooseServerDraft}>使用服务器最新草稿</button><button className="secondary" onClick={chooseLocalDraft}>恢复本机未提交内容</button></div></div>}
       {existing && <section className="detail-section"><h3>最近一次提交 · {label(existing.status)}</h3><dl><div><dt>完成情况</dt><dd>{existing.completionStatement ?? String(existing.payload.summary ?? '—')}</dd></div><div><dt>异常事项</dt><dd>{existing.exceptionStatement ?? String(existing.payload.exception ?? '无')}</dd></div><div><dt>下一步行动</dt><dd>{existing.nextAction ?? '—'}</dd></div><div><dt>提交时间</dt><dd>{formatDate(existing.submittedAt)}</dd></div></dl>{existing.reviewReason && <div className="inline-warning">复核意见：{existing.reviewReason}</div>}<div className="attachment-list">{existing.attachments.map((attachment) => <button className="secondary" key={attachment.id} onClick={() => void preview(attachment.id, attachment.originalName, attachment.mediaType)}>{attachment.evidenceInstanceKey ? `房号 ${attachment.evidenceInstanceKey} · ` : ''}{attachment.originalName} · {Math.ceil(attachment.sizeBytes / 1024)}KB</button>)}</div>{existing.supplements.map((entry) => <p className="muted" key={entry.id}>补充：{entry.content} · {entry.submittedByName}</p>)}</section>}
+      {viewOnly && !!attachments.length && <section className="detail-section"><div className="inline-warning"><strong>本机还有 {attachments.length} 个未上传附件</strong><p>该工作记录已在其他页面或设备提交，系统没有自动删除这些照片。你可以先逐个导出留存，再明确选择是否丢弃。</p></div><div className="pending-evidence-list">{attachments.map((entry) => <button type="button" className="secondary" key={entry.draftFileId} onClick={() => downloadPendingAttachment(entry)}>{entry.evidenceInstanceKey ? `房号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · 导出 {entry.file.name}</button>)}</div><button type="button" className="danger-button" onClick={() => void discardLockedPendingAttachments()}>丢弃本机未上传附件</button></section>}
       {viewOnly && existing?.status === 'SUBMITTED' && <section className="action-box"><label>补充说明<textarea rows={3} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="待主管复核前可追加说明，原提交内容不会被覆盖" /></label><button className="secondary" disabled={saving === 'supplement' || !supplement.trim()} onClick={() => void addSupplement()}>{saving === 'supplement' ? '补充中…' : '追加说明'}</button></section>}
-      {!viewOnly && !loadingRecord && <>{item.status === 'FAILED' && <div className="inline-warning">上一版未通过，本次提交会生成新的尝试记录，不覆盖历史证据。</div>}{Object.values(properties).some((definition) => definition.type !== 'array') && <div className="dynamic-form">{Object.entries(properties).filter(([, definition]) => definition.type !== 'array').map(([key, definition]) => <label key={key}>{fieldLabels[key] ?? definition.title ?? key}{required.includes(key) ? ' *' : ''}{definition.type === 'boolean' ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === 'true' }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select> : ['integer', 'number'].includes(definition.type ?? '') ? <input type="number" min={definition.minimum} max={definition.maximum} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : Number(event.target.value) }))} /> : <textarea rows={3} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))} />}{definition.description && <small>{definition.description}</small>}</label>)}</div>}
+      {!viewOnly && !loadingRecord && !conflictingLocalForm && <>{item.status === 'FAILED' && <div className="inline-warning">上一版未通过，本次提交会生成新的尝试记录，不覆盖历史证据。</div>}{Object.values(properties).some((definition) => definition.type !== 'array') && <div className="dynamic-form">{Object.entries(properties).filter(([, definition]) => definition.type !== 'array').map(([key, definition]) => <label key={key}>{fieldLabels[key] ?? definition.title ?? key}{required.includes(key) ? ' *' : ''}{definition.type === 'boolean' ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === 'true' }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select> : ['integer', 'number'].includes(definition.type ?? '') ? <input type="number" min={definition.minimum} max={definition.maximum} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : Number(event.target.value) }))} /> : <textarea rows={3} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))} />}{definition.description && <small>{definition.description}</small>}</label>)}</div>}
         <label>完成情况{policy.completionStatementRequired ? ' *' : ''}<textarea rows={4} value={completion} onChange={(event) => setCompletion(event.target.value)} placeholder="说明实际完成内容、结果和关键数据" /></label><label>异常与需协同事项{policy.exceptionStatementRequired ? ' *' : ''}<textarea rows={3} value={exception} onChange={(event) => setException(event.target.value)} placeholder="没有异常请填写“无”" /></label><label>下一步行动{policy.nextActionRequired ? ' *' : ''}<textarea rows={2} value={nextAction} onChange={(event) => setNextAction(event.target.value)} placeholder="需要继续跟进时填写" /></label>
         {!!activeRequirements.length && <section className="camera-evidence">
           <div><strong>现场拍照</strong><small>所有照片必须横向拍摄（宽度大于高度）；上传后由服务端加盖门店、可信时间和证据编号水印{hasInstanceRequirements ? '；每个房号至少上传 1 张，可继续追加，照片数量不限' : `；楼层公区按本店 ${item.guestRoomFloorCount ?? 1} 层计算`}</small></div>
@@ -602,19 +926,19 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
                   const photoCount = instanceKey ? storedCount + pendingCount : 0
                   return <article className={photoCount >= (requirement.minimumPerInstance ?? 1) ? 'room-evidence-card completed' : 'room-evidence-card'} key={`${requirement.checkpointCode}-${roomIndex}`}>
                     <label>{requirement.instanceLabel ?? '房号'} {roomIndex + 1} *<input value={roomNumber} maxLength={32} placeholder="例如 1208" onChange={(event) => updateInstanceValue(requirement, roomIndex, event.target.value)} onBlur={(event) => updateInstanceValue(requirement, roomIndex, normalizedInstanceKey(event.target.value))} /></label>
-                    <div><span>{photoCount} 张·数量不限</span><label className="room-photo-button"><input type="file" accept="image/jpeg,image/png" capture="environment" multiple disabled={!instanceKey || validatingAttachments} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'CAMERA' as const, checkpointCode: requirement.checkpointCode, evidenceInstanceKey: instanceKey, capturedAtClient: new Date().toISOString() })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} />{validatingAttachments ? '校验中…' : photoCount ? '继续上传' : '横向拍照'}</label></div>
+                    <div><span>{photoCount} 张·数量不限</span><label className="room-photo-button"><input type="file" accept="image/jpeg,image/png" capture="environment" multiple disabled={!instanceKey || validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'CAMERA' as const, checkpointCode: requirement.checkpointCode, evidenceInstanceKey: instanceKey, capturedAtClient: new Date().toISOString() })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} />{validatingAttachments ? '校验中…' : photoCount ? '继续上传' : '横向拍照'}</label></div>
                   </article>
                 })}</div>
               </section>
             }
             const minimum = requirementMinimum(requirement)
             const count = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode && entry.captureSource === 'CAMERA').length + (existing?.status === 'DRAFT' ? existing.attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode && entry.captureSource === 'CAMERA').length : 0)
-            return <div className="camera-grid" key={requirement.checkpointCode}><label className={count >= minimum ? 'camera-checkpoint completed' : 'camera-checkpoint'}><span>{requirement.label}<small>{count}/{minimum} 张{requirement.recommendedMaximum ? `，建议不超过 ${requirement.recommendedMaximum}` : ''}</small></span><input type="file" accept="image/jpeg,image/png" capture="environment" disabled={validatingAttachments} onChange={(event) => { const file = event.target.files?.[0]; if (file) void appendValidatedAttachments([{ file, captureSource: 'CAMERA', checkpointCode: requirement.checkpointCode, capturedAtClient: new Date().toISOString() }]); event.currentTarget.value = '' }} /><b>{validatingAttachments ? '校验中…' : count >= minimum ? '已拍摄' : '横向拍照'}</b></label></div>
+            return <div className="camera-grid" key={requirement.checkpointCode}><label className={count >= minimum ? 'camera-checkpoint completed' : 'camera-checkpoint'}><span>{requirement.label}<small>{count}/{minimum} 张{requirement.recommendedMaximum ? `，建议不超过 ${requirement.recommendedMaximum}` : ''}</small></span><input type="file" accept="image/jpeg,image/png" capture="environment" disabled={validatingAttachments || !!saving} onChange={(event) => { const file = event.target.files?.[0]; if (file) void appendValidatedAttachments([{ file, captureSource: 'CAMERA', checkpointCode: requirement.checkpointCode, capturedAtClient: new Date().toISOString() }]); event.currentTarget.value = '' }} /><b>{validatingAttachments ? '校验中…' : count >= minimum ? '已拍摄' : '横向拍照'}</b></label></div>
           })}
         </section>}
-        <label className="attachment-picker">补充文件{policy.attachmentRequired ? ' *' : '（可选）'}<input type="file" multiple disabled={validatingAttachments} accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx" onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><small>{validatingAttachments ? '正在校验照片方向…' : attachments.length ? `待上传 ${attachments.length} 个：${attachments.map((entry) => entry.file.name).join('、')}` : '照片必须横向；可追加 JPG、PNG、PDF、Word、Excel，提交时服务端会再次校验'}</small></label>{!!attachments.length && <div className="pending-evidence-list">{attachments.map((entry, index) => <button type="button" className="secondary" key={`${entry.file.name}-${index}`} onClick={() => setAttachments((current) => current.filter((_, currentIndex) => currentIndex !== index))}>{entry.evidenceInstanceKey ? `房号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · {entry.file.name} ×</button>)}</div>}</>}
-      {!canSubmit && !viewOnly && <div className="inline-warning">此条接口数据尚未返回完整提交上下文；页面不会猜测任职或表单版本。</div>}{saveProgressText && <div className="work-save-progress" role="status" aria-live="polite"><strong>{saveProgressText}</strong>{saveProgress?.phase === 'upload' && <><progress value={saveProgress.completed} max={Math.max(1, saveProgress.total)} /><small>每个附件都要完成服务端安全扫描；已成功的附件会立即从待上传列表移除，失败后可断点重试。</small></>}</div>}{message && <div className="inline-error">{message}</div>}
-    </div><footer><button className="secondary" disabled={!!saving || validatingAttachments} onClick={onClose}>关闭</button>{!viewOnly && !loadingRecord && <><button className="secondary" disabled={!!saving || validatingAttachments} onClick={() => void persist(false)}>{saving === 'draft' ? saveProgress?.phase === 'upload' ? `上传 ${saveProgress.completed}/${saveProgress.total}` : '保存中…' : '保存草稿'}</button><button className="primary" disabled={!!saving || validatingAttachments} onClick={() => void persist(true)}>{submitButtonText}</button></>}</footer>
+        <label className="attachment-picker">补充文件{policy.attachmentRequired ? ' *' : '（可选）'}<input type="file" multiple disabled={validatingAttachments || !!saving} accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx" onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><small>{validatingAttachments ? '正在校验照片方向…' : attachments.length ? `待上传 ${attachments.length} 个：${attachments.map((entry) => entry.file.name).join('、')}` : '照片必须横向；选中的文件会先保存在本机草稿，切出后可继续，提交时服务端会再次校验'}</small></label>{!!attachments.length && <div className="pending-evidence-list">{attachments.map((entry) => <button type="button" className="secondary" key={entry.draftFileId} onClick={() => removePendingAttachment(entry.draftFileId)}>{entry.evidenceInstanceKey ? `房号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · {entry.file.name} ×</button>)}</div>}</>}
+      {!canSubmit && !viewOnly && <div className="inline-warning">此条接口数据尚未返回完整提交上下文；页面不会猜测任职或表单版本。</div>}{saveProgressText && <div className="work-save-progress" role="status" aria-live="polite"><strong>{saveProgressText}</strong>{saveProgress?.phase === 'upload' && <><progress value={saveProgress.completed} max={Math.max(1, saveProgress.total)} /><small>每个附件都要完成服务端安全扫描；已成功的附件会立即从待上传列表移除，失败后可断点重试。</small></>}</div>}{draftNotice && <div className="inline-success">{draftNotice}</div>}{message && <div className="inline-error">{message}</div>}
+    </div><footer><button className="secondary" disabled={!!saving || validatingAttachments} onClick={onClose}>关闭</button>{!viewOnly && !loadingRecord && <><button className="secondary" disabled={!!saving || validatingAttachments || !!conflictingLocalForm} onClick={() => void persist(false)}>{saving === 'draft' ? saveProgress?.phase === 'upload' ? `上传 ${saveProgress.completed}/${saveProgress.total}` : '保存中…' : '保存草稿'}</button><button className="primary" disabled={!!saving || validatingAttachments || !!conflictingLocalForm} onClick={() => void persist(true)}>{submitButtonText}</button></>}</footer>
     {attachmentPreview && <AttachmentPreviewDialog preview={attachmentPreview} onClose={() => setAttachmentPreview(undefined)} />}
   </section></div>
 }
@@ -636,6 +960,8 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
       ? resource.data.filter((item) => !['SUBMITTED', 'SATISFIED', 'WAIVED', 'CANCELLED'].includes(item.status))
       : resource.data.filter((item) => item.status === filter)
   const openRecord = async (item: WorkExpectation) => {
+    setDeepLinkHandled(item.id)
+    if (routeParams.expectationId !== item.id) go('my-work', { ...routeParams, expectationId: item.id })
     setOpening(item.id); setOpenError(undefined)
     try {
       const detail = await loadExpectation(identity, item.id, item)
@@ -654,7 +980,7 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
     <div className="filters">{workFilters.map((item) => <button className={filter === item ? 'active' : ''} onClick={() => { setFilter(item); go('my-work', { ...routeParams, status: item === 'ALL' ? undefined : item }) }} key={item}>{item === 'ALL' ? '全部' : item === 'PENDING_WORK' ? '待完成' : label(item)}</button>)}</div>
     {openError && <div className="inline-error page-error">{openError}</div>}
     <article className="panel table-panel"><DataState loading={resource.loading || !!opening} error={resource.error} empty={!items.length} onRetry={resource.reload} />{!resource.loading && !opening && !resource.error && !!items.length && <WorkTable items={items} own onFill={openRecord} />}</article>
-    {editing && <WorkRecordDialog item={editing} identity={identity} onClose={() => setEditing(undefined)} onSaved={resource.reload} />}
+    {editing && <WorkRecordDialog key={`${identity.key}:${editing.id}`} item={editing} identity={identity} onClose={() => { setEditing(undefined); if (routeParams.expectationId) go('my-work', { ...routeParams, expectationId: undefined }) }} onSaved={resource.reload} />}
   </section>
 }
 
@@ -767,15 +1093,34 @@ const actionsByStatus: Record<string, Array<{ command: string; label: string; to
   AWAITING_REVIEW: [{ command: 'approve', label: '验收通过' }, { command: 'rework', label: '打回返工', tone: 'danger' }],
 }
 
+type PendingTaskEvidence = {
+  draftFileId: string
+  file: File
+}
+
+type TaskFormDraft = {
+  schemaVersion: 1
+  remark: string
+}
+
 function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { initial: ManagementTask; identity: RoleContext; permissions: string[]; onClose: () => void; onChanged: () => void }) {
   const resource = useResource(`${identity.key}:task:${initial.id}`, () => loadTask(identity, initial.id, initial), initial)
   const task = resource.data
   const [remark, setRemark] = useState('')
   const [busy, setBusy] = useState<string>()
   const [error, setError] = useState<string>()
-  const [evidenceFiles, setEvidenceFiles] = useState<File[]>([])
+  const [draftNotice, setDraftNotice] = useState<string>()
+  const [evidenceFiles, setEvidenceFiles] = useState<PendingTaskEvidence[]>([])
+  const [draftHydrated, setDraftHydrated] = useState(false)
+  const [draftHydrationSettled, setDraftHydrationSettled] = useState(false)
   const [validatingEvidence, setValidatingEvidence] = useState(false)
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview>()
+  const taskDraftParts = [identity.tenantId, identity.actorId, identity.businessActorAssignmentId, initial.id]
+  const taskFormDraftKey = buildResumableDraftKey('task-form', taskDraftParts)
+  const taskFilesDraftKey = buildResumableDraftKey('task-files', taskDraftParts)
+  const taskFormDraftRef = useRef<TaskFormDraft>({ schemaVersion: 1, remark: '' })
+  const taskFilesDraftRef = useRef<StoredDraftFile[]>([])
+  const taskDraftStorageReadyRef = useRef(false)
   const isAssignee = Boolean(identity.businessActorAssignmentId && identity.businessActorAssignmentId === task.assigneeAssignmentId)
   const isReviewer = Boolean(identity.businessActorAssignmentId && identity.businessActorAssignmentId === task.reviewerAssignmentId)
   const canEditEvidence = Boolean(identity.businessActorAssignmentId && identity.businessActorAssignmentId === task.assigneeAssignmentId && ['IN_PROGRESS', 'REWORK'].includes(task.status))
@@ -785,14 +1130,86 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
     if (action.command === 'dispatch') return permissions.includes('task.dispatch')
     return isAssignee && permissions.includes('task.act')
   })
+  useEffect(() => {
+    let active = true
+    setDraftHydrated(false)
+    setDraftHydrationSettled(false)
+    taskDraftStorageReadyRef.current = false
+    void Promise.all([
+      readResumableDraft<TaskFormDraft>(taskFormDraftKey),
+      readResumableDraft<StoredDraftFile[]>(taskFilesDraftKey),
+    ]).then(([storedForm, storedFiles]) => {
+      if (!active) return
+      const restoredFiles = (storedFiles ?? [])
+        .filter(isStoredDraftFile)
+        .map((stored) => ({ draftFileId: stored.id, file: fromStoredDraftFile(stored) }))
+      if (storedForm?.schemaVersion === 1) setRemark(storedForm.remark)
+      setEvidenceFiles(restoredFiles)
+      taskFilesDraftRef.current = restoredFiles.map((entry) => toStoredDraftFile(entry.file, entry.draftFileId))
+      if (storedForm?.remark || restoredFiles.length) {
+          setDraftNotice(`已恢复上次未完成的处理说明${restoredFiles.length ? `和 ${restoredFiles.length} 个待上传附件` : ''}。`)
+      }
+      taskDraftStorageReadyRef.current = true
+      setDraftHydrated(true)
+    }).catch((reason) => {
+      if (active) {
+        taskDraftStorageReadyRef.current = false
+        setError(`设备草稿暂时无法读取。为避免覆盖已保存内容，本页不会自动改写设备草稿。${reason instanceof Error ? `（${reason.message}）` : ''}`)
+      }
+    }).finally(() => { if (active) setDraftHydrationSettled(true) })
+    return () => { active = false }
+  }, [taskFilesDraftKey, taskFormDraftKey])
+  useEffect(() => {
+    if (!draftHydrated) return
+    const snapshot: TaskFormDraft = { schemaVersion: 1, remark }
+    taskFormDraftRef.current = snapshot
+    const timeout = window.setTimeout(() => {
+      const operation = snapshot.remark.length
+        ? writeResumableDraft(taskFormDraftKey, snapshot)
+        : removeResumableDraft(taskFormDraftKey)
+      void operation.catch((reason) =>
+        setError(reason instanceof Error ? reason.message : '处理说明暂存失败'))
+    }, 250)
+    return () => window.clearTimeout(timeout)
+  }, [draftHydrated, remark, taskFormDraftKey])
+  useEffect(() => {
+    if (!draftHydrated) return
+    const stored = evidenceFiles.map((entry) => toStoredDraftFile(entry.file, entry.draftFileId))
+    taskFilesDraftRef.current = stored
+    void (stored.length ? writeResumableDraft(taskFilesDraftKey, stored) : removeResumableDraft(taskFilesDraftKey))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : '任务附件暂存失败'))
+  }, [draftHydrated, evidenceFiles, taskFilesDraftKey])
+  useEffect(() => {
+    if (!draftHydrated) return
+    const flushDraft = () => {
+      const form = taskFormDraftRef.current
+      void (form.remark.length ? writeResumableDraft(taskFormDraftKey, form) : removeResumableDraft(taskFormDraftKey))
+      const stored = taskFilesDraftRef.current
+      void (stored.length ? writeResumableDraft(taskFilesDraftKey, stored) : removeResumableDraft(taskFilesDraftKey))
+    }
+    const flushWhenHidden = () => { if (document.visibilityState === 'hidden') flushDraft() }
+    window.addEventListener('pagehide', flushDraft)
+    document.addEventListener('visibilitychange', flushWhenHidden)
+    return () => {
+      window.removeEventListener('pagehide', flushDraft)
+      document.removeEventListener('visibilitychange', flushWhenHidden)
+      flushDraft()
+    }
+  }, [draftHydrated, taskFilesDraftKey, taskFormDraftKey])
   const run = async (command: string) => {
+    if (command === 'submit-result' && evidenceFiles.length) {
+      setError(`还有 ${evidenceFiles.length} 个待上传证据，请先点击“上传证据”，全部上传成功后再提交执行结果。`)
+      return
+    }
     setBusy(command); setError(undefined)
     try {
       await apiCommand(`/tasks/${task.id}/actions/${command}`, identity, {
         actorAssignmentId: identity.businessActorAssignmentId,
         payload: { remark, ...(command === 'submit-result' ? { result: { summary: remark } } : {}) },
       }, task.version)
-      setRemark(''); await resource.reload(); onChanged()
+      setRemark('')
+      await removeResumableDraft(taskFormDraftKey)
+      await resource.reload(); onChanged()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '任务操作失败') }
     finally { setBusy(undefined) }
   }
@@ -808,8 +1225,17 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
     if (!identity.businessActorAssignmentId || !evidenceFiles.length) return
     setBusy('upload-evidence'); setError(undefined)
     try {
-      for (const file of evidenceFiles) await uploadTaskEvidence(identity, task.id, identity.businessActorAssignmentId, file)
-      setEvidenceFiles([]); await resource.reload(); onChanged()
+      const pendingFiles = [...evidenceFiles]
+      for (const [index, entry] of pendingFiles.entries()) {
+        await uploadTaskEvidence(identity, task.id, identity.businessActorAssignmentId, entry.file)
+        const remaining = pendingFiles.slice(index + 1)
+        taskFilesDraftRef.current = remaining.map((candidate) => toStoredDraftFile(candidate.file, candidate.draftFileId))
+        await (remaining.length
+          ? writeResumableDraft(taskFilesDraftKey, taskFilesDraftRef.current)
+          : removeResumableDraft(taskFilesDraftKey))
+        setEvidenceFiles((current) => current.filter((candidate) => candidate.draftFileId !== entry.draftFileId))
+      }
+      await resource.reload(); onChanged()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '执行证据上传失败') }
     finally { setBusy(undefined) }
   }
@@ -818,7 +1244,24 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
     setError(undefined)
     try {
       const result = await validateLandscapeEvidence(files.slice(0, 10).map((file) => ({ file })))
-      setEvidenceFiles(result.accepted.map((entry) => entry.file))
+      const accepted = result.accepted.map((entry) => ({
+        draftFileId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        file: entry.file,
+      }))
+      setEvidenceFiles((current) => {
+        const available = Math.max(0, 10 - current.length)
+        const next = [...current, ...accepted.slice(0, available)]
+        const stored = next.map((entry) => toStoredDraftFile(entry.file, entry.draftFileId))
+        taskFilesDraftRef.current = stored
+        if (taskDraftStorageReadyRef.current) {
+          void (stored.length ? writeResumableDraft(taskFilesDraftKey, stored) : removeResumableDraft(taskFilesDraftKey))
+            .catch((reason) => setError(reason instanceof Error ? reason.message : '任务附件暂存失败'))
+        } else if (accepted.length) {
+          setError('设备草稿暂时不可用；附件已保留在当前页面，请保持页面打开并立即上传。')
+        }
+        if (accepted.length > available) setError(`任务最多暂存 10 个待上传附件，本次仅加入 ${available} 个。`)
+        return next
+      })
       if (result.rejected.length) {
         const first = result.rejected[0]
         const remaining = result.rejected.length - 1
@@ -842,13 +1285,16 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
     catch (reason) { setError(reason instanceof Error ? reason.message : '执行证据删除失败') }
     finally { setBusy(undefined) }
   }
+  if (!draftHydrationSettled) {
+    return <div className="drawer-backdrop" role="presentation"><aside className="drawer" role="dialog" aria-modal="true"><header><div><span className="panel-kicker">TASK DETAIL</span><h2>{task.title}</h2><small>{task.code}</small></div><button className="close" onClick={onClose}>×</button></header><div className="drawer-body"><div className="state-card"><div className="spinner" /><strong>正在恢复未提交的任务内容</strong><small>恢复完成前暂不开放编辑，避免覆盖本机草稿。</small></div></div></aside></div>
+  }
   return <div className="drawer-backdrop" role="presentation"><aside className="drawer" role="dialog" aria-modal="true">
     <header><div><span className="panel-kicker">TASK DETAIL</span><h2>{task.title}</h2><small>{task.code}</small></div><button className="close" onClick={onClose}>×</button></header>
     <div className="drawer-body"><div className="task-summary"><span><small>任务状态</small><Status value={task.status} /></span><span><small>SLA状态</small><Status value={task.slaStatus} /></span><span><small>优先级</small><Status value={task.priority} /></span></div>
       <dl><div><dt>目标组织</dt><dd>{task.targetOrgName}</dd></div><div><dt>负责人</dt><dd>{task.assigneeName}</dd></div><div><dt>验收人</dt><dd>{task.reviewerName}</dd></div><div><dt>截止时间</dt><dd>{formatDate(task.dueAt)}</dd></div><div><dt>来源</dt><dd>{task.creationSource ? label(task.creationSource) : task.sourceTitle ?? label(task.sourceType)}</dd></div></dl>
       <section className="detail-section"><h3>执行要求</h3><p>{task.description ?? '任务来源已记录，执行结果需提交结构化说明和证据。'}</p></section>
-      <section className="detail-section"><h3>执行证据</h3>{task.evidence?.length ? <div className="attachment-list">{task.evidence.map((evidence) => { const evidenceName = evidence.originalName || label(evidence.evidenceType); return <span className="evidence-chip" key={evidence.id}><button className="secondary" disabled={!evidence.objectKey} onClick={() => void previewEvidence(evidence.id, evidenceName, evidence.mediaType)}>{evidenceName} · {evidence.scanStatus}</button>{canEditEvidence && evidence.submittedByAssignmentId === identity.businessActorAssignmentId && <button className="text-action danger" disabled={busy === `delete:${evidence.id}`} onClick={() => void removeEvidence(evidence.id)}>删除</button>}</span> })}</div> : <p className="muted">尚未上传图片或文档证据。</p>}{canEditEvidence && <div className="evidence-uploader"><input type="file" multiple disabled={validatingEvidence} accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx" onChange={(event) => { void selectEvidenceFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = '' }} /><button className="secondary" disabled={!!busy || validatingEvidence || !evidenceFiles.length} onClick={() => void uploadEvidence()}>{validatingEvidence ? '校验方向中…' : busy === 'upload-evidence' ? '上传中…' : `上传证据${evidenceFiles.length ? `（${evidenceFiles.length}）` : ''}`}</button><small>照片必须横向；支持 JPG、PNG、PDF、Word、Excel，单文件不超过20MB。</small></div>}{error && <div className="inline-error">{error}</div>}</section>
-      {!!allowedActions.length && <section className="action-box"><label>处理说明<textarea rows={3} value={remark} onChange={(event) => setRemark(event.target.value)} placeholder="填写执行结果、验收意见或返工原因" /></label><div>{allowedActions.map((action) => <button className={action.tone === 'danger' ? 'danger-button' : 'primary'} disabled={!!busy || !remark.trim()} onClick={() => run(action.command)} key={action.command}>{busy === action.command ? '处理中…' : action.label}</button>)}</div></section>}
+      <section className="detail-section"><h3>执行证据</h3>{draftNotice && <div className="inline-success">{draftNotice}</div>}{task.evidence?.length ? <div className="attachment-list">{task.evidence.map((evidence) => { const evidenceName = evidence.originalName || label(evidence.evidenceType); return <span className="evidence-chip" key={evidence.id}><button className="secondary" disabled={!evidence.objectKey} onClick={() => void previewEvidence(evidence.id, evidenceName, evidence.mediaType)}>{evidenceName} · {evidence.scanStatus}</button>{canEditEvidence && evidence.submittedByAssignmentId === identity.businessActorAssignmentId && <button className="text-action danger" disabled={busy === `delete:${evidence.id}`} onClick={() => void removeEvidence(evidence.id)}>删除</button>}</span> })}</div> : <p className="muted">尚未上传图片或文档证据。</p>}{canEditEvidence && <div className="evidence-uploader"><input type="file" multiple disabled={validatingEvidence || !!busy} accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx" onChange={(event) => { void selectEvidenceFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = '' }} /><button className="secondary" disabled={!!busy || validatingEvidence || !evidenceFiles.length} onClick={() => void uploadEvidence()}>{validatingEvidence ? '校验方向中…' : busy === 'upload-evidence' ? '上传中…' : `上传证据${evidenceFiles.length ? `（${evidenceFiles.length}）` : ''}`}</button><small>照片必须横向；支持 JPG、PNG、PDF、Word、Excel，单文件不超过20MB。选中的文件会先保存在本机草稿，切出后可继续。</small></div>}{!!evidenceFiles.length && <div className="inline-warning">还有 {evidenceFiles.length} 个证据仅保存在本机，上传成功前不能提交执行结果。</div>}{error && <div className="inline-error">{error}</div>}</section>
+      {!!allowedActions.length && <section className="action-box"><label>处理说明<textarea rows={3} value={remark} onChange={(event) => setRemark(event.target.value)} placeholder="填写执行结果、验收意见或返工原因" /></label><div>{allowedActions.map((action) => <button className={action.tone === 'danger' ? 'danger-button' : 'primary'} disabled={!!busy || !remark.trim() || (action.command === 'submit-result' && evidenceFiles.length > 0)} onClick={() => run(action.command)} key={action.command}>{busy === action.command ? '处理中…' : action.label}</button>)}</div></section>}
       {task.status === 'RESULT_SUBMITTED' && task.standardVersionId && isReviewer && permissions.includes('evaluation.manual-review') && <section className="action-box"><h3>任务结果标准评价</h3><p className="muted">系统使用任务创建时冻结的标准版本评价执行结果；评价完成后任务进入待验收状态。</p>{error && <div className="inline-error">{error}</div>}<div><button className="primary" disabled={!!busy} onClick={evaluateResult}>{busy === 'evaluate-result' ? '评价中…' : '按绑定标准评价结果'}</button></div></section>}
       <section className="detail-section"><h3>不可变时间线</h3><div className="timeline">{task.timeline?.length ? task.timeline.map((item) => <div key={item.id}><i /><span><strong>{label(item.toStatus)}</strong><small>{item.actorName} · {formatDate(item.occurredAt)}</small>{item.remark && <p>{item.remark}</p>}</span></div>) : <p className="muted">暂无流转记录。</p>}</div></section>
     </div>
@@ -905,8 +1351,8 @@ function Tasks({ identity, permissions, routeParams, go }: { identity: RoleConte
     <div className="filters"><button className={taskView === 'mine' ? 'active' : ''} onClick={() => switchView('mine')}>我的任务</button>{permissions.includes('task.review') && <><button className={taskView === 'review' ? 'active' : ''} onClick={() => switchView('review')}>待我验收</button><button className={taskView === 'team' ? 'active' : ''} onClick={() => switchView('team')}>团队任务</button></>}</div>
     <div className="filters task-status-filters">{['ALL', 'ACTIVE', 'AWAITING_REVIEW', 'OVERDUE', 'COMPLETED'].map((item) => <button className={statusFilter === item ? 'active' : ''} onClick={() => switchStatus(item)} key={item}>{item === 'ALL' ? '全部状态' : item === 'ACTIVE' ? '未完成' : item === 'OVERDUE' ? '已逾期' : label(item)}</button>)}</div>
     {linkedTaskError && <div className="inline-error page-error">{linkedTaskError}</div>}
-    <article className="panel table-panel"><DataState loading={resource.loading} error={resource.error} empty={!tasks.length} onRetry={resource.reload} />{!resource.loading && !resource.error && !!tasks.length && <TaskRows tasks={tasks} onSelect={setSelected} />}</article>
-    {selected && <TaskDetail initial={selected} identity={identity} permissions={permissions} onClose={() => { setSelected(undefined); if (routeParams.taskId) go('tasks', { ...routeParams, taskId: undefined }) }} onChanged={resource.reload} />}
+    <article className="panel table-panel"><DataState loading={resource.loading} error={resource.error} empty={!tasks.length} onRetry={resource.reload} />{!resource.loading && !resource.error && !!tasks.length && <TaskRows tasks={tasks} onSelect={(task) => { setSelected(task); if (routeParams.taskId !== task.id) go('tasks', { ...routeParams, taskId: task.id }) }} />}</article>
+    {selected && <TaskDetail key={`${identity.key}:${selected.id}`} initial={selected} identity={identity} permissions={permissions} onClose={() => { setSelected(undefined); if (routeParams.taskId) go('tasks', { ...routeParams, taskId: undefined }) }} onChanged={resource.reload} />}
     {creating && <TaskCreateDialog identity={identity} permissions={permissions} onClose={() => { setCreating(false); if (routeParams.create) go('tasks', { ...routeParams, create: undefined }) }} onCreated={async () => { await resource.reload(); if (routeParams.create) go('tasks', { ...routeParams, create: undefined }) }} />}
   </section>
 }

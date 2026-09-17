@@ -12,7 +12,8 @@ test('work record upload reports per-file security scan progress', () => {
 
 test('successfully uploaded evidence leaves the pending queue for retry safety', () => {
   assert.match(source, /const pendingAttachments = \[\.\.\.attachments\]/)
-  assert.match(source, /const uploadedIndex = current\.indexOf\(entry\)/)
+  assert.match(source, /candidate\.draftFileId !== entry\.draftFileId/)
+  assert.match(source, /await \(remaining\.length[\s\S]*writeResumableDraft\(filesDraftKey/)
   assert.match(source, /已安全保存 \$\{uploadedCount\} 个附件/)
   assert.match(source, /await loadWorkRecord\(identity, activeRecordId\)/)
 })
