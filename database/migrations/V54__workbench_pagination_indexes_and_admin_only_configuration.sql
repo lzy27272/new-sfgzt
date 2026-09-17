@@ -7,6 +7,28 @@ CREATE INDEX IF NOT EXISTS ix_work_expectation_workbench_scope
 CREATE INDEX IF NOT EXISTS ix_org_unit_closure_descendant_lookup
     ON org_unit_closure (tenant_id, descendant_id, depth, ancestor_id);
 
+-- V46 publishes the store-manager daily-report template during migration. On a
+-- fresh install executed after the hotel's business-day cutoff, its timestamp
+-- can be later than the effective instant used to resolve that same business
+-- date, leaving the store manager without a report until the following day.
+-- Existing installations keep their earlier timestamp; fresh installations
+-- are moved back just enough to cover the current business day.
+UPDATE daily_report_template_version
+SET effective_from = LEAST(effective_from, now() - interval '1 day'),
+    updated_at = now(),
+    row_version = row_version + 1
+WHERE tenant_id = '10000000-0000-0000-0000-000000000001'
+  AND id = '46100000-0000-0000-0000-000000000001'
+  AND lifecycle_status = 'PUBLISHED';
+
+UPDATE daily_report_section_version
+SET effective_from = LEAST(effective_from, now() - interval '1 day'),
+    updated_at = now(),
+    row_version = row_version + 1
+WHERE tenant_id = '10000000-0000-0000-0000-000000000001'
+  AND id = '46110000-0000-0000-0000-000000000001'
+  AND lifecycle_status = 'PUBLISHED';
+
 -- Product governance: enterprise rules and work-package configuration are
 -- platform-administration functions. Runtime work execution continues through
 -- work-record permissions and does not require access to either configuration

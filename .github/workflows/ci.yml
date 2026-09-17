@@ -24,6 +24,10 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+      - name: Install production PDF fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
       - name: Test Core API against isolated PostgreSQL
         run: mvn --batch-mode --no-transfer-progress --file apps/core-api/pom.xml test
 
