@@ -41,6 +41,7 @@ export type DailyReportItemResult = {
   required: boolean
   evidenceRequired: boolean
   dataSource: 'EMPLOYEE' | 'SYSTEM' | 'MIXED'
+  resultStatus?: 'PENDING' | 'COMPLETED' | 'EXCEPTION' | 'NOT_APPLICABLE'
   systemValue?: string
   employeeValue?: string
   exception: boolean

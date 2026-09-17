@@ -1,5 +1,8 @@
 package cn.sifangguan.hotelaios.workpackage;
 
+import cn.sifangguan.hotelaios.dailyreports.DailyReportRoutineProjectionService;
+import cn.sifangguan.hotelaios.shared.context.TenantContext;
+import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -30,6 +33,8 @@ import java.sql.Connection;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -77,6 +82,9 @@ class StoreManagerDailyClosedLoopIntegrationTest {
 
     @Autowired
     private WorkExpectationSlaService slaService;
+
+    @Autowired
+    private DailyReportRoutineProjectionService routineProjectionService;
 
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry registry) {
@@ -262,8 +270,10 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                           "businessDate":"%s",
                           "payload":{"expectedAttendance":12,"actualAttendance":12,
                             "appearancePassed":true,"meetingTopic":"今日服务标准",
-                            "meetingNotes":"确认当班分工与重点接待"},
+                            "meetingNotes":"确认当班分工；大堂空调故障待维修"},
                           "completionStatement":"仪容仪表检查及晨会已完成",
+                          "exceptionStatement":"大堂空调故障，现场温度无法下降",
+                          "nextAction":"联系工程部于今日20:00前完成检修",
                           "workPackageVersionId":"%s",
                           "workPackageItemId":"%s",
                           "workExpectationId":"%s",
@@ -378,6 +388,77 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                         .contentType("application/json").content("{\"expectedVersion\":0}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("SUBMITTED"));
+        assertThat(jdbc.queryForObject("""
+                select count(*)
+                from notification notification
+                join employee_position_assignment executor
+                  on executor.tenant_id = notification.tenant_id
+                 and executor.id = ?::uuid
+                 and executor.manager_assignment_id = notification.recipient_assignment_id
+                where notification.tenant_id = ?::uuid
+                  and notification.notification_type = 'WORK_RECORD_REVIEW_PENDING'
+                  and notification.source_type = 'WORK_RECORD'
+                  and notification.source_id = ?::uuid
+                  and notification.idempotency_key = ?
+                """, Integer.class, GENERAL_MANAGER_ASSIGNMENT, TENANT, recordId,
+                "work-record:review-pending:" + recordId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                select result_status from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
+                  and source_summary ->> 'workRecordId' = ?
+                """, String.class, TENANT, revisionId, recordId)).isEqualTo("PENDING");
+        int pendingAfterSubmit = jdbc.queryForObject("""
+                select count(*) from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and result_status = 'PENDING'
+                """, Integer.class, TENANT, revisionId);
+        assertThat(pendingAfterSubmit).isPositive();
+        assertThat(jdbc.queryForObject("""
+                select narrative from daily_report_revision
+                where tenant_id = ?::uuid and id = ?
+                """, String.class, TENANT, revisionId))
+                .contains("已审核完成 0/7 项", "待主管审核 " + pendingAfterSubmit + " 项");
+        assertThat(jdbc.queryForObject("""
+                select count(*) from ai_request
+                where tenant_id = ?::uuid and provider_code = 'INTERNAL_RULE_ENGINE'
+                  and input_snapshot ->> 'reportId' = ?
+                """, Integer.class, TENANT, reportId.toString())).isEqualTo(1);
+        Map<String, Object> contentAwareRule = jdbc.queryForMap("""
+                select recommendation.fact_summary::text as facts,
+                       recommendation.analysis,
+                       recommendation.recommendation
+                from ai_recommendation recommendation
+                join ai_request request
+                  on request.tenant_id = recommendation.tenant_id
+                 and request.id = recommendation.ai_request_id
+                where recommendation.tenant_id = ?::uuid
+                  and recommendation.status = 'AVAILABLE'
+                  and request.provider_code = 'INTERNAL_RULE_ENGINE'
+                  and request.input_snapshot ->> 'reportId' = ?
+                """, TENANT, reportId.toString());
+        assertThat(String.valueOf(contentAwareRule.get("facts")))
+                .contains("FACT_ONLY_INTERNAL_RULES", "issueFacts", recordId,
+                        "大堂空调故障，现场温度无法下降",
+                        "formData.meetingNotes", "declaredNextActions");
+        assertThat(String.valueOf(contentAwareRule.get("analysis")))
+                .contains("明确问题事实", "大堂空调故障");
+        assertThat(String.valueOf(contentAwareRule.get("recommendation")))
+                .contains("联系工程部于今日20:00前完成检修", "责任人", "完成时限");
+        Long pendingRowVersion = jdbc.queryForObject("""
+                select row_version from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
+                  and source_summary ->> 'workRecordId' = ?
+                """, Long.class, TENANT, revisionId, recordId);
+        projectAsCeo(recordId);
+        assertThat(jdbc.queryForObject("""
+                select row_version from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
+                  and source_summary ->> 'workRecordId' = ?
+                """, Long.class, TENANT, revisionId, recordId)).isEqualTo(pendingRowVersion);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from ai_request
+                where tenant_id = ?::uuid and provider_code = 'INTERNAL_RULE_ENGINE'
+                  and input_snapshot ->> 'reportId' = ?
+                """, Integer.class, TENANT, reportId.toString())).isEqualTo(1);
         JsonNode teamWork = response(identity(get(
                         "/api/v1/team/work-expectations?targetOrgUnitId=" + HOTEL), CEO, null), 200);
         JsonNode submittedExpectation = findById(teamWork, morningExpectation);
@@ -424,25 +505,53 @@ class StoreManagerDailyClosedLoopIntegrationTest {
         assertThat(jdbc.queryForObject("""
                 select count(*) from daily_report_item_result
                 where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
-                """, Integer.class, TENANT, revisionId)).isEqualTo(1);
+                  and source_summary ->> 'workRecordId' = ?
+                """, Integer.class, TENANT, revisionId, recordId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("""
                 select value ->> 'factLabel' from daily_report_item_result
                 where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
-                """, String.class, TENANT, revisionId)).isEqualTo("仪容仪表与晨会");
+                  and source_summary ->> 'workRecordId' = ?
+                """, String.class, TENANT, revisionId, recordId)).isEqualTo("仪容仪表与晨会");
+        assertThat(jdbc.queryForObject("""
+                select result_status from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
+                  and source_summary ->> 'workRecordId' = ?
+                """, String.class, TENANT, revisionId, recordId)).isEqualTo("EXCEPTION");
         assertThat(jdbc.queryForObject("""
                 select count(*) from daily_report_source_reference
                 where tenant_id = ?::uuid and revision_id = ? and source_type = 'WORK_RECORD'
                   and source_id = ?::uuid
-                """, Integer.class, TENANT, revisionId, recordId)).isEqualTo(1);
+                """, Integer.class, TENANT, revisionId, recordId)).isEqualTo(2);
         assertThat(jdbc.queryForObject("""
+                select count(*)
+                from daily_report_evidence evidence
+                join daily_report_item_result result
+                  on result.tenant_id = evidence.tenant_id
+                 and result.revision_id = evidence.revision_id
+                 and result.id = evidence.item_result_id
+                where evidence.tenant_id = ?::uuid and evidence.revision_id = ?
+                  and result.source_summary ->> 'workRecordId' = ?
+                """, Integer.class, TENANT, revisionId, recordId)).isEqualTo(3);
+        int completedAfterApproval = jdbc.queryForObject("""
+                select count(*) from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?
+                  and result_status in ('COMPLETED', 'EXCEPTION')
+                """, Integer.class, TENANT, revisionId);
+        int pendingAfterApproval = jdbc.queryForObject("""
+                select count(*) from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and result_status = 'PENDING'
+                """, Integer.class, TENANT, revisionId);
+        int evidenceAfterApproval = jdbc.queryForObject("""
                 select count(*) from daily_report_evidence
                 where tenant_id = ?::uuid and revision_id = ?
-                """, Integer.class, TENANT, revisionId)).isEqualTo(3);
+                """, Integer.class, TENANT, revisionId);
         assertThat(jdbc.queryForObject("""
                 select narrative from daily_report_revision
                 where tenant_id = ?::uuid and id = ?
                 """, String.class, TENANT, revisionId))
-                .contains("已完成 1/7 项", "关联证据 3 份");
+                .contains("已审核完成 " + completedAfterApproval + "/7 项",
+                        "待主管审核 " + pendingAfterApproval + " 项",
+                        "关联证据 " + evidenceAfterApproval + " 份");
         assertThat(jdbc.queryForObject("""
                 select count(*) from ai_request request
                 join ai_recommendation recommendation
@@ -451,7 +560,96 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 where request.tenant_id = ?::uuid
                   and request.provider_code = 'INTERNAL_RULE_ENGINE'
                   and request.input_snapshot ->> 'reportId' = ?
+                """, Integer.class, TENANT, reportId.toString())).isEqualTo(2);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from ai_recommendation recommendation
+                join ai_request request
+                  on request.tenant_id = recommendation.tenant_id
+                 and request.id = recommendation.ai_request_id
+                where recommendation.tenant_id = ?::uuid
+                  and request.input_snapshot ->> 'reportId' = ?
+                  and recommendation.status = 'AVAILABLE'
                 """, Integer.class, TENANT, reportId.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from ai_recommendation recommendation
+                join ai_request request
+                  on request.tenant_id = recommendation.tenant_id
+                 and request.id = recommendation.ai_request_id
+                where recommendation.tenant_id = ?::uuid
+                  and request.input_snapshot ->> 'reportId' = ?
+                  and recommendation.status = 'INVALIDATED'
+                """, Integer.class, TENANT, reportId.toString())).isEqualTo(1);
+
+        Map<String, Object> rejectedTarget = jdbc.queryForMap("""
+                select expectation.id as expectation_id, item.id as item_id,
+                       item.form_version_id
+                from work_expectation expectation
+                join work_package_item item
+                  on item.tenant_id = expectation.tenant_id
+                 and item.id = expectation.work_package_item_id
+                where expectation.tenant_id = ?::uuid
+                  and expectation.position_assignment_id = ?::uuid
+                  and expectation.business_date = ?
+                  and item.work_package_version_id = ?::uuid
+                  and item.id <> ?::uuid
+                  and item.form_version_id is not null
+                  and not exists (
+                      select 1 from work_record existing
+                      where existing.tenant_id = expectation.tenant_id
+                        and existing.work_expectation_id = expectation.id
+                        and existing.status in ('SUBMITTED', 'APPROVED')
+                  )
+                order by item.sort_order
+                limit 1
+                """, TENANT, GENERAL_MANAGER_ASSIGNMENT, businessDate, PACKAGE_VERSION, MORNING_ITEM);
+        UUID rejectedRecordId = UUID.randomUUID();
+        jdbc.update("""
+                insert into work_record
+                    (id, tenant_id, org_unit_id, employee_id, position_assignment_id,
+                     form_version_id, business_date, status, payload, submitted_at,
+                     work_package_version_id, work_package_item_id, work_expectation_id,
+                     record_kind, target_org_unit_id, occurred_at, submitted_by_account_id,
+                     attempt_no, content_hash, completion_statement)
+                values (?, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?, ?, 'SUBMITTED',
+                        '{"test":"pending rejection"}'::jsonb, now(), ?::uuid, ?, ?,
+                        'INSPECTION', ?::uuid, now(), ?::uuid, 1, repeat('b', 64),
+                        '待主管审核后确认')
+                """, rejectedRecordId, TENANT, HOTEL, GENERAL_MANAGER_EMPLOYEE,
+                GENERAL_MANAGER_ASSIGNMENT, rejectedTarget.get("form_version_id"), businessDate,
+                PACKAGE_VERSION, rejectedTarget.get("item_id"), rejectedTarget.get("expectation_id"),
+                HOTEL, GENERAL_MANAGER);
+        projectAsCeo(rejectedRecordId.toString());
+        assertThat(jdbc.queryForObject("""
+                select count(*) from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and result_status = 'PENDING'
+                """, Integer.class, TENANT, revisionId)).isEqualTo(pendingAfterApproval + 1);
+
+        jdbc.update("""
+                update work_record
+                set status = 'REJECTED', reviewed_by_account_id = ?::uuid,
+                    reviewed_at = now(), review_reason = '测试退回清理', row_version = row_version + 1
+                where tenant_id = ?::uuid and id = ?
+                """, CEO, TENANT, rejectedRecordId);
+        projectAsCeo(rejectedRecordId.toString());
+        assertThat(jdbc.queryForObject("""
+                select count(*) from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and result_status = 'PENDING'
+                """, Integer.class, TENANT, revisionId)).isEqualTo(pendingAfterApproval);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from daily_report_source_reference
+                where tenant_id = ?::uuid and revision_id = ? and source_id = ?
+                """, Integer.class, TENANT, revisionId, rejectedRecordId)).isZero();
+        assertThat(jdbc.queryForObject("""
+                select count(*) from ai_request
+                where tenant_id = ?::uuid and provider_code = 'INTERNAL_RULE_ENGINE'
+                  and input_snapshot ->> 'reportId' = ?
+                """, Integer.class, TENANT, reportId.toString())).isEqualTo(4);
+        projectAsCeo(rejectedRecordId.toString());
+        assertThat(jdbc.queryForObject("""
+                select count(*) from ai_request
+                where tenant_id = ?::uuid and provider_code = 'INTERNAL_RULE_ENGINE'
+                  and input_snapshot ->> 'reportId' = ?
+                """, Integer.class, TENANT, reportId.toString())).isEqualTo(4);
 
         UUID evaluationRecordId = UUID.randomUUID();
         jdbc.update("""
@@ -576,11 +774,41 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                   and evidence_metadata ->> 'evidenceInstanceKey' = '1201'
                 """, Integer.class, TENANT, recordId)).isEqualTo(2);
 
-        mockMvc.perform(identity(post("/api/v1/work-data/records/{recordId}/actions/submit", recordId),
-                        GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT)
-                        .contentType("application/json").content("{\"expectedVersion\":0}"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("SUBMITTED"));
+        UUID managerEmployeeId = jdbc.queryForObject("""
+                select manager.employee_id
+                from employee_position_assignment executor
+                join employee_position_assignment manager
+                  on manager.tenant_id = executor.tenant_id
+                 and manager.id = executor.manager_assignment_id
+                where executor.tenant_id = ?::uuid and executor.id = ?::uuid
+                """, UUID.class, TENANT, GENERAL_MANAGER_ASSIGNMENT);
+        UUID managerAccountId = jdbc.queryForObject("""
+                select account_id from employee
+                where tenant_id = ?::uuid and id = ?
+                """, UUID.class, TENANT, managerEmployeeId);
+        try {
+            jdbc.update("""
+                    update employee set account_id = null
+                    where tenant_id = ?::uuid and id = ?
+                    """, TENANT, managerEmployeeId);
+            mockMvc.perform(identity(post("/api/v1/work-data/records/{recordId}/actions/submit", recordId),
+                            GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT)
+                            .contentType("application/json").content("{\"expectedVersion\":0}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("SUBMITTED"));
+        } finally {
+            jdbc.update("""
+                    update employee set account_id = ?
+                    where tenant_id = ?::uuid and id = ?
+                    """, managerAccountId, TENANT, managerEmployeeId);
+        }
+        assertThat(jdbc.queryForObject("""
+                select count(*) from audit_log
+                where tenant_id = ?::uuid and resource_type = 'WORK_RECORD'
+                  and resource_id = ?::uuid
+                  and action = 'WORK_RECORD_REVIEW_NOTIFICATION_SKIPPED'
+                  and after_data ->> 'reason' = 'DIRECT_MANAGER_ASSIGNMENT_UNRESOLVED'
+                """, Integer.class, TENANT, recordId)).isEqualTo(1);
     }
 
     private JsonNode uploadRoomPhoto(String recordId, String checkpointCode, String roomNumber)
@@ -658,6 +886,17 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 where tenant_id = ?::uuid and work_expectation_id = any(?::uuid[])
                 """ + stagePredicate, Integer.class, TENANT,
                 "{" + String.join(",", expectationIds) + "}");
+    }
+
+    private void projectAsCeo(String recordId) {
+        TenantContext.set(new TenantPrincipal(
+                UUID.fromString(TENANT), UUID.fromString(CEO), "CEO",
+                Set.of(UUID.fromString(HOTEL)), UUID.randomUUID()));
+        try {
+            routineProjectionService.projectWorkRecord(UUID.fromString(recordId));
+        } finally {
+            TenantContext.clear();
+        }
     }
 
     private void createDraftReport(UUID reportId, UUID revisionId, LocalDate businessDate) {

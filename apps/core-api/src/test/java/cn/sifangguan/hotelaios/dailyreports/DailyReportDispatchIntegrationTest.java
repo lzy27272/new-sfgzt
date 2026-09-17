@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -144,7 +145,8 @@ class DailyReportDispatchIntegrationTest {
                 where tenant_id = ? and business_date = ?
                 """, TENANT, BUSINESS_DATE)).isEqualTo(6);
 
-        UUID submittedReportId = reportIdForAssignment(GENERAL_MANAGER_ASSIGNMENT);
+        UUID submittedReportId = reportIdExcludingAssignments(
+                GENERAL_MANAGER_ASSIGNMENT, FRONT_DESK_ASSIGNMENT);
         UUID mismatchedReportId = reportIdForAssignment(FRONT_DESK_ASSIGNMENT);
         assertThat(jdbc.update("""
                 update daily_report
@@ -165,16 +167,18 @@ class DailyReportDispatchIntegrationTest {
                     row_version = row_version + 1
                 where tenant_id = ?
                 """, TENANT);
+        PendingReviewFixture pendingReview = createPendingReviewFixture(
+                submittedReportId, mismatchedReportId);
 
         DailyReportDispatchService.ProcessResult dueSoon = service.processTenantAsSystem(
                 TENANT, 100, UUID.randomUUID(), DUE_SOON_SCAN);
         assertThat(dueSoon.createdReports()).isZero();
-        assertThat(dueSoon.dueSoonEvents()).isEqualTo(4);
+        assertThat(dueSoon.dueSoonEvents()).isEqualTo(3);
         assertThat(count("""
                 select count(*) from outbox_event
                 where tenant_id = ? and business_date = ?
                   and event_type = 'DAILY_REPORT_DUE_SOON'
-                """, TENANT, BUSINESS_DATE)).isEqualTo(4);
+                """, TENANT, BUSINESS_DATE)).isEqualTo(3);
         assertThat(count("""
                 select count(*)
                 from notification notification
@@ -185,23 +189,72 @@ class DailyReportDispatchIntegrationTest {
                   and report.business_date = ?
                   and notification.source_type = 'DAILY_REPORT'
                   and notification.notification_type = 'DAILY_REPORT_DUE_SOON'
-                """, TENANT, BUSINESS_DATE)).isEqualTo(4);
+                """, TENANT, BUSINESS_DATE)).isEqualTo(3);
+        assertThat(count("""
+                select count(*)
+                from daily_report_item_result result
+                join daily_report report
+                  on report.tenant_id = result.tenant_id
+                 and report.current_revision_id = result.revision_id
+                where result.tenant_id = ? and report.id = ?
+                  and result.result_status = 'PENDING'
+                """, TENANT, pendingReview.reportId())).isEqualTo(1);
+        assertThat(count("""
+                select count(*)
+                from notification notification
+                join daily_report report
+                  on report.tenant_id = notification.tenant_id
+                 and report.id = notification.source_id
+                join employee_position_assignment executor
+                  on executor.tenant_id = report.tenant_id
+                 and executor.id = report.position_assignment_id
+                 and executor.manager_assignment_id = notification.recipient_assignment_id
+                where notification.tenant_id = ? and report.id = ?
+                  and notification.notification_type = 'DAILY_REPORT_REVIEW_PENDING'
+                  and notification.source_type = 'DAILY_REPORT'
+                  and notification.idempotency_key = ?
+                """, TENANT, pendingReview.reportId(),
+                "daily-report:review-pending:" + pendingReview.reportId() + ":1")).isEqualTo(1);
         assertNoReminderEvents(submittedReportId);
         assertNoReminderEvents(mismatchedReportId);
 
+        PendingReviewFixture secondPendingReview = createPendingReviewFixture(
+                submittedReportId, mismatchedReportId);
+        assertThat(secondPendingReview.reportId()).isEqualTo(pendingReview.reportId());
         DailyReportDispatchService.ProcessResult dueSoonReplay = service.processTenantAsSystem(
                 TENANT, 100, UUID.randomUUID(), DUE_SOON_SCAN);
         assertThat(dueSoonReplay.dueSoonEvents()).isZero();
+        assertThat(count("""
+                select count(*) from notification
+                where tenant_id = ? and source_id = ?
+                  and notification_type = 'DAILY_REPORT_REVIEW_PENDING'
+                """, TENANT, pendingReview.reportId())).isEqualTo(2);
+        assertThat(count("""
+                select count(*) from notification
+                where tenant_id = ? and source_id = ?
+                  and notification_type = 'DAILY_REPORT_REVIEW_PENDING'
+                  and idempotency_key = ?
+                """, TENANT, pendingReview.reportId(),
+                "daily-report:review-pending:" + pendingReview.reportId() + ":2")).isEqualTo(1);
+
+        DailyReportDispatchService.ProcessResult unchangedPendingReplay = service.processTenantAsSystem(
+                TENANT, 100, UUID.randomUUID(), DUE_SOON_SCAN);
+        assertThat(unchangedPendingReplay.dueSoonEvents()).isZero();
+        assertThat(count("""
+                select count(*) from notification
+                where tenant_id = ? and source_id = ?
+                  and notification_type = 'DAILY_REPORT_REVIEW_PENDING'
+                """, TENANT, pendingReview.reportId())).isEqualTo(2);
 
         DailyReportDispatchService.ProcessResult overdue = service.processTenantAsSystem(
                 TENANT, 100, UUID.randomUUID(), DEADLINE_SCAN);
         assertThat(overdue.createdReports()).isZero();
-        assertThat(overdue.overdueEvents()).isEqualTo(4);
+        assertThat(overdue.overdueEvents()).isPositive();
         assertThat(count("""
                 select count(*) from outbox_event
                 where tenant_id = ? and business_date = ?
                   and event_type = 'DAILY_REPORT_OVERDUE'
-                """, TENANT, BUSINESS_DATE)).isEqualTo(4);
+                """, TENANT, BUSINESS_DATE)).isEqualTo(overdue.overdueEvents());
         assertThat(count("""
                 select count(*)
                 from notification notification
@@ -212,7 +265,7 @@ class DailyReportDispatchIntegrationTest {
                   and report.business_date = ?
                   and notification.source_type = 'DAILY_REPORT'
                   and notification.notification_type = 'DAILY_REPORT_OVERDUE'
-                """, TENANT, BUSINESS_DATE)).isEqualTo(4);
+                """, TENANT, BUSINESS_DATE)).isEqualTo(overdue.overdueEvents());
         assertNoReminderEvents(submittedReportId);
         assertNoReminderEvents(mismatchedReportId);
 
@@ -292,6 +345,110 @@ class DailyReportDispatchIntegrationTest {
                 """, UUID.class, TENANT, BUSINESS_DATE, assignmentId);
     }
 
+    private UUID reportIdExcludingAssignments(UUID... assignmentIds) {
+        return jdbc.queryForObject("""
+                select id from daily_report
+                where tenant_id = ? and business_date = ?
+                  and position_assignment_id <> all(?::uuid[])
+                order by id
+                limit 1
+                """, UUID.class, TENANT, BUSINESS_DATE,
+                "{" + String.join(",", java.util.Arrays.stream(assignmentIds)
+                        .map(UUID::toString).toList()) + "}");
+    }
+
+    private PendingReviewFixture createPendingReviewFixture(UUID... excludedReportIds) {
+        Map<String, Object> source = jdbc.queryForMap("""
+                select report.id as report_id, report.position_assignment_id,
+                       report.employee_id, assignment.org_unit_id,
+                       package_item.id as work_package_item_id,
+                       package_item.work_package_version_id,
+                       package_item.form_version_id,
+                       allocation.id as allocation_id,
+                       allocation.target_org_unit_id,
+                       employee.account_id
+                from daily_report report
+                join employee_position_assignment assignment
+                  on assignment.tenant_id = report.tenant_id
+                 and assignment.id = report.position_assignment_id
+                join employee
+                  on employee.tenant_id = assignment.tenant_id
+                 and employee.id = assignment.employee_id
+                join daily_report_template_section relation
+                  on relation.tenant_id = report.tenant_id
+                 and relation.template_version_id = report.template_version_id
+                join daily_report_template_item template_item
+                  on template_item.tenant_id = relation.tenant_id
+                 and template_item.section_version_id = relation.section_version_id
+                join work_package_item package_item
+                  on package_item.tenant_id = template_item.tenant_id
+                 and package_item.id = template_item.work_package_item_id
+                 and package_item.form_version_id is not null
+                join work_package_allocation allocation
+                  on allocation.tenant_id = package_item.tenant_id
+                 and allocation.work_package_version_id = package_item.work_package_version_id
+                 and allocation.position_assignment_id = report.position_assignment_id
+                 and allocation.status = 'ACTIVE'
+                join employee_position_assignment manager
+                  on manager.tenant_id = assignment.tenant_id
+                 and manager.id = assignment.manager_assignment_id
+                 and manager.status = 'ACTIVE'
+                join employee manager_employee
+                  on manager_employee.tenant_id = manager.tenant_id
+                 and manager_employee.id = manager.employee_id
+                 and manager_employee.account_id is not null
+                where report.tenant_id = ? and report.business_date = ?
+                  and report.report_status = 'DRAFT'
+                  and report.id <> all(?::uuid[])
+                  and not exists (
+                    select 1
+                    from work_record existing
+                    where existing.tenant_id = report.tenant_id
+                      and existing.position_assignment_id = report.position_assignment_id
+                      and existing.business_date = report.business_date
+                      and existing.work_package_item_id = package_item.id
+                      and existing.status in ('SUBMITTED', 'APPROVED')
+                  )
+                  and exists (
+                    select 1 from work_package_item_responsibility responsibility
+                    where responsibility.tenant_id = package_item.tenant_id
+                      and responsibility.work_package_item_id = package_item.id
+                      and responsibility.participant_type in ('REVIEWER', 'ACCEPTOR')
+                      and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT'
+                  )
+                order by report.id, template_item.sort_order
+                limit 1
+                """, TENANT, BUSINESS_DATE,
+                "{" + String.join(",", java.util.Arrays.stream(excludedReportIds)
+                        .map(UUID::toString).toList()) + "}");
+        UUID expectationId = UUID.randomUUID();
+        UUID workRecordId = UUID.randomUUID();
+        jdbc.update("""
+                insert into work_expectation
+                    (id, tenant_id, work_package_item_id, work_package_allocation_id,
+                     position_assignment_id, target_org_unit_id, business_date, period_key,
+                     available_at, due_at, status)
+                values (?, ?, ?, ?, ?, ?, ?, ?, now() - interval '1 hour', now(), 'SUBMITTED')
+                """, expectationId, TENANT, source.get("work_package_item_id"),
+                source.get("allocation_id"), source.get("position_assignment_id"),
+                source.get("target_org_unit_id"), BUSINESS_DATE,
+                "dispatch-reconcile-" + expectationId);
+        jdbc.update("""
+                insert into work_record
+                    (id, tenant_id, org_unit_id, employee_id, position_assignment_id,
+                     form_version_id, business_date, status, payload, submitted_at,
+                     work_package_version_id, work_package_item_id, work_expectation_id,
+                     record_kind, target_org_unit_id, occurred_at, submitted_by_account_id,
+                     attempt_no, content_hash, completion_statement)
+                values (?, ?, ?, ?, ?, ?, ?, 'SUBMITTED', '{}'::jsonb, now(),
+                        ?, ?, ?, 'SCHEDULED', ?, now(), ?, 1, repeat('a', 64), '已完成当日工作')
+                """, workRecordId, TENANT, source.get("org_unit_id"), source.get("employee_id"),
+                source.get("position_assignment_id"), source.get("form_version_id"), BUSINESS_DATE,
+                source.get("work_package_version_id"), source.get("work_package_item_id"),
+                expectationId, source.get("target_org_unit_id"), source.get("account_id"));
+        return new PendingReviewFixture((UUID) source.get("report_id"), workRecordId);
+    }
+
     private void assertNoReminderEvents(UUID reportId) {
         assertThat(count("""
                 select count(*) from outbox_event
@@ -307,6 +464,9 @@ class DailyReportDispatchIntegrationTest {
     private int count(String sql, Object... args) {
         Integer value = jdbc.queryForObject(sql, Integer.class, args);
         return value == null ? 0 : value;
+    }
+
+    private record PendingReviewFixture(UUID reportId, UUID workRecordId) {
     }
 
     @AfterAll

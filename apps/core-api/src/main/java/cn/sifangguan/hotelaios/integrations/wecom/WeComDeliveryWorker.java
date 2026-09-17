@@ -20,9 +20,10 @@ import java.util.UUID;
 
 /**
  * Opt-in delivery worker over the existing notification_delivery queue.
- * Application chats are selected only through active wecom_chat_binding rows
- * whose allowlist contains TASK_NOTIFICATION; otherwise the bound member is
- * messaged directly.
+ * Application chats are selected only for explicitly shareable management tasks
+ * through active wecom_chat_binding rows whose allowlist contains
+ * TASK_NOTIFICATION. Work expectations, daily reports and work-record reviews
+ * are always delivered directly to the bound member.
  */
 @Component
 @ConditionalOnProperty(name = {"app.wecom.enabled", "app.wecom.worker.enabled", "app.security.local-login.enabled"}, havingValue = "true")
@@ -59,15 +60,19 @@ public class WeComDeliveryWorker {
         enqueueTaskNotifications();
         for (Delivery delivery : claim()) {
             try {
-                String endpoint = delivery.chatId() != null
+                boolean groupDelivery = useGroupChat(delivery.sourceType(), delivery.chatId());
+                String endpoint = groupDelivery
                         ? "chat:" + delivery.chatId() : "user:" + delivery.userId();
+                if (!groupDelivery && (delivery.userId() == null || delivery.userId().isBlank())) {
+                    throw new IllegalStateException("WeCom personal delivery has no active user binding");
+                }
                 if (!MessageDigest.isEqual(
                         delivery.endpointHash().getBytes(StandardCharsets.US_ASCII),
                         sha256(properties.corpId() + ":" + endpoint).getBytes(StandardCharsets.US_ASCII))) {
                     throw new IllegalStateException("WeCom delivery endpoint binding changed");
                 }
                 URI deepLink = oauthStartLink(delivery.sourceType(), delivery.sourceId());
-                String externalMessageId = delivery.chatId() != null
+                String externalMessageId = groupDelivery
                         ? apiClient.sendApplicationChatTaskLink(delivery.chatId(), delivery.title(), delivery.content(), deepLink)
                         : apiClient.sendApplicationTaskLink(delivery.userId(), delivery.title(), delivery.content(), deepLink);
                 markSent(delivery.id(), externalMessageId);
@@ -81,7 +86,7 @@ public class WeComDeliveryWorker {
         transactions.executeWithoutResult(status -> {
             prepare();
             List<PendingNotification> rows = jdbc.query("""
-                    select n.id, n.recipient_account_id, ub.wecom_user_id,
+                    select n.id, n.recipient_account_id, n.source_type, ub.wecom_user_id,
                            chat.chat_id
                     from notification n
                     left join management_task task
@@ -89,6 +94,32 @@ public class WeComDeliveryWorker {
                     left join work_expectation expectation
                       on n.source_type = 'WORK_EXPECTATION'
                      and expectation.tenant_id = n.tenant_id and expectation.id = n.source_id
+                    left join daily_report report
+                      on n.source_type = 'DAILY_REPORT'
+                     and report.tenant_id = n.tenant_id and report.id = n.source_id
+                    left join work_record record
+                      on n.source_type = 'WORK_RECORD'
+                     and record.tenant_id = n.tenant_id and record.id = n.source_id
+                    left join lateral (
+                        select count(*)::integer as pending_count
+                        from daily_report_item_result result
+                        join daily_report_template_item template_item
+                          on template_item.tenant_id = result.tenant_id
+                         and template_item.id = result.template_item_id
+                        where result.tenant_id = report.tenant_id
+                          and result.revision_id = report.current_revision_id
+                          and result.result_status = 'PENDING'
+                          and result.system_prefilled
+                          and result.source_summary ->> 'sourceType' = 'WORK_RECORD'
+                          and exists (
+                            select 1
+                            from work_package_item_responsibility responsibility
+                            where responsibility.tenant_id = template_item.tenant_id
+                              and responsibility.work_package_item_id = template_item.work_package_item_id
+                              and responsibility.participant_type in ('REVIEWER', 'ACCEPTOR')
+                              and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT'
+                          )
+                    ) review_state on true
                     left join wecom_user_binding ub
                       on ub.tenant_id = n.tenant_id and ub.corp_id = :corpId
                      and ub.account_id = n.recipient_account_id and ub.status = 'ACTIVE'
@@ -108,8 +139,18 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where n.tenant_id = :tenantId
                       and ((n.source_type = 'TASK' and task.id is not null)
-                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null))
-                      and (ub.id is not null or chat.chat_id is not null)
+                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null)
+                           or (n.source_type = 'DAILY_REPORT' and report.id is not null
+                               and (n.notification_type <> 'DAILY_REPORT_REVIEW_PENDING'
+                                    or (review_state.pending_count > 0
+                                        and n.idempotency_key = concat(
+                                            'daily-report:review-pending:', report.id::text,
+                                            ':', review_state.pending_count::text))))
+                           or (n.source_type = 'WORK_RECORD' and record.id is not null
+                               and (n.notification_type <> 'WORK_RECORD_REVIEW_PENDING'
+                                    or record.status = 'SUBMITTED')))
+                      and (ub.id is not null
+                           or (n.source_type = 'TASK' and chat.chat_id is not null))
                       and not exists (
                           select 1 from notification_delivery d
                           where d.tenant_id = n.tenant_id and d.notification_id = n.id and d.channel = 'WECHAT'
@@ -119,9 +160,11 @@ public class WeComDeliveryWorker {
                     """, params().addValue("corpId", properties.corpId()).addValue("batchSize", batchSize),
                     (rs, rowNum) -> new PendingNotification(
                             rs.getObject("id", UUID.class), rs.getObject("recipient_account_id", UUID.class),
-                            rs.getString("wecom_user_id"), rs.getString("chat_id")));
+                            rs.getString("source_type"), rs.getString("wecom_user_id"),
+                            rs.getString("chat_id")));
             for (PendingNotification row : rows) {
-                String endpoint = row.chatId() != null ? "chat:" + row.chatId() : "user:" + row.userId();
+                boolean groupDelivery = useGroupChat(row.sourceType(), row.chatId());
+                String endpoint = groupDelivery ? "chat:" + row.chatId() : "user:" + row.userId();
                 jdbc.update("""
                         insert into notification_delivery
                             (tenant_id, notification_id, channel, recipient_endpoint_hash, status)
@@ -147,6 +190,32 @@ public class WeComDeliveryWorker {
                     left join work_expectation expectation
                       on n.source_type = 'WORK_EXPECTATION'
                      and expectation.tenant_id = n.tenant_id and expectation.id = n.source_id
+                    left join daily_report report
+                      on n.source_type = 'DAILY_REPORT'
+                     and report.tenant_id = n.tenant_id and report.id = n.source_id
+                    left join work_record record
+                      on n.source_type = 'WORK_RECORD'
+                     and record.tenant_id = n.tenant_id and record.id = n.source_id
+                    left join lateral (
+                        select count(*)::integer as pending_count
+                        from daily_report_item_result result
+                        join daily_report_template_item template_item
+                          on template_item.tenant_id = result.tenant_id
+                         and template_item.id = result.template_item_id
+                        where result.tenant_id = report.tenant_id
+                          and result.revision_id = report.current_revision_id
+                          and result.result_status = 'PENDING'
+                          and result.system_prefilled
+                          and result.source_summary ->> 'sourceType' = 'WORK_RECORD'
+                          and exists (
+                            select 1
+                            from work_package_item_responsibility responsibility
+                            where responsibility.tenant_id = template_item.tenant_id
+                              and responsibility.work_package_item_id = template_item.work_package_item_id
+                              and responsibility.participant_type in ('REVIEWER', 'ACCEPTOR')
+                              and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT'
+                          )
+                    ) review_state on true
                     left join wecom_user_binding ub
                       on ub.tenant_id = n.tenant_id and ub.corp_id = :corpId
                      and ub.account_id = n.recipient_account_id and ub.status = 'ACTIVE'
@@ -165,11 +234,21 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where d.tenant_id = :tenantId and d.channel = 'WECHAT'
                       and ((n.source_type = 'TASK' and task.id is not null)
-                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null))
+                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null)
+                           or (n.source_type = 'DAILY_REPORT' and report.id is not null
+                               and (n.notification_type <> 'DAILY_REPORT_REVIEW_PENDING'
+                                    or (review_state.pending_count > 0
+                                        and n.idempotency_key = concat(
+                                            'daily-report:review-pending:', report.id::text,
+                                            ':', review_state.pending_count::text))))
+                           or (n.source_type = 'WORK_RECORD' and record.id is not null
+                               and (n.notification_type <> 'WORK_RECORD_REVIEW_PENDING'
+                                    or record.status = 'SUBMITTED')))
                       and d.status in ('PENDING', 'FAILED')
                       and d.available_at <= now() and (d.next_retry_at is null or d.next_retry_at <= now())
                       and (d.locked_until is null or d.locked_until < now())
-                      and (ub.id is not null or chat.chat_id is not null)
+                      and (ub.id is not null
+                           or (n.source_type = 'TASK' and chat.chat_id is not null))
                     order by d.available_at, d.created_at, d.id
                     for update of d skip locked
                     limit :batchSize
@@ -225,14 +304,32 @@ public class WeComDeliveryWorker {
 
     private URI oauthStartLink(String sourceType, UUID sourceId) {
         URI callback = properties.oauthCallbackUrl();
-        String returnTo = "WORK_EXPECTATION".equals(sourceType)
-                ? "#/my-work?expectationId=" + sourceId
-                : "#/tasks?view=mine&taskId=" + sourceId;
+        String returnTo = returnToFor(sourceType, sourceId);
         URI start = UriComponentsBuilder.newInstance().scheme(callback.getScheme()).host(callback.getHost())
                 .port(callback.getPort()).path("/api/v1/integrations/wecom/oauth/start")
                 .queryParam("returnTo", returnTo)
                 .build().encode().toUri();
         return start;
+    }
+
+    static String returnToFor(String sourceType, UUID sourceId) {
+        if (sourceId == null) {
+            throw new IllegalArgumentException("WeCom notification source id is required");
+        }
+        return switch (sourceType) {
+            case "TASK" -> "#/tasks?view=mine&taskId=" + sourceId;
+            case "WORK_EXPECTATION" -> "#/my-work?expectationId=" + sourceId;
+            case "DAILY_REPORT" -> "#/daily-reports/" + sourceId;
+            // The OAuth return-target allowlist intentionally does not admit team-work yet.
+            // Keep review reminders usable without widening that security boundary here; the
+            // reviewer lands on the authenticated workbench and can open 团队工作 from there.
+            case "WORK_RECORD" -> "#/workbench";
+            default -> throw new IllegalArgumentException("Unsupported WeCom notification source type");
+        };
+    }
+
+    static boolean useGroupChat(String sourceType, String chatId) {
+        return "TASK".equals(sourceType) && chatId != null && !chatId.isBlank();
     }
 
     private void prepare() { databaseContext.apply(properties.tenantId()); }
@@ -247,7 +344,8 @@ public class WeComDeliveryWorker {
         }
     }
 
-    private record PendingNotification(UUID notificationId, UUID accountId, String userId, String chatId) { }
+    private record PendingNotification(UUID notificationId, UUID accountId, String sourceType,
+                                       String userId, String chatId) { }
     private record Delivery(UUID id, int attemptCount, String title, String content,
                             String sourceType, UUID sourceId,
                             String endpointHash, String userId, String chatId) { }

@@ -86,6 +86,21 @@ function displayValue(value: unknown): string | undefined {
   try { return JSON.stringify(value) } catch { return String(value) }
 }
 
+function displayFactSummary(value: unknown): string {
+  const facts = jsonRow(value)
+  if (Object.keys(facts).length === 0) return text(value, '暂无结构化事实')
+  const parts = [
+    ['应完成', facts.expectedCount],
+    ['已完成', facts.completedCount],
+    ['待审核', facts.pendingReviewCount],
+    ['异常', facts.exceptionCount],
+    ['逾期', facts.missedCount],
+    ['证据', facts.evidenceCount],
+  ].filter(([, factValue]) => factValue !== undefined && factValue !== null)
+    .map(([label, factValue]) => `${label} ${number(factValue)} 项`)
+  return parts.length ? parts.join('；') : '暂无结构化事实'
+}
+
 function normalizeEvidence(value: unknown, index: number): DailyReportEvidence {
   const source = row(value)
   return {
@@ -122,6 +137,10 @@ function normalizeItem(
   const evidencePolicy = jsonRow(template.evidencePolicy)
   const resolvedValue = result.value
   const systemPrefilled = result.systemPrefilled === true
+  const normalizedResultStatus = text(result.resultStatus).toUpperCase()
+  const resultStatus = ['PENDING', 'COMPLETED', 'EXCEPTION', 'NOT_APPLICABLE'].includes(normalizedResultStatus)
+    ? normalizedResultStatus as DailyReportItemResult['resultStatus']
+    : undefined
   return {
     id: itemResultId || templateItemId || `item:${index}`,
     templateItemId: templateItemId || text(result.templateItemId),
@@ -132,6 +151,7 @@ function normalizeItem(
     required: template.required !== false,
     evidenceRequired: template.evidenceRequired === true || evidencePolicy.required === true || number(evidencePolicy.minimumCount) > 0,
     dataSource: dataSource(template.dataSourceType || template.dataSource),
+    resultStatus,
     systemValue: systemPrefilled ? displayValue(resolvedValue) : undefined,
     employeeValue: systemPrefilled ? undefined : displayValue(resolvedValue),
     exception: result.exceptionFlag === true || result.resultStatus === 'EXCEPTION',
@@ -254,8 +274,15 @@ function normalizeDetail(value: unknown, identity: ApiIdentity): DailyReportDeta
   const currentEvidenceRows = rows(source.evidence).filter((item) => text(item.revisionId) === currentRevision.id)
   currentRevision.sections = normalizeSections(configuration, currentItemRows, currentSourceRows, currentEvidenceRows)
   const allItems = currentRevision.sections.flatMap((section) => section.items)
-  const completedItems = allItems.filter((item) => item.exception || Boolean(item.employeeValue?.trim()) || item.systemValue !== undefined)
-  const missingRequiredCount = allItems.filter((item) => item.required && !item.exception && !item.employeeValue?.trim() && item.systemValue === undefined).length
+  const completedItems = allItems.filter((item) => item.exception
+    || item.resultStatus === 'COMPLETED'
+    || item.resultStatus === 'NOT_APPLICABLE'
+    || Boolean(item.employeeValue?.trim()))
+  const missingRequiredCount = allItems.filter((item) => item.required
+    && !item.exception
+    && item.resultStatus !== 'COMPLETED'
+    && item.resultStatus !== 'NOT_APPLICABLE'
+    && !item.employeeValue?.trim()).length
   const summary = normalizeSummary({
     ...source,
     templateName: source.templateName || configuration.title || baseTemplate.name,
@@ -278,7 +305,7 @@ function normalizeDetail(value: unknown, identity: ApiIdentity): DailyReportDeta
     revisions,
     aiRecommendations: rows(source.aiRecommendations).map((recommendation, index) => ({
       id: text(recommendation.id, `ai:${index}`),
-      facts: text(recommendation.facts, '暂无结构化事实'),
+      facts: displayFactSummary(recommendation.facts),
       analysis: text(recommendation.analysis, '暂无补充分析'),
       recommendation: text(recommendation.recommendation, '暂无建议内容'),
       sourceLabels: Array.isArray(recommendation.sourceLabels) ? recommendation.sourceLabels.map(String) : [],

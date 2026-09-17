@@ -289,6 +289,7 @@ public class WorkDataService {
                 "WORK_RECORD", id, request.payload().toString());
         if ("SUBMITTED".equals(status)) {
             emitSubmitted(principal, id);
+            projectAndNotifySubmitted(principal, id);
         }
         return response("id", id, "status", status, "businessDate", request.businessDate(),
                 "recordKind", recordKind, "attemptNo", attemptNo, "rowVersion", 0L);
@@ -357,6 +358,7 @@ public class WorkDataService {
         updateExpectationAfterRecord(principal, record.expectationId(), "SUBMITTED");
         auditWriter.record("WORK_RECORD_SUBMITTED", "WORK_RECORD", recordId, record.payloadJson());
         emitSubmitted(principal, recordId);
+        projectAndNotifySubmitted(principal, recordId);
         return response("id", recordId, "status", "SUBMITTED", "rowVersion", request.expectedVersion() + 1);
     }
 
@@ -412,9 +414,7 @@ public class WorkDataService {
                 "{\"workRecordId\":\"" + recordId + "\",\"orgUnitId\":\""
                         + record.targetOrgUnitId() + "\",\"positionAssignmentId\":\""
                         + record.assignmentId() + "\"}");
-        if ("APPROVED".equals(outcome)) {
-            routineProjectionService.projectApprovedWorkRecord(recordId);
-        }
+        routineProjectionService.projectWorkRecord(recordId);
         return response("id", recordId, "status", outcome, "rowVersion", request.expectedVersion() + 1);
     }
 
@@ -995,6 +995,118 @@ public class WorkDataService {
         }
     }
 
+    private void projectAndNotifySubmitted(TenantPrincipal principal, UUID recordId) {
+        routineProjectionService.projectWorkRecord(recordId);
+        SupervisorNotificationContext context = jdbc.queryForObject("""
+                select record.business_date, coalesce(item.name, '工作记录') as item_name,
+                       exists (
+                         select 1
+                         from work_package_item_responsibility responsibility
+                         where responsibility.tenant_id = record.tenant_id
+                           and responsibility.work_package_item_id = record.work_package_item_id
+                           and responsibility.participant_type in ('REVIEWER', 'ACCEPTOR')
+                           and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT'
+                       ) as direct_manager_review_configured,
+                       (
+                         select manager.id
+                         from employee_position_assignment executor
+                         join employee_position_assignment manager
+                           on manager.tenant_id = executor.tenant_id
+                          and manager.id = executor.manager_assignment_id
+                         join employee manager_employee
+                           on manager_employee.tenant_id = manager.tenant_id
+                          and manager_employee.id = manager.employee_id
+                         where executor.tenant_id = record.tenant_id
+                           and executor.id = record.position_assignment_id
+                           and manager.status = 'ACTIVE'
+                           and manager.valid_from <= record.business_date
+                           and (manager.valid_to is null or manager.valid_to >= record.business_date)
+                           and manager_employee.employment_status = 'ACTIVE'
+                           and manager_employee.account_id is not null
+                         limit 1
+                       ) as manager_assignment_id
+                from work_record record
+                left join work_package_item item
+                  on item.tenant_id = record.tenant_id and item.id = record.work_package_item_id
+                where record.tenant_id = :tenantId and record.id = :recordId
+                  and record.status = 'SUBMITTED'
+                """, base(principal).addValue("recordId", recordId),
+                (rs, rowNum) -> new SupervisorNotificationContext(
+                        rs.getObject("business_date", java.time.LocalDate.class),
+                        rs.getString("item_name"),
+                        rs.getBoolean("direct_manager_review_configured"),
+                        rs.getObject("manager_assignment_id", UUID.class)));
+        if (context == null || !context.directManagerReviewConfigured()) {
+            return;
+        }
+        if (context.managerAssignmentId() == null) {
+            recordMissingSupervisorAudit(recordId, "DIRECT_MANAGER_ASSIGNMENT_UNRESOLVED");
+            return;
+        }
+        UUID notificationId = UUID.randomUUID();
+        String idempotencyKey = "work-record:review-pending:" + recordId;
+        int inserted = jdbc.update("""
+                insert into notification
+                    (id, tenant_id, recipient_account_id, recipient_assignment_id,
+                     notification_type, title, content, source_type, source_id, idempotency_key)
+                select :id, :tenantId, manager_employee.account_id, manager.id,
+                       'WORK_RECORD_REVIEW_PENDING', '工作记录待复核', :content,
+                       'WORK_RECORD', :recordId, :idempotencyKey
+                from employee_position_assignment manager
+                join employee manager_employee
+                  on manager_employee.tenant_id = manager.tenant_id
+                 and manager_employee.id = manager.employee_id
+                where manager.tenant_id = :tenantId and manager.id = :managerAssignmentId
+                  and manager.status = 'ACTIVE'
+                  and manager.valid_from <= :businessDate
+                  and (manager.valid_to is null or manager.valid_to >= :businessDate)
+                  and manager_employee.employment_status = 'ACTIVE'
+                  and manager_employee.account_id is not null
+                on conflict (tenant_id, recipient_account_id, idempotency_key) do nothing
+                """, base(principal)
+                .addValue("id", notificationId)
+                .addValue("recordId", recordId)
+                .addValue("managerAssignmentId", context.managerAssignmentId())
+                .addValue("businessDate", context.businessDate())
+                .addValue("content", context.businessDate() + " 的“" + context.itemName()
+                        + "”已提交，请及时审核。")
+                .addValue("idempotencyKey", idempotencyKey));
+        if (inserted == 1) {
+            auditWriter.record(
+                    "NOTIFICATION_CREATED",
+                    "NOTIFICATION",
+                    notificationId,
+                    "{\"type\":\"WORK_RECORD_REVIEW_PENDING\"}");
+        } else if (!reviewNotificationExists(principal, context.managerAssignmentId(), idempotencyKey)) {
+            // Reporting lines can change between resolution and insert. An insert-select makes
+            // that race a no-op instead of an exception that could roll back the submission.
+            recordMissingSupervisorAudit(recordId, "DIRECT_MANAGER_RECIPIENT_UNAVAILABLE");
+        }
+    }
+
+    private boolean reviewNotificationExists(
+            TenantPrincipal principal,
+            UUID managerAssignmentId,
+            String idempotencyKey
+    ) {
+        Integer count = jdbc.queryForObject("""
+                select count(*) from notification
+                where tenant_id = :tenantId and recipient_assignment_id = :managerAssignmentId
+                  and idempotency_key = :idempotencyKey
+                """, base(principal)
+                .addValue("managerAssignmentId", managerAssignmentId)
+                .addValue("idempotencyKey", idempotencyKey), Integer.class);
+        return count != null && count > 0;
+    }
+
+    private void recordMissingSupervisorAudit(UUID recordId, String reason) {
+        auditWriter.record(
+                "WORK_RECORD_REVIEW_NOTIFICATION_SKIPPED",
+                "WORK_RECORD",
+                recordId,
+                "{\"reason\":\"" + reason + "\"}");
+    }
+
     private TenantPrincipal prepare() {
         TenantPrincipal principal = accessPolicy.principal();
         databaseContext.apply(principal.tenantId());
@@ -1099,6 +1211,14 @@ public class WorkDataService {
             java.time.LocalDate businessDate,
             OffsetDateTime occurredAt,
             String payloadJson
+    ) {
+    }
+
+    private record SupervisorNotificationContext(
+            java.time.LocalDate businessDate,
+            String itemName,
+            boolean directManagerReviewConfigured,
+            UUID managerAssignmentId
     ) {
     }
 }

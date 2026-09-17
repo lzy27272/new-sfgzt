@@ -3,27 +3,40 @@ package cn.sifangguan.hotelaios.dailyreports;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * Projects approved routine work into a still-editable daily report. The projection is
- * fact-only and idempotent: it never marks unreviewed work complete and never overwrites
- * the employee's manually entered "other work" item.
+ * Projects submitted and approved routine work into a still-editable daily report. The
+ * projection is fact-only and idempotent: unreviewed work remains pending, rejected work
+ * is removed from the draft projection, and manually entered "other work" is untouched.
  */
 @Service
+@Transactional
 public class DailyReportRoutineProjectionService {
     private static final String RULE_PROVIDER = "INTERNAL_RULE_ENGINE";
+    private static final int MAX_CONTENT_ISSUES = 6;
+    private static final int MAX_DECLARED_ACTIONS = 4;
+    private static final int MAX_FACT_LENGTH = 180;
+    private static final int MAX_FORM_DEPTH = 4;
 
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
@@ -40,6 +53,10 @@ public class DailyReportRoutineProjectionService {
     }
 
     public void projectApprovedWorkRecord(UUID workRecordId) {
+        projectWorkRecord(workRecordId);
+    }
+
+    public void projectWorkRecord(UUID workRecordId) {
         TenantPrincipal principal = prepare();
         List<Map<String, Object>> reports = jdbc.queryForList("""
                 select report.id as report_id, report.current_revision_id as revision_id
@@ -60,7 +77,8 @@ public class DailyReportRoutineProjectionService {
                  and relation.section_version_id = item.section_version_id
                  and relation.template_version_id = report.template_version_id
                 where record.tenant_id = :tenantId and record.id = :recordId
-                  and record.status = 'APPROVED' and report.current_revision_id is not null
+                  and record.status in ('SUBMITTED', 'APPROVED', 'REJECTED')
+                  and report.current_revision_id is not null
                 """, base(principal).addValue("recordId", workRecordId));
         for (Map<String, Object> report : reports) {
             projectReport((UUID) report.get("report_id"), (UUID) report.get("revision_id"));
@@ -69,11 +87,12 @@ public class DailyReportRoutineProjectionService {
 
     public void projectReport(UUID reportId, UUID revisionId) {
         TenantPrincipal principal = prepare();
+        if (!lockDraftReport(principal, reportId, revisionId)) return;
         List<ProjectableRecord> records = jdbc.query("""
                 select distinct on (item.id)
                        item.id as template_item_id, record.id as work_record_id,
                        record.position_assignment_id, record.submitted_by_account_id,
-                       record.attempt_no, record.payload::text, record.completion_statement,
+                       record.status, record.attempt_no, record.payload::text, record.completion_statement,
                        record.exception_statement, record.next_action, record.content_hash,
                        record.occurred_at, record.reviewed_at, package_item.report_policy::text
                 from daily_report report
@@ -92,10 +111,10 @@ public class DailyReportRoutineProjectionService {
                   on package_item.tenant_id = item.tenant_id
                  and package_item.id = item.work_package_item_id
                 join work_record record
-                  on record.tenant_id = report.tenant_id
+                 on record.tenant_id = report.tenant_id
                  and record.business_date = report.business_date
                  and record.work_package_item_id = item.work_package_item_id
-                 and record.status = 'APPROVED'
+                 and record.status in ('SUBMITTED', 'APPROVED')
                 join work_expectation expectation
                   on expectation.tenant_id = record.tenant_id
                  and expectation.id = record.work_expectation_id
@@ -103,40 +122,128 @@ public class DailyReportRoutineProjectionService {
                 where report.tenant_id = :tenantId and report.id = :reportId
                   and report.report_status = 'DRAFT'
                   and coalesce((package_item.report_policy ->> 'dailyReport')::boolean, true)
-                order by item.id, record.attempt_no desc, record.reviewed_at desc, record.id
+                order by item.id, record.attempt_no desc, record.id desc
                 """, base(principal).addValue("reportId", reportId).addValue("revisionId", revisionId),
                 (rs, rowNum) -> new ProjectableRecord(
                         rs.getObject("template_item_id", UUID.class),
                         rs.getObject("work_record_id", UUID.class),
                         rs.getObject("position_assignment_id", UUID.class),
                         rs.getObject("submitted_by_account_id", UUID.class),
-                        rs.getInt("attempt_no"), rs.getString("payload"),
+                        rs.getString("status"), rs.getInt("attempt_no"), rs.getString("payload"),
                         rs.getString("completion_statement"), rs.getString("exception_statement"),
                         rs.getString("next_action"), rs.getString("content_hash"),
                         rs.getObject("occurred_at", java.time.OffsetDateTime.class),
                         rs.getObject("reviewed_at", java.time.OffsetDateTime.class),
                         rs.getString("report_policy")));
+        removeStaleRoutineProjections(principal, reportId, revisionId);
         for (ProjectableRecord record : records) {
             projectRecord(principal, revisionId, record);
         }
         refreshRuleAnalysis(principal, reportId, revisionId);
     }
 
+    private boolean lockDraftReport(TenantPrincipal principal, UUID reportId, UUID revisionId) {
+        return !jdbc.query("""
+                select report.id
+                from daily_report report
+                join daily_report_revision revision
+                  on revision.tenant_id = report.tenant_id
+                 and revision.id = :revisionId
+                 and revision.report_id = report.id
+                where report.tenant_id = :tenantId
+                  and report.id = :reportId
+                  and report.current_revision_id = revision.id
+                  and report.report_status = 'DRAFT'
+                  and revision.revision_status = 'DRAFT'
+                for update of report, revision
+                """, base(principal).addValue("reportId", reportId).addValue("revisionId", revisionId),
+                (rs, rowNum) -> rs.getObject("id", UUID.class)).isEmpty();
+    }
+
+    /**
+     * Removes only our own system projection when an item no longer has a submitted or
+     * approved record (for example after a supervisor rejects the pending submission).
+     * The canonical work record and its audit history remain untouched.
+     */
+    private void removeStaleRoutineProjections(
+            TenantPrincipal principal,
+            UUID reportId,
+            UUID revisionId
+    ) {
+        MapSqlParameterSource params = base(principal)
+                .addValue("reportId", reportId)
+                .addValue("revisionId", revisionId);
+        String stalePredicate = """
+                result.tenant_id = :tenantId
+                  and result.revision_id = :revisionId
+                  and result.system_prefilled
+                  and result.source_summary ->> 'sourceType' = 'WORK_RECORD'
+                  and exists (
+                      select 1
+                      from daily_report report
+                      join daily_report_template_section relation
+                        on relation.tenant_id = report.tenant_id
+                       and relation.template_version_id = report.template_version_id
+                      join daily_report_template_item item
+                        on item.tenant_id = relation.tenant_id
+                       and item.section_version_id = relation.section_version_id
+                       and item.id = result.template_item_id
+                       and item.work_package_item_id is not null
+                      where report.tenant_id = result.tenant_id
+                        and report.id = :reportId
+                        and not exists (
+                            select 1
+                            from work_record record
+                            join work_expectation expectation
+                              on expectation.tenant_id = record.tenant_id
+                             and expectation.id = record.work_expectation_id
+                            where record.tenant_id = report.tenant_id
+                              and record.business_date = report.business_date
+                              and record.work_package_item_id = item.work_package_item_id
+                              and record.status in ('SUBMITTED', 'APPROVED')
+                              and expectation.position_assignment_id = report.position_assignment_id
+                        )
+                  )
+                """;
+        jdbc.update("""
+                delete from daily_report_evidence evidence
+                using daily_report_item_result result
+                where evidence.tenant_id = result.tenant_id
+                  and evidence.revision_id = result.revision_id
+                  and evidence.item_result_id = result.id
+                  and
+                """ + stalePredicate, params);
+        jdbc.update("""
+                delete from daily_report_source_reference source
+                using daily_report_item_result result
+                where source.tenant_id = result.tenant_id
+                  and source.revision_id = result.revision_id
+                  and source.item_result_id = result.id
+                  and
+                """ + stalePredicate, params);
+        jdbc.update("""
+                delete from daily_report_item_result result
+                where
+                """ + stalePredicate, params);
+    }
+
     private void projectRecord(TenantPrincipal principal, UUID revisionId, ProjectableRecord record) {
         ObjectNode reportPolicy = readObject(record.reportPolicy());
         boolean includeEvidence = reportPolicy.path("includeEvidence").asBoolean(true);
         boolean includeExceptions = reportPolicy.path("includeExceptions").asBoolean(true);
+        boolean approved = "APPROVED".equals(record.status());
         ObjectNode value = objectMapper.createObjectNode();
         value.put("workRecordId", record.workRecordId().toString());
-        value.put("status", "APPROVED");
-        value.put("completion", blankToFallback(record.completionStatement(), "已完成"));
+        value.put("status", record.status());
+        value.put("completion", blankToFallback(record.completionStatement(),
+                approved ? "已完成" : "已提交，待主管审核"));
         String factLabel = reportPolicy.path("factLabel").asText("").trim();
         if (!factLabel.isBlank()) value.put("factLabel", factLabel);
         if (includeExceptions && !isBlank(record.exceptionStatement())) value.put("exception", record.exceptionStatement());
         if (!isBlank(record.nextAction())) value.put("nextAction", record.nextAction());
         value.set("formData", readObject(record.payload()));
-        value.put("reviewedAt", record.reviewedAt().toString());
-        boolean exception = includeExceptions && !isBlank(record.exceptionStatement())
+        if (record.reviewedAt() != null) value.put("reviewedAt", record.reviewedAt().toString());
+        boolean exception = approved && includeExceptions && !isBlank(record.exceptionStatement())
                 && !"无".equals(record.exceptionStatement().trim());
         int evidenceCount = includeEvidence ? countAttachments(principal, record.workRecordId()) : 0;
         ObjectNode summary = objectMapper.createObjectNode();
@@ -144,31 +251,61 @@ public class DailyReportRoutineProjectionService {
         summary.put("workRecordId", record.workRecordId().toString());
         summary.put("attemptNo", record.attemptNo());
         summary.put("evidenceCount", evidenceCount);
+        summary.put("reviewStatus", record.status());
         UUID resultId = jdbc.queryForObject("""
-                insert into daily_report_item_result
-                    (id, tenant_id, revision_id, template_item_id, result_status, value,
-                     system_prefilled, employee_confirmed, exception_flag,
-                     exception_statement, source_summary, content_hash)
-                values (:id, :tenantId, :revisionId, :templateItemId, :resultStatus,
-                        cast(:value as jsonb), true, false, :exception,
-                        :exceptionStatement, cast(:sourceSummary as jsonb), :contentHash)
-                on conflict (tenant_id, revision_id, template_item_id) do update
-                set result_status = excluded.result_status, value = excluded.value,
-                    system_prefilled = true, exception_flag = excluded.exception_flag,
-                    exception_statement = excluded.exception_statement,
-                    source_summary = excluded.source_summary, content_hash = excluded.content_hash,
-                    row_version = daily_report_item_result.row_version + 1
-                returning id
+                with changed as (
+                    insert into daily_report_item_result
+                        (id, tenant_id, revision_id, template_item_id, result_status, value,
+                         system_prefilled, employee_confirmed, exception_flag,
+                         exception_statement, source_summary, content_hash)
+                    values (:id, :tenantId, :revisionId, :templateItemId, :resultStatus,
+                            cast(:value as jsonb), true, false, :exception,
+                            :exceptionStatement, cast(:sourceSummary as jsonb), :contentHash)
+                    on conflict (tenant_id, revision_id, template_item_id) do update
+                    set result_status = excluded.result_status, value = excluded.value,
+                        system_prefilled = true, employee_confirmed = false,
+                        exception_flag = excluded.exception_flag,
+                        exception_statement = excluded.exception_statement,
+                        source_summary = excluded.source_summary, content_hash = excluded.content_hash,
+                        row_version = daily_report_item_result.row_version + 1
+                    where (daily_report_item_result.result_status,
+                           daily_report_item_result.value,
+                           daily_report_item_result.system_prefilled,
+                           daily_report_item_result.employee_confirmed,
+                           daily_report_item_result.exception_flag,
+                           daily_report_item_result.exception_statement,
+                           daily_report_item_result.source_summary,
+                           daily_report_item_result.content_hash)
+                          is distinct from
+                          (excluded.result_status,
+                           excluded.value,
+                           true,
+                           false,
+                           excluded.exception_flag,
+                           excluded.exception_statement,
+                           excluded.source_summary,
+                           excluded.content_hash)
+                    returning id
+                )
+                select id from changed
+                union all
+                select existing.id
+                from daily_report_item_result existing
+                where existing.tenant_id = :tenantId
+                  and existing.revision_id = :revisionId
+                  and existing.template_item_id = :templateItemId
+                  and not exists (select 1 from changed)
+                limit 1
                 """, base(principal).addValue("id", UUID.randomUUID())
                 .addValue("revisionId", revisionId).addValue("templateItemId", record.templateItemId())
-                .addValue("resultStatus", exception ? "EXCEPTION" : "COMPLETED")
+                .addValue("resultStatus", approved ? (exception ? "EXCEPTION" : "COMPLETED") : "PENDING")
                 .addValue("value", value.toString()).addValue("exception", exception)
                 .addValue("exceptionStatement", exception ? record.exceptionStatement() : null)
                 .addValue("sourceSummary", summary.toString()).addValue("contentHash", record.contentHash()),
                 UUID.class);
 
         ObjectNode source = objectMapper.createObjectNode();
-        source.put("status", "APPROVED");
+        source.put("status", record.status());
         source.put("attemptNo", record.attemptNo());
         source.set("value", value.deepCopy());
         jdbc.update("""
@@ -187,7 +324,7 @@ public class DailyReportRoutineProjectionService {
                 )
                 """, base(principal).addValue("id", UUID.randomUUID()).addValue("revisionId", revisionId)
                 .addValue("itemResultId", resultId).addValue("recordId", record.workRecordId())
-                .addValue("sourceVersion", "attempt-" + record.attemptNo())
+                .addValue("sourceVersion", "attempt-" + record.attemptNo() + ":" + record.status())
                 .addValue("sourceSnapshot", source.toString()).addValue("contentHash", record.contentHash())
                 .addValue("occurredAt", record.occurredAt()).addValue("actorId", principal.actorId()));
 
@@ -246,7 +383,14 @@ public class DailyReportRoutineProjectionService {
                           and relation.template_version_id = report.template_version_id) as expected_count,
                        (select count(*) from daily_report_item_result result
                         where result.tenant_id = report.tenant_id
-                          and result.revision_id = :revisionId and result.system_prefilled) as completed_count,
+                          and result.revision_id = :revisionId
+                          and result.system_prefilled
+                          and result.result_status in ('COMPLETED', 'EXCEPTION')) as completed_count,
+                       (select count(*) from daily_report_item_result result
+                        where result.tenant_id = report.tenant_id
+                          and result.revision_id = :revisionId
+                          and result.system_prefilled
+                          and result.result_status = 'PENDING') as pending_review_count,
                        (select count(*) from daily_report_item_result result
                         where result.tenant_id = report.tenant_id
                           and result.revision_id = :revisionId and result.exception_flag) as exception_count,
@@ -272,21 +416,23 @@ public class DailyReportRoutineProjectionService {
                 """, base(principal).addValue("reportId", reportId).addValue("revisionId", revisionId));
         int expected = ((Number) facts.get("expected_count")).intValue();
         int completed = ((Number) facts.get("completed_count")).intValue();
+        int pendingReview = ((Number) facts.get("pending_review_count")).intValue();
         int exceptions = ((Number) facts.get("exception_count")).intValue();
         int missed = ((Number) facts.get("missed_count")).intValue();
         int evidence = ((Number) facts.get("evidence_count")).intValue();
-        String analysis = "规则分析：今日标准日常工作已完成 " + completed + "/" + expected
-                + " 项，关联证据 " + evidence + " 份；异常 " + exceptions
-                + " 项，逾期 " + missed + " 项。";
-        String recommendation = exceptions + missed > 0
-                ? "请优先核对异常和逾期事项，确认整改责任人与时限。"
-                : completed < expected ? "尚有标准事项未完成或未通过审核，请按截止时间跟进。"
-                : "标准事项闭环正常，请补充其他工作后提交日报。";
+        RuleContentFacts contentFacts = collectRuleContentFacts(principal, revisionId);
+        String analysis = "规则分析：今日标准日常工作已审核完成 " + completed + "/" + expected
+                + " 项，待主管审核 " + pendingReview + " 项，关联证据 " + evidence
+                + " 份；异常 " + exceptions + " 项，逾期 " + missed + " 项。"
+                + renderContentAnalysis(contentFacts);
+        String recommendation = buildRuleRecommendation(
+                pendingReview, exceptions, missed, completed, expected, contentFacts);
         jdbc.update("""
                 update daily_report_revision
                 set narrative = :analysis, row_version = row_version + 1
                 where tenant_id = :tenantId and id = :revisionId and revision_status = 'DRAFT'
                   and (narrative is null or narrative like '规则分析：%')
+                  and narrative is distinct from :analysis
                 """, base(principal).addValue("revisionId", revisionId).addValue("analysis", analysis));
 
         ObjectNode input = objectMapper.createObjectNode();
@@ -294,94 +440,348 @@ public class DailyReportRoutineProjectionService {
         input.put("revisionId", revisionId.toString());
         input.put("expectedCount", expected);
         input.put("completedCount", completed);
+        input.put("pendingReviewCount", pendingReview);
         input.put("exceptionCount", exceptions);
         input.put("missedCount", missed);
         input.put("evidenceCount", evidence);
+        input.put("analysisMode", "FACT_ONLY_INTERNAL_RULES");
+        input.set("issueFacts", toFactArray(contentFacts.issueFacts()));
+        input.set("declaredNextActions", toFactArray(contentFacts.declaredActions()));
         String inputHash = sha256(input.toString());
-        UUID requestId = jdbc.query("""
-                select id from ai_request
-                where tenant_id = :tenantId and request_type = 'DAILY_REPORT_ANALYSIS'
-                  and provider_code = :provider and input_snapshot ->> 'reportId' = :reportIdText
-                order by created_at desc limit 1
-                for update
+        UUID existingRecommendationId = jdbc.query("""
+                select recommendation.id
+                from ai_recommendation recommendation
+                join ai_request request
+                  on request.tenant_id = recommendation.tenant_id
+                 and request.id = recommendation.ai_request_id
+                join ai_recommendation_source source
+                  on source.tenant_id = recommendation.tenant_id
+                 and source.recommendation_id = recommendation.id
+                 and source.source_type = 'DAILY_REPORT'
+                 and source.source_id = :reportId
+                where recommendation.tenant_id = :tenantId
+                  and recommendation.status = 'AVAILABLE'
+                  and request.request_type = 'DAILY_REPORT_ANALYSIS'
+                  and request.provider_code = :provider
+                  and request.input_hash = :inputHash
+                order by recommendation.generated_at desc
+                limit 1
+                """, base(principal).addValue("reportId", reportId)
+                .addValue("provider", RULE_PROVIDER).addValue("inputHash", inputHash),
+                (rs, rowNum) -> rs.getObject("id", UUID.class)).stream().findFirst().orElse(null);
+        if (existingRecommendationId != null) return;
+
+        jdbc.update("""
+                update ai_recommendation recommendation
+                set status = 'INVALIDATED', invalidated_at = now(),
+                    invalidation_reason = '日报事实快照已更新'
+                from ai_request request
+                where recommendation.tenant_id = :tenantId
+                  and recommendation.status = 'AVAILABLE'
+                  and request.tenant_id = recommendation.tenant_id
+                  and request.id = recommendation.ai_request_id
+                  and request.request_type = 'DAILY_REPORT_ANALYSIS'
+                  and request.provider_code = :provider
+                  and request.input_snapshot ->> 'reportId' = :reportIdText
                 """, base(principal).addValue("provider", RULE_PROVIDER)
-                .addValue("reportIdText", reportId.toString()),
-                (rs, rowNum) -> rs.getObject("id", UUID.class)).stream().findFirst().orElse(null);
-        if (requestId == null) {
-            requestId = UUID.randomUUID();
-            jdbc.update("""
-                    insert into ai_request
-                        (id, tenant_id, request_type, status, hotel_org_unit_id, org_unit_id,
-                         business_date, provider_code, model_name, model_version, prompt_version,
-                         context_version, input_hash, input_snapshot, sensitivity_level,
-                         requested_by_account_id, requested_by_assignment_id, trace_id,
-                         correlation_id, completed_at)
-                    values (:id, :tenantId, 'DAILY_REPORT_ANALYSIS', 'SUCCEEDED', :hotelId, :orgId,
-                            :businessDate, :provider, 'deterministic-summary', '1', 'store-manager-v2',
-                            'daily-report-v1', :inputHash, cast(:input as jsonb), 'INTERNAL',
-                            :actorId, :assignmentId, :traceId, :correlationId, now())
-                    """, base(principal).addValue("id", requestId)
-                    .addValue("hotelId", facts.get("hotel_org_unit_id")).addValue("orgId", facts.get("org_unit_id"))
-                    .addValue("businessDate", facts.get("business_date")).addValue("provider", RULE_PROVIDER)
-                    .addValue("inputHash", inputHash).addValue("input", input.toString())
-                    .addValue("actorId", principal.actorId()).addValue("assignmentId", facts.get("position_assignment_id"))
-                    .addValue("traceId", facts.get("trace_id")).addValue("correlationId", principal.correlationId()));
-        } else {
-            jdbc.update("""
-                    update ai_request set input_hash = :inputHash, input_snapshot = cast(:input as jsonb),
-                        status = 'SUCCEEDED', completed_at = now(), row_version = row_version + 1
-                    where tenant_id = :tenantId and id = :id
-                    """, base(principal).addValue("id", requestId)
-                    .addValue("inputHash", inputHash).addValue("input", input.toString()));
-        }
+                .addValue("reportIdText", reportId.toString()));
+
+        UUID requestId = UUID.randomUUID();
+        jdbc.update("""
+                insert into ai_request
+                    (id, tenant_id, request_type, status, hotel_org_unit_id, org_unit_id,
+                     business_date, provider_code, model_name, model_version, prompt_version,
+                     context_version, input_hash, input_snapshot, sensitivity_level,
+                     requested_by_account_id, requested_by_assignment_id, trace_id,
+                     correlation_id, completed_at)
+                values (:id, :tenantId, 'DAILY_REPORT_ANALYSIS', 'SUCCEEDED', :hotelId, :orgId,
+                        :businessDate, :provider, 'deterministic-summary', '2', 'store-manager-v3',
+                        'daily-report-v2', :inputHash, cast(:input as jsonb), 'INTERNAL',
+                        :actorId, :assignmentId, :traceId, :correlationId, now())
+                """, base(principal).addValue("id", requestId)
+                .addValue("hotelId", facts.get("hotel_org_unit_id")).addValue("orgId", facts.get("org_unit_id"))
+                .addValue("businessDate", facts.get("business_date")).addValue("provider", RULE_PROVIDER)
+                .addValue("inputHash", inputHash).addValue("input", input.toString())
+                .addValue("actorId", principal.actorId()).addValue("assignmentId", facts.get("position_assignment_id"))
+                .addValue("traceId", facts.get("trace_id")).addValue("correlationId", principal.correlationId()));
+
         ObjectNode factSummary = input.deepCopy();
-        UUID recommendationId = jdbc.query("""
-                select id from ai_recommendation
-                where tenant_id = :tenantId and ai_request_id = :requestId and recommendation_no = 1
-                """, base(principal).addValue("requestId", requestId),
-                (rs, rowNum) -> rs.getObject("id", UUID.class)).stream().findFirst().orElse(null);
-        if (recommendationId == null) {
-            recommendationId = UUID.randomUUID();
-            jdbc.update("""
-                    insert into ai_recommendation
-                        (id, tenant_id, ai_request_id, recommendation_no, recommendation_type,
-                         fact_summary, analysis, recommendation, confidence, applicability_scope,
-                         model_name, model_version, prompt_version, context_version)
-                    values (:id, :tenantId, :requestId, 1, 'DAILY_REPORT_RULE_ANALYSIS',
-                            cast(:facts as jsonb), :analysis, :recommendation, 1.0,
-                            jsonb_build_object('reportId', :reportIdText),
-                            'deterministic-summary', '1', 'store-manager-v2', 'daily-report-v1')
-                    """, base(principal).addValue("id", recommendationId).addValue("requestId", requestId)
-                    .addValue("facts", factSummary.toString()).addValue("analysis", analysis)
-                    .addValue("recommendation", recommendation).addValue("reportIdText", reportId.toString()));
-        } else {
-            jdbc.update("""
-                    update ai_recommendation
-                    set fact_summary = cast(:facts as jsonb), analysis = :analysis,
-                        recommendation = :recommendation, generated_at = now()
-                    where tenant_id = :tenantId and id = :id
-                    """, base(principal).addValue("id", recommendationId)
-                    .addValue("facts", factSummary.toString()).addValue("analysis", analysis)
-                    .addValue("recommendation", recommendation));
-        }
+        UUID recommendationId = UUID.randomUUID();
+        jdbc.update("""
+                insert into ai_recommendation
+                    (id, tenant_id, ai_request_id, recommendation_no, recommendation_type,
+                     fact_summary, analysis, recommendation, confidence, applicability_scope,
+                     model_name, model_version, prompt_version, context_version)
+                values (:id, :tenantId, :requestId, 1, 'DAILY_REPORT_RULE_ANALYSIS',
+                        cast(:facts as jsonb), :analysis, :recommendation, 1.0,
+                        jsonb_build_object('reportId', :reportIdText),
+                        'deterministic-summary', '2', 'store-manager-v3', 'daily-report-v2')
+                """, base(principal).addValue("id", recommendationId).addValue("requestId", requestId)
+                .addValue("facts", factSummary.toString()).addValue("analysis", analysis)
+                .addValue("recommendation", recommendation).addValue("reportIdText", reportId.toString()));
         jdbc.update("""
                 insert into ai_recommendation_source
                     (id, tenant_id, recommendation_id, source_type, source_id,
                      source_version, source_snapshot, content_hash)
-                select :id, :tenantId, :recommendationId, 'DAILY_REPORT', :reportId,
-                       :sourceVersion, cast(:sourceSnapshot as jsonb), :contentHash
-                where not exists (
-                    select 1 from ai_recommendation_source existing
-                    where existing.tenant_id = :tenantId
-                      and existing.recommendation_id = :recommendationId
-                      and existing.source_type = 'DAILY_REPORT'
-                      and existing.source_id = :reportId
-                      and existing.source_version = :sourceVersion
-                )
+                values (:id, :tenantId, :recommendationId, 'DAILY_REPORT', :reportId,
+                        :sourceVersion, cast(:sourceSnapshot as jsonb), :contentHash)
                 """, base(principal).addValue("id", UUID.randomUUID())
                 .addValue("recommendationId", recommendationId).addValue("reportId", reportId)
                 .addValue("sourceVersion", revisionId + ":" + inputHash.substring(0, 12))
                 .addValue("sourceSnapshot", input.toString()).addValue("contentHash", inputHash));
+    }
+
+    /**
+     * Reads only facts that employees explicitly submitted into the projected work result.
+     * This stays entirely inside the service and deliberately avoids free-form inference:
+     * exception/next-action fields are authoritative, while completion/form fields are
+     * included only when they contain an unambiguous problem marker.
+     */
+    private RuleContentFacts collectRuleContentFacts(
+            TenantPrincipal principal,
+            UUID revisionId
+    ) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                select result.source_summary ->> 'workRecordId' as work_record_id,
+                       result.source_summary ->> 'reviewStatus' as review_status,
+                       result.value::text as value_json
+                from daily_report_item_result result
+                where result.tenant_id = :tenantId
+                  and result.revision_id = :revisionId
+                  and result.system_prefilled
+                  and result.source_summary ->> 'sourceType' = 'WORK_RECORD'
+                order by result.template_item_id, result.id
+                """, base(principal).addValue("revisionId", revisionId));
+        List<RuleFact> issueFacts = new ArrayList<>();
+        List<RuleFact> declaredActions = new ArrayList<>();
+        Set<String> issueKeys = new LinkedHashSet<>();
+        Set<String> actionKeys = new LinkedHashSet<>();
+        for (Map<String, Object> row : rows) {
+            String workRecordId = String.valueOf(row.get("work_record_id"));
+            String reviewStatus = String.valueOf(row.get("review_status"));
+            ObjectNode value = readObject(String.valueOf(row.get("value_json")));
+            addRuleFact(issueFacts, issueKeys, MAX_CONTENT_ISSUES, workRecordId, reviewStatus,
+                    "exception", textValue(value.get("exception")));
+            addRuleFact(declaredActions, actionKeys, MAX_DECLARED_ACTIONS, workRecordId, reviewStatus,
+                    "nextAction", textValue(value.get("nextAction")));
+            String completion = textValue(value.get("completion"));
+            if (containsExplicitProblem(completion)) {
+                addRuleFact(issueFacts, issueKeys, MAX_CONTENT_ISSUES, workRecordId, reviewStatus,
+                        "completion", completion);
+            }
+            collectFormIssues(value.get("formData"), "formData", 0, workRecordId, reviewStatus,
+                    issueFacts, issueKeys);
+        }
+        return new RuleContentFacts(List.copyOf(issueFacts), List.copyOf(declaredActions));
+    }
+
+    private void collectFormIssues(
+            JsonNode node,
+            String path,
+            int depth,
+            String workRecordId,
+            String reviewStatus,
+            List<RuleFact> issueFacts,
+            Set<String> issueKeys
+    ) {
+        if (node == null || node.isNull() || depth > MAX_FORM_DEPTH
+                || issueFacts.size() >= MAX_CONTENT_ISSUES) {
+            return;
+        }
+        if (node.isObject()) {
+            List<String> names = new ArrayList<>();
+            node.fieldNames().forEachRemaining(names::add);
+            names.sort(Comparator.naturalOrder());
+            for (String name : names) {
+                collectFormIssues(node.get(name), path + "." + name, depth + 1,
+                        workRecordId, reviewStatus, issueFacts, issueKeys);
+                if (issueFacts.size() >= MAX_CONTENT_ISSUES) return;
+            }
+            return;
+        }
+        if (node.isArray()) {
+            for (int index = 0; index < Math.min(node.size(), 10); index++) {
+                collectFormIssues(node.get(index), path + "[" + index + "]", depth + 1,
+                        workRecordId, reviewStatus, issueFacts, issueKeys);
+                if (issueFacts.size() >= MAX_CONTENT_ISSUES) return;
+            }
+            return;
+        }
+        if (isExplicitFormIssue(path, node)) {
+            addRuleFact(issueFacts, issueKeys, MAX_CONTENT_ISSUES, workRecordId, reviewStatus,
+                    path, textValue(node));
+        }
+    }
+
+    private static boolean isExplicitFormIssue(String path, JsonNode value) {
+        String normalizedKey = normalizeKey(path);
+        boolean issueKey = containsAny(normalizedKey,
+                "exception", "issue", "problem", "risk", "defect", "complaint", "fault",
+                "abnormal", "hazard", "问题", "异常", "风险", "缺陷", "投诉", "故障", "隐患");
+        boolean positiveKey = containsAny(normalizedKey,
+                "passed", "qualified", "normal", "complete", "resolved",
+                "合格", "正常", "通过", "完成", "达标", "解决");
+        if (value.isBoolean()) {
+            return (issueKey && value.booleanValue()) || (positiveKey && !value.booleanValue());
+        }
+        if (value.isNumber()) {
+            return issueKey && value.decimalValue().signum() > 0;
+        }
+        String text = textValue(value);
+        if (!isMeaningfulFact(text)) return false;
+        if (issueKey) return !isNegativeAnswer(text);
+        if (positiveKey && isNegativeAnswer(text)) return true;
+        return containsExplicitProblem(text);
+    }
+
+    private static void addRuleFact(
+            List<RuleFact> target,
+            Set<String> deduplicationKeys,
+            int limit,
+            String workRecordId,
+            String reviewStatus,
+            String sourceField,
+            String rawValue
+    ) {
+        String value = normalizeFact(rawValue);
+        if (target.size() >= limit || !isMeaningfulFact(value)) return;
+        String key = workRecordId + "|" + sourceField + "|" + value;
+        if (deduplicationKeys.add(key)) {
+            target.add(new RuleFact(workRecordId, reviewStatus, sourceField, value));
+        }
+    }
+
+    private ArrayNode toFactArray(List<RuleFact> facts) {
+        ArrayNode array = objectMapper.createArrayNode();
+        for (RuleFact fact : facts) {
+            ObjectNode item = array.addObject();
+            item.put("workRecordId", fact.workRecordId());
+            item.put("reviewStatus", fact.reviewStatus());
+            item.put("sourceField", fact.sourceField());
+            item.put("fact", fact.value());
+        }
+        return array;
+    }
+
+    private static String renderContentAnalysis(RuleContentFacts facts) {
+        StringBuilder analysis = new StringBuilder();
+        if (!facts.issueFacts().isEmpty()) {
+            analysis.append(" 从填报内容识别到 ")
+                    .append(facts.issueFacts().size()).append(" 条明确问题事实：")
+                    .append(renderFacts(facts.issueFacts(), facts.issueFacts().size())).append("。");
+        }
+        if (!facts.declaredActions().isEmpty()) {
+            analysis.append(" 填报人已明确 ")
+                    .append(facts.declaredActions().size()).append(" 条后续动作：")
+                    .append(renderFacts(facts.declaredActions(), facts.declaredActions().size())).append("。");
+        }
+        return analysis.toString();
+    }
+
+    private static String buildRuleRecommendation(
+            int pendingReview,
+            int exceptions,
+            int missed,
+            int completed,
+            int expected,
+            RuleContentFacts facts
+    ) {
+        List<String> clauses = new ArrayList<>();
+        if (pendingReview > 0) {
+            clauses.add("请主管优先复核待审核事项；审核通过后才计入完成。");
+        }
+        if (!facts.declaredActions().isEmpty()) {
+            clauses.add("按填报人已明确的后续动作推进："
+                    + renderFacts(facts.declaredActions(), 2) + "。");
+        }
+        if (!facts.issueFacts().isEmpty()) {
+            clauses.add("请主管逐项核实上述明确问题，补充责任人、完成时限和复核结论。");
+        }
+        if (exceptions + missed > 0) {
+            clauses.add("请优先核对异常和逾期事项，确认整改责任人与时限。");
+        } else if (completed < expected) {
+            clauses.add("尚有标准事项未完成，请按截止时间跟进。");
+        } else if (facts.issueFacts().isEmpty()) {
+            clauses.add("标准事项闭环正常，请补充其他工作后提交日报。");
+        }
+        return String.join("", clauses);
+    }
+
+    private static String renderFacts(List<RuleFact> facts, int limit) {
+        List<String> rendered = new ArrayList<>();
+        for (int index = 0; index < Math.min(limit, facts.size()); index++) {
+            RuleFact fact = facts.get(index);
+            String id = fact.workRecordId();
+            String shortId = id == null || id.length() <= 8 ? id : id.substring(0, 8);
+            rendered.add("[工作记录" + shortId + "·" + displayField(fact.sourceField()) + "] " + fact.value());
+        }
+        return String.join("；", rendered);
+    }
+
+    private static String displayField(String field) {
+        return switch (field) {
+            case "exception" -> "异常说明";
+            case "nextAction" -> "后续动作";
+            case "completion" -> "完成说明";
+            default -> field.startsWith("formData.") ? "表单." + field.substring("formData.".length()) : field;
+        };
+    }
+
+    private static String textValue(JsonNode value) {
+        if (value == null || value.isNull() || value.isContainerNode()) return null;
+        return value.isTextual() ? value.textValue() : value.asText();
+    }
+
+    private static String normalizeFact(String value) {
+        if (value == null) return null;
+        String compact = value.trim().replaceAll("\\s+", " ");
+        if (compact.length() <= MAX_FACT_LENGTH) return compact;
+        return compact.substring(0, MAX_FACT_LENGTH - 1) + "…";
+    }
+
+    private static boolean isMeaningfulFact(String value) {
+        if (value == null || value.isBlank()) return false;
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        return !Set.of("无", "无问题", "无异常", "否", "没有", "不存在", "正常", "合格", "通过",
+                "已完成", "已解决", "none", "no", "false", "null", "n/a", "na", "-", "0")
+                .contains(normalized);
+    }
+
+    private static boolean isNegativeAnswer(String value) {
+        if (value == null) return false;
+        return Set.of("否", "不", "未", "不合格", "不正常", "未完成", "未达标", "未解决",
+                "no", "false", "failed", "abnormal", "incomplete").contains(value.trim().toLowerCase(Locale.ROOT));
+    }
+
+    private static boolean containsExplicitProblem(String value) {
+        if (!isMeaningfulFact(value)) return false;
+        String normalized = value.toLowerCase(Locale.ROOT)
+                .replace("未发现任何问题", "")
+                .replace("未发现问题", "")
+                .replace("没有任何问题", "")
+                .replace("没有问题", "")
+                .replace("无任何问题", "")
+                .replace("无问题", "")
+                .replace("无任何异常", "")
+                .replace("无异常", "");
+        return containsAny(normalized,
+                "未完成", "待处理", "待整改", "需整改", "需要整改", "待维修", "需维修",
+                "无法", "失败", "异常", "故障", "缺失", "不足", "损坏", "投诉", "隐患", "逾期", "超时",
+                "未达标", "不合格", "未解决", "存在问题", "发现问题", "有问题", "遗漏", "漏水", "漏电",
+                "incomplete", "pending repair", "needs repair", "failed", "failure", "abnormal",
+                "fault", "defect", "complaint", "overdue", "unresolved", "missing");
+    }
+
+    private static String normalizeKey(String value) {
+        return value == null ? "" : value.toLowerCase(Locale.ROOT).replaceAll("[_\\-\\s.\\[\\]]", "");
+    }
+
+    private static boolean containsAny(String value, String... markers) {
+        if (value == null || value.isBlank()) return false;
+        for (String marker : markers) {
+            if (value.contains(marker)) return true;
+        }
+        return false;
     }
 
     private int countAttachments(TenantPrincipal principal, UUID workRecordId) {
@@ -428,11 +828,26 @@ public class DailyReportRoutineProjectionService {
         }
     }
 
+    private record RuleFact(
+            String workRecordId,
+            String reviewStatus,
+            String sourceField,
+            String value
+    ) {
+    }
+
+    private record RuleContentFacts(
+            List<RuleFact> issueFacts,
+            List<RuleFact> declaredActions
+    ) {
+    }
+
     private record ProjectableRecord(
             UUID templateItemId,
             UUID workRecordId,
             UUID assignmentId,
             UUID submittedByAccountId,
+            String status,
             int attemptNo,
             String payload,
             String completionStatement,

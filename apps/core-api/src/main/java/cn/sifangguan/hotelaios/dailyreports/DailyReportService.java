@@ -786,6 +786,34 @@ public class DailyReportService {
                 where tenant_id = :tenantId and report_id = :reportId
                 order by created_at
                 """, base(principal).addValue("reportId", reportId)));
+        List<Map<String, Object>> recommendations = jdbc.queryForList("""
+                select recommendation.id, recommendation.fact_summary::text as facts,
+                       recommendation.analysis, recommendation.recommendation,
+                       recommendation.generated_at as "createdAt",
+                       coalesce((
+                           select jsonb_agg(label_row.label order by label_row.label)::text
+                           from (
+                               select distinct concat(source.source_type, ':',
+                                      coalesce(source.source_id::text, source.source_external_key)) as label
+                               from ai_recommendation_source source
+                               where source.tenant_id = recommendation.tenant_id
+                                 and source.recommendation_id = recommendation.id
+                           ) label_row
+                       ), '[]') as "sourceLabelsJson"
+                from ai_recommendation recommendation
+                join ai_request request
+                  on request.tenant_id = recommendation.tenant_id
+                 and request.id = recommendation.ai_request_id
+                where recommendation.tenant_id = :tenantId
+                  and recommendation.status = 'AVAILABLE'
+                  and request.request_type = 'DAILY_REPORT_ANALYSIS'
+                  and request.input_snapshot ->> 'reportId' = :reportIdText
+                order by recommendation.generated_at desc, recommendation.id
+                """, base(principal)
+                .addValue("reportIdText", reportId.toString()));
+        recommendations.forEach(recommendation -> recommendation.put(
+                "sourceLabels", parseJson(String.valueOf(recommendation.remove("sourceLabelsJson")))));
+        result.put("aiRecommendations", recommendations);
         return result;
     }
 
