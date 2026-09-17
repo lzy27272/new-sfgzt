@@ -120,9 +120,16 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
         <section className="work-rule-section"><header><h4>时间规则</h4><span>按岗位和门店时区生成</span></header>
           <div className="form-grid work-rule-grid">
             <label>执行周期<select value={selected.periodType} onChange={(event) => updateSelected({ periodType: event.target.value })}><option value="DAY">每日</option><option value="WEEK">每周</option><option value="SHIFT">每班次</option><option value="EVENT">事件触发</option></select></label>
-            <label>开始时间<input type="time" value={selected.workWindowStart} onChange={(event) => updateSelected({ workWindowStart: event.target.value })} /></label>
-            <label>结束时间<input type="time" value={selected.workWindowEnd} onChange={(event) => updateSelected({ workWindowEnd: event.target.value })} /></label>
-            <label>截止时间<input type="time" value={selected.dueLocalTime} onChange={(event) => updateSelected({ dueLocalTime: event.target.value })} /></label>
+            {selected.periodType === 'SHIFT' ? <>
+              <label>可开始基准<select value={selected.shiftAvailableAnchor} onChange={(event) => updateSelected({ shiftAvailableAnchor: event.target.value as WorkPackageItemDraft['shiftAvailableAnchor'] })}><option value="SHIFT_START">班次开始</option><option value="SHIFT_MIDPOINT">班次中点</option><option value="SHIFT_END">班次结束</option></select></label>
+              <label>可开始偏移（分钟）<input type="number" min="-2880" max="2880" value={selected.shiftAvailableOffsetMinutes} onChange={(event) => updateSelected({ shiftAvailableOffsetMinutes: event.target.value })} /></label>
+              <label>截止基准<select value={selected.shiftDueAnchor} onChange={(event) => updateSelected({ shiftDueAnchor: event.target.value as WorkPackageItemDraft['shiftDueAnchor'] })}><option value="SHIFT_START">班次开始</option><option value="SHIFT_MIDPOINT">班次中点</option><option value="SHIFT_END">班次结束</option></select></label>
+              <label>截止偏移（分钟）<input type="number" min="-2880" max="2880" value={selected.shiftDueOffsetMinutes} onChange={(event) => updateSelected({ shiftDueOffsetMinutes: event.target.value })} /></label>
+            </> : <>
+              <label>开始时间<input type="time" value={selected.workWindowStart} onChange={(event) => updateSelected({ workWindowStart: event.target.value })} /></label>
+              <label>结束时间<input type="time" value={selected.workWindowEnd} onChange={(event) => updateSelected({ workWindowEnd: event.target.value })} /></label>
+              <label>截止时间<input type="time" value={selected.dueLocalTime} onChange={(event) => updateSelected({ dueLocalTime: event.target.value })} /></label>
+            </>}
             <label>逾期宽限（分钟）<input type="number" min="0" max="1440" value={selected.graceMinutes} onChange={(event) => updateSelected({ graceMinutes: event.target.value })} /></label>
             <label>节假日策略<select value={selected.holidayPolicy} onChange={(event) => updateSelected({ holidayPolicy: event.target.value })}><option value="INCLUDE">照常执行</option><option value="SKIP">跳过指定节假日</option><option value="SHIFT_FORWARD" disabled>历史策略：顺延到下一工作日</option><option value="SHIFT_BACKWARD" disabled>历史策略：提前到上一工作日</option></select></label>
             <label className="full-field">节假日日期<input disabled={selected.holidayPolicy === 'INCLUDE'} value={selected.holidayDates} onChange={(event) => updateSelected({ holidayDates: event.target.value })} placeholder="YYYY-MM-DD，多个日期用逗号分隔" /></label>

@@ -54,6 +54,13 @@ function jsonColumn(raw: unknown): unknown {
   return raw
 }
 
+function stringArrayMap(raw: unknown): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(object(raw)).map(([key, configured]) => [
+    key,
+    asList<unknown>(configured).filter((entry): entry is string => typeof entry === 'string'),
+  ]))
+}
+
 export async function loadIdentity(identity: ApiIdentity, fallback: IdentitySnapshot) {
   return withFallback(async () => {
     // Bootstrap must not reuse the demo/default assignment. The server resolves
@@ -212,6 +219,7 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
           label: text(requirement, ['label'], '现场证据'),
           captureSource: text(requirement, ['captureSource', 'capture_source'], '') as 'CAMERA' | 'FILE_PICKER' || undefined,
           mediaTypes: asList<string>(requirement.mediaTypes),
+          allowedKinds: asList<string>(requirement.allowedKinds) as Array<'IMAGE' | 'DOCUMENT' | 'PDF' | 'WORD' | 'EXCEL'>,
           minimum: value(requirement, 'minimum') === undefined ? undefined : number(requirement, ['minimum']),
           recommendedMaximum: value(requirement, 'recommendedMaximum') === undefined ? undefined : number(requirement, ['recommendedMaximum']),
           minimumPerHotelFloor: value(requirement, 'minimumPerHotelFloor') === undefined ? undefined : number(requirement, ['minimumPerHotelFloor']),
@@ -220,6 +228,14 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
           instanceField: text(requirement, ['instanceField'], '') || undefined,
           instanceLabel: text(requirement, ['instanceLabel'], '') || undefined,
           minimumPerInstance: value(requirement, 'minimumPerInstance') === undefined ? undefined : number(requirement, ['minimumPerInstance']),
+          minimumPerConfiguredFacility: value(requirement, 'minimumPerConfiguredFacility') === undefined ? undefined : number(requirement, ['minimumPerConfiguredFacility']),
+          recommendedMaximumPerConfiguredFacility: value(requirement, 'recommendedMaximumPerConfiguredFacility') === undefined ? undefined : number(requirement, ['recommendedMaximumPerConfiguredFacility']),
+          minimumPerConfiguredAsset: value(requirement, 'minimumPerConfiguredAsset') === undefined ? undefined : number(requirement, ['minimumPerConfiguredAsset']),
+          configuredFacilityInstanceField: text(requirement, ['configuredFacilityInstanceField'], '') || undefined,
+          configuredAssetInstanceField: text(requirement, ['configuredAssetInstanceField'], '') || undefined,
+          conditionalFacility: text(requirement, ['conditionalFacility'], '') || undefined,
+          unlimited: requirement.unlimited === true,
+          allowReference: requirement.allowReference === true,
           requiredWhen: (() => {
             const condition = object(requirement.requiredWhen)
             const field = text(condition, ['field'], '')
@@ -233,6 +249,18 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
     applicabilityPolicy: object(jsonColumn(value(item, 'applicabilityPolicy', 'applicability_policy'))),
     executionPolicy: object(jsonColumn(value(item, 'executionPolicy', 'execution_policy'))) as WorkExpectation['executionPolicy'],
     guestRoomFloorCount: value(item, 'guestRoomFloorCount', 'guest_room_floor_count') === undefined ? undefined : number(item, ['guestRoomFloorCount', 'guest_room_floor_count']),
+    operationalFeatureFlags: Object.fromEntries(
+      Object.entries(object(jsonColumn(value(item, 'operationalFeatureFlags', 'operational_feature_flags'))))
+        .filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean'),
+    ),
+    evidenceInstanceConfiguration: (() => {
+      const configured = object(jsonColumn(value(
+        item, 'evidenceInstanceConfiguration', 'evidence_instance_configuration')))
+      return {
+        facilityInstances: stringArrayMap(configured.facilityInstances),
+        assetInstances: stringArrayMap(configured.assetInstances),
+      }
+    })(),
     delegateAssignmentId: text(item, ['delegateAssignmentId', 'delegate_assignment_id'], '') || undefined,
     delegatedEmployeeName: text(item, ['delegatedEmployeeName', 'delegated_employee_name'], '') || undefined,
     ownerResting: value(item, 'ownerResting', 'owner_resting') === true,
@@ -251,7 +279,15 @@ export async function loadDelegationCandidates(identity: ApiIdentity, expectatio
 export async function delegateExpectation(identity: ApiIdentity, expectationId: string, input: {
   delegateAssignmentId: string; ownerResting: boolean; reason?: string; expectedVersion: number
 }) {
-  return apiRequest(`/work-expectations/${expectationId}/delegate`, identity, {
+  return apiRequest<{
+    id: string
+    delegationId?: string
+    delegateAssignmentId: string
+    ownerResting: boolean
+    transferredCount: number
+    transferredIds: string[]
+    rowVersion: number
+  }>(`/work-expectations/${expectationId}/delegate`, identity, {
     method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify(input),
   })
 }

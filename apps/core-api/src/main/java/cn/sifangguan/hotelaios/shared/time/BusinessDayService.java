@@ -116,14 +116,20 @@ public class BusinessDayService {
                   join employee
                     on employee.tenant_id = assignment.tenant_id
                    and employee.id = assignment.employee_id
-                  where assignment.tenant_id = :tenantId
-                     and assignment.id in (:assignmentIds)
-                     and assignment.org_unit_id = :orgUnitId
-                     and assignment.status = 'ACTIVE'
-                     and assignment.valid_from <= current_date
-                     and (assignment.valid_to is null or assignment.valid_to >= current_date)
-                     and employee.account_id = :actorId
-                     and employee.employment_status = 'ACTIVE'
+                   where assignment.tenant_id = :tenantId
+                      and assignment.id in (:assignmentIds)
+                      and assignment.status = 'ACTIVE'
+                      and assignment.valid_from <= current_date
+                      and (assignment.valid_to is null or assignment.valid_to >= current_date)
+                      and employee.account_id = :actorId
+                      and employee.employment_status = 'ACTIVE'
+                      and exists (
+                        select 1
+                        from org_unit_closure assignment_scope
+                        where assignment_scope.tenant_id = assignment.tenant_id
+                          and assignment_scope.ancestor_id = :orgUnitId
+                          and assignment_scope.descendant_id = assignment.org_unit_id
+                      )
                 )
                 """, new MapSqlParameterSource()
                 .addValue("tenantId", principal.tenantId())

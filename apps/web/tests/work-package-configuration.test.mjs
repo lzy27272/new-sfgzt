@@ -86,10 +86,65 @@ test('所有岗位工作项支持新增、复制、排序和校验', () => {
   assert.match(validateWorkPackageItems(moved)[0], /至少启用一个工作项/)
 })
 
+test('班次相对时间规则可配置并保持往返', () => {
+  const draft = mapWorkPackageItem({
+    ...source,
+    id: 'shift-item-1',
+    period_type: 'SHIFT',
+    work_window_start: null,
+    work_window_end: null,
+    due_local_time: null,
+    execution_policy: {
+      enabled: true,
+      shiftTiming: {
+        availableAnchor: 'SHIFT_START',
+        availableOffsetMinutes: 15,
+        dueAnchor: 'SHIFT_END',
+        dueOffsetMinutes: -30,
+      },
+    },
+  }, 0)
+
+  assert.equal(draft.shiftAvailableAnchor, 'SHIFT_START')
+  assert.equal(draft.shiftAvailableOffsetMinutes, '15')
+  assert.equal(draft.shiftDueAnchor, 'SHIFT_END')
+  assert.equal(draft.shiftDueOffsetMinutes, '-30')
+
+  const [payload] = serializeWorkPackageItems([draft])
+  assert.deepEqual(payload.executionPolicy.shiftTiming, {
+    availableAnchor: 'SHIFT_START',
+    availableOffsetMinutes: 15,
+    dueAnchor: 'SHIFT_END',
+    dueOffsetMinutes: -30,
+  })
+  assert.deepEqual(validateWorkPackageItems([draft]), [])
+
+  draft.shiftDueAnchor = 'SHIFT_START'
+  draft.shiftDueOffsetMinutes = '15'
+  assert.match(validateWorkPackageItems([draft]).join('\n'), /截止偏移必须晚于可开始偏移/)
+})
+
+test('旧班次相对时间在编辑后无损转换为明确锚点', () => {
+  const draft = mapWorkPackageItem({
+    ...source,
+    period_type: 'SHIFT',
+    execution_policy: { enabled: true, shiftTiming: { aroundShiftMidpointMinutes: 45 } },
+  }, 0)
+  assert.equal(draft.shiftAvailableAnchor, 'SHIFT_MIDPOINT')
+  assert.equal(draft.shiftAvailableOffsetMinutes, '-45')
+  assert.equal(draft.shiftDueAnchor, 'SHIFT_MIDPOINT')
+  assert.equal(draft.shiftDueOffsetMinutes, '45')
+  const [payload] = serializeWorkPackageItems([draft])
+  assert.deepEqual(payload.executionPolicy.shiftTiming, {
+    availableAnchor: 'SHIFT_MIDPOINT', availableOffsetMinutes: -45,
+    dueAnchor: 'SHIFT_MIDPOINT', dueOffsetMinutes: 45,
+  })
+})
+
 test('工作包中心挂载所有岗位通用配置器并公开完整规则入口', () => {
   const page = readFileSync(new URL('../src/ConfigurationPages.tsx', import.meta.url), 'utf8')
   const editor = readFileSync(new URL('../src/features/workPackages/WorkPackageItemEditor.tsx', import.meta.url), 'utf8')
   assert.match(page, /所有岗位通用工作模板配置/)
   assert.match(page, /<WorkPackageItemEditor/)
-  for (const label of ['新增工作项', '提醒与督办', '证据链规则', '完成要求与日报', '业务数量不限', '节假日日期', '调休工作日']) assert.match(editor, new RegExp(label))
+  for (const label of ['新增工作项', '提醒与督办', '证据链规则', '完成要求与日报', '业务数量不限', '节假日日期', '调休工作日', '可开始基准', '截止偏移']) assert.match(editor, new RegExp(label))
 })

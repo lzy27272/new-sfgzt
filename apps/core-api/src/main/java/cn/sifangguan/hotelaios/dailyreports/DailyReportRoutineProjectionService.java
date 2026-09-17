@@ -59,26 +59,43 @@ public class DailyReportRoutineProjectionService {
     public void projectWorkRecord(UUID workRecordId) {
         TenantPrincipal principal = prepare();
         List<Map<String, Object>> reports = jdbc.queryForList("""
-                select report.id as report_id, report.current_revision_id as revision_id
+                select distinct report.id as report_id, report.current_revision_id as revision_id
                 from work_record record
-                join work_expectation expectation
-                  on expectation.tenant_id = record.tenant_id
-                 and expectation.id = record.work_expectation_id
+                join work_package_item record_package_item
+                  on record_package_item.tenant_id = record.tenant_id
+                 and record_package_item.id = record.work_package_item_id
                 join daily_report report
                   on report.tenant_id = record.tenant_id
-                 and report.position_assignment_id = expectation.position_assignment_id
+                 and report.position_assignment_id = record.position_assignment_id
                  and report.business_date = record.business_date
                  and report.report_status = 'DRAFT'
-                join daily_report_template_item item
-                  on item.tenant_id = report.tenant_id
-                 and item.work_package_item_id = record.work_package_item_id
-                join daily_report_template_section relation
-                  on relation.tenant_id = item.tenant_id
-                 and relation.section_version_id = item.section_version_id
-                 and relation.template_version_id = report.template_version_id
                 where record.tenant_id = :tenantId and record.id = :recordId
                   and record.status in ('SUBMITTED', 'APPROVED', 'REJECTED')
                   and report.current_revision_id is not null
+                  and exists (
+                      select 1
+                      from daily_report_template_section relation
+                      join daily_report_template_item item
+                        on item.tenant_id = relation.tenant_id
+                       and item.section_version_id = relation.section_version_id
+                       and item.work_package_item_id is not null
+                      join work_package_item template_package_item
+                        on template_package_item.tenant_id = item.tenant_id
+                       and template_package_item.id = item.work_package_item_id
+                      where relation.tenant_id = report.tenant_id
+                        and relation.template_version_id = report.template_version_id
+                        and (
+                            item.work_package_item_id = record.work_package_item_id
+                            or (
+                                record_package_item.execution_policy ->> 'sharedReportProjectionMode'
+                                    = 'ACTUAL_EXECUTOR_ONLY'
+                                and nullif(btrim(record_package_item.execution_policy ->> 'sharedKey'), '')
+                                    is not null
+                                and record_package_item.execution_policy ->> 'sharedKey'
+                                    = template_package_item.execution_policy ->> 'sharedKey'
+                            )
+                        )
+                  )
                 """, base(principal).addValue("recordId", workRecordId));
         for (Map<String, Object> report : reports) {
             projectReport((UUID) report.get("report_id"), (UUID) report.get("revision_id"));
@@ -89,46 +106,81 @@ public class DailyReportRoutineProjectionService {
         TenantPrincipal principal = prepare();
         if (!lockDraftReport(principal, reportId, revisionId)) return;
         List<ProjectableRecord> records = jdbc.query("""
-                select distinct on (item.id)
-                       item.id as template_item_id, record.id as work_record_id,
+                select distinct on (matched_item.template_item_id)
+                       matched_item.template_item_id, record.id as work_record_id,
                        record.position_assignment_id, record.submitted_by_account_id,
+                       executor_employee.id as executor_employee_id,
+                       executor_employee.name as executor_employee_name,
+                       executor_position.name as executor_position_name,
                        record.status, record.attempt_no, record.payload::text, record.completion_statement,
                        record.exception_statement, record.next_action, record.content_hash,
-                       record.occurred_at, record.reviewed_at, package_item.report_policy::text
+                       record.occurred_at, record.reviewed_at, matched_item.report_policy
                 from daily_report report
                 join daily_report_revision revision
                   on revision.tenant_id = report.tenant_id
                  and revision.id = :revisionId and revision.report_id = report.id
                  and revision.revision_status = 'DRAFT'
-                join daily_report_template_section relation
-                  on relation.tenant_id = report.tenant_id
-                 and relation.template_version_id = report.template_version_id
-                join daily_report_template_item item
-                  on item.tenant_id = relation.tenant_id
-                 and item.section_version_id = relation.section_version_id
-                 and item.work_package_item_id is not null
-                join work_package_item package_item
-                  on package_item.tenant_id = item.tenant_id
-                 and package_item.id = item.work_package_item_id
                 join work_record record
                  on record.tenant_id = report.tenant_id
                  and record.business_date = report.business_date
-                 and record.work_package_item_id = item.work_package_item_id
+                 and record.position_assignment_id = report.position_assignment_id
                  and record.status in ('SUBMITTED', 'APPROVED')
+                join work_package_item record_package_item
+                  on record_package_item.tenant_id = record.tenant_id
+                 and record_package_item.id = record.work_package_item_id
+                join lateral (
+                    select item.id as template_item_id,
+                           template_package_item.report_policy::text as report_policy
+                    from daily_report_template_section relation
+                    join daily_report_template_item item
+                      on item.tenant_id = relation.tenant_id
+                     and item.section_version_id = relation.section_version_id
+                     and item.work_package_item_id is not null
+                    join work_package_item template_package_item
+                      on template_package_item.tenant_id = item.tenant_id
+                     and template_package_item.id = item.work_package_item_id
+                    where relation.tenant_id = report.tenant_id
+                      and relation.template_version_id = report.template_version_id
+                      and coalesce((template_package_item.report_policy ->> 'dailyReport')::boolean, true)
+                      and (
+                          item.work_package_item_id = record.work_package_item_id
+                          or (
+                              record_package_item.execution_policy ->> 'sharedReportProjectionMode'
+                                  = 'ACTUAL_EXECUTOR_ONLY'
+                              and nullif(btrim(record_package_item.execution_policy ->> 'sharedKey'), '')
+                                  is not null
+                              and record_package_item.execution_policy ->> 'sharedKey'
+                                  = template_package_item.execution_policy ->> 'sharedKey'
+                          )
+                      )
+                    order by (item.work_package_item_id = record.work_package_item_id) desc,
+                             item.sort_order, item.id
+                    limit 1
+                ) matched_item on true
+                join employee_position_assignment executor_assignment
+                  on executor_assignment.tenant_id = record.tenant_id
+                 and executor_assignment.id = record.position_assignment_id
+                join employee executor_employee
+                  on executor_employee.tenant_id = executor_assignment.tenant_id
+                 and executor_employee.id = executor_assignment.employee_id
+                join position_definition executor_position
+                  on executor_position.tenant_id = executor_assignment.tenant_id
+                 and executor_position.id = executor_assignment.position_id
                 join work_expectation expectation
                   on expectation.tenant_id = record.tenant_id
                  and expectation.id = record.work_expectation_id
-                 and expectation.position_assignment_id = report.position_assignment_id
                 where report.tenant_id = :tenantId and report.id = :reportId
                   and report.report_status = 'DRAFT'
-                  and coalesce((package_item.report_policy ->> 'dailyReport')::boolean, true)
-                order by item.id, record.attempt_no desc, record.id desc
+                order by matched_item.template_item_id, record.attempt_no desc, record.id desc
                 """, base(principal).addValue("reportId", reportId).addValue("revisionId", revisionId),
                 (rs, rowNum) -> new ProjectableRecord(
                         rs.getObject("template_item_id", UUID.class),
                         rs.getObject("work_record_id", UUID.class),
                         rs.getObject("position_assignment_id", UUID.class),
                         rs.getObject("submitted_by_account_id", UUID.class),
+                        rs.getObject("executor_employee_id", UUID.class),
+                        rs.getString("executor_employee_name"),
+                        rs.getString("executor_position_name"),
                         rs.getString("status"), rs.getInt("attempt_no"), rs.getString("payload"),
                         rs.getString("completion_statement"), rs.getString("exception_statement"),
                         rs.getString("next_action"), rs.getString("content_hash"),
@@ -188,20 +240,16 @@ public class DailyReportRoutineProjectionService {
                         on item.tenant_id = relation.tenant_id
                        and item.section_version_id = relation.section_version_id
                        and item.id = result.template_item_id
-                       and item.work_package_item_id is not null
                       where report.tenant_id = result.tenant_id
                         and report.id = :reportId
                         and not exists (
                             select 1
                             from work_record record
-                            join work_expectation expectation
-                              on expectation.tenant_id = record.tenant_id
-                             and expectation.id = record.work_expectation_id
                             where record.tenant_id = report.tenant_id
+                              and record.id::text = result.source_summary ->> 'workRecordId'
                               and record.business_date = report.business_date
-                              and record.work_package_item_id = item.work_package_item_id
                               and record.status in ('SUBMITTED', 'APPROVED')
-                              and expectation.position_assignment_id = report.position_assignment_id
+                              and record.position_assignment_id = report.position_assignment_id
                         )
                   )
                 """;
@@ -235,6 +283,11 @@ public class DailyReportRoutineProjectionService {
         ObjectNode value = objectMapper.createObjectNode();
         value.put("workRecordId", record.workRecordId().toString());
         value.put("status", record.status());
+        ObjectNode actualExecutor = value.putObject("actualExecutor");
+        actualExecutor.put("assignmentId", record.assignmentId().toString());
+        actualExecutor.put("employeeId", record.executorEmployeeId().toString());
+        actualExecutor.put("employeeName", record.executorEmployeeName());
+        actualExecutor.put("positionName", record.executorPositionName());
         value.put("completion", blankToFallback(record.completionStatement(),
                 approved ? "已完成" : "已提交，待主管审核"));
         String factLabel = reportPolicy.path("factLabel").asText("").trim();
@@ -252,6 +305,8 @@ public class DailyReportRoutineProjectionService {
         summary.put("attemptNo", record.attemptNo());
         summary.put("evidenceCount", evidenceCount);
         summary.put("reviewStatus", record.status());
+        summary.put("actualExecutorAssignmentId", record.assignmentId().toString());
+        summary.put("actualExecutorEmployeeId", record.executorEmployeeId().toString());
         UUID resultId = jdbc.queryForObject("""
                 with changed as (
                     insert into daily_report_item_result
@@ -367,31 +422,96 @@ public class DailyReportRoutineProjectionService {
 
     private void refreshRuleAnalysis(TenantPrincipal principal, UUID reportId, UUID revisionId) {
         Map<String, Object> facts = jdbc.queryForMap("""
+                with report_context as (
+                    select report.*
+                    from daily_report report
+                    where report.tenant_id = :tenantId and report.id = :reportId
+                ),
+                report_template_items as (
+                    select distinct
+                           item.id as template_item_id,
+                           item.work_package_item_id,
+                           nullif(btrim(package_item.execution_policy ->> 'sharedKey'), '') as shared_key,
+                           package_item.execution_policy ->> 'sharedReportProjectionMode' as projection_mode,
+                           case
+                               when package_item.execution_policy ->> 'sharedReportProjectionMode'
+                                        = 'ACTUAL_EXECUTOR_ONLY'
+                                and nullif(btrim(package_item.execution_policy ->> 'sharedKey'), '')
+                                        is not null
+                               then 'SHARED:' || (package_item.execution_policy ->> 'sharedKey')
+                               else 'ITEM:' || item.id::text
+                           end as semantic_key
+                    from report_context report
+                    join daily_report_template_section relation
+                      on relation.tenant_id = report.tenant_id
+                     and relation.template_version_id = report.template_version_id
+                    join daily_report_template_item item
+                      on item.tenant_id = relation.tenant_id
+                     and item.section_version_id = relation.section_version_id
+                     and item.work_package_item_id is not null
+                    join work_package_item package_item
+                      on package_item.tenant_id = item.tenant_id
+                     and package_item.id = item.work_package_item_id
+                    where coalesce((package_item.report_policy ->> 'dailyReport')::boolean, true)
+                ),
+                matched_expectations as (
+                    select distinct template.semantic_key, expectation.id, expectation.status
+                    from report_context report
+                    join report_template_items template on true
+                    join work_expectation expectation
+                      on expectation.tenant_id = report.tenant_id
+                     and expectation.business_date = report.business_date
+                    join work_package_item expectation_item
+                      on expectation_item.tenant_id = expectation.tenant_id
+                     and expectation_item.id = expectation.work_package_item_id
+                    left join lateral (
+                        select record.position_assignment_id
+                        from work_record record
+                        where record.tenant_id = expectation.tenant_id
+                          and record.work_expectation_id = expectation.id
+                          and record.status in ('SUBMITTED', 'APPROVED')
+                        order by record.attempt_no desc, record.id desc
+                        limit 1
+                    ) actual_record on true
+                    where (
+                        expectation.work_package_item_id = template.work_package_item_id
+                        or (
+                            template.projection_mode = 'ACTUAL_EXECUTOR_ONLY'
+                            and expectation_item.execution_policy ->> 'sharedReportProjectionMode'
+                                = 'ACTUAL_EXECUTOR_ONLY'
+                            and template.shared_key is not null
+                            and template.shared_key = expectation_item.execution_policy ->> 'sharedKey'
+                        )
+                    )
+                      and coalesce(actual_record.position_assignment_id,
+                                   expectation.position_assignment_id)
+                            = report.position_assignment_id
+                )
                 select report.hotel_org_unit_id, report.org_unit_id, report.business_date,
                        report.position_assignment_id, report.trace_id,
-                       (select count(*) from work_expectation expectation
-                        join daily_report_template_item item
-                          on item.tenant_id = expectation.tenant_id
-                         and item.work_package_item_id = expectation.work_package_item_id
-                        join daily_report_template_section relation
-                          on relation.tenant_id = item.tenant_id
-                         and relation.section_version_id = item.section_version_id
-                        where expectation.tenant_id = report.tenant_id
-                          and expectation.position_assignment_id = report.position_assignment_id
-                          and expectation.business_date = report.business_date
-                          and expectation.status <> 'CANCELLED'
-                          and relation.template_version_id = report.template_version_id) as expected_count,
-                       (select count(*) from daily_report_item_result result
+                       (select count(distinct semantic_key)
+                        from matched_expectations
+                        where status <> 'CANCELLED') as expected_count,
+                       (select count(distinct template.semantic_key)
+                        from daily_report_item_result result
+                        join report_template_items template
+                          on template.template_item_id = result.template_item_id
                         where result.tenant_id = report.tenant_id
                           and result.revision_id = :revisionId
                           and result.system_prefilled
                           and result.result_status in ('COMPLETED', 'EXCEPTION')) as completed_count,
-                       (select count(*) from daily_report_item_result result
+                       (select count(distinct template.semantic_key)
+                        from daily_report_item_result result
+                        join report_template_items template
+                          on template.template_item_id = result.template_item_id
                         where result.tenant_id = report.tenant_id
                           and result.revision_id = :revisionId
                           and result.system_prefilled
                           and result.result_status = 'PENDING') as pending_review_count,
-                       (select count(*) from daily_report_item_result result
+                       (select count(distinct template.semantic_key)
+                        from daily_report_item_result result
+                        join report_template_items template
+                          on template.template_item_id = result.template_item_id
                         where result.tenant_id = report.tenant_id
                           and result.revision_id = :revisionId and result.exception_flag) as exception_count,
                        (select count(*) from daily_report_evidence evidence
@@ -399,20 +519,10 @@ public class DailyReportRoutineProjectionService {
                           and evidence.revision_id = :revisionId
                           and evidence.invalidated_at is null
                           and evidence.scan_status <> 'REJECTED') as evidence_count,
-                       (select count(*) from work_expectation expectation
-                        join daily_report_template_item item
-                          on item.tenant_id = expectation.tenant_id
-                         and item.work_package_item_id = expectation.work_package_item_id
-                        join daily_report_template_section relation
-                          on relation.tenant_id = item.tenant_id
-                         and relation.section_version_id = item.section_version_id
-                        where expectation.tenant_id = report.tenant_id
-                          and expectation.position_assignment_id = report.position_assignment_id
-                          and expectation.business_date = report.business_date
-                          and expectation.status = 'MISSED'
-                          and relation.template_version_id = report.template_version_id) as missed_count
-                from daily_report report
-                where report.tenant_id = :tenantId and report.id = :reportId
+                       (select count(distinct semantic_key)
+                        from matched_expectations
+                        where status = 'MISSED') as missed_count
+                from report_context report
                 """, base(principal).addValue("reportId", reportId).addValue("revisionId", revisionId));
         int expected = ((Number) facts.get("expected_count")).intValue();
         int completed = ((Number) facts.get("completed_count")).intValue();
@@ -847,6 +957,9 @@ public class DailyReportRoutineProjectionService {
             UUID workRecordId,
             UUID assignmentId,
             UUID submittedByAccountId,
+            UUID executorEmployeeId,
+            String executorEmployeeName,
+            String executorPositionName,
             String status,
             int attemptNo,
             String payload,

@@ -43,6 +43,10 @@ export type WorkPackageItemDraft = {
   workWindowStart: string
   workWindowEnd: string
   dueLocalTime: string
+  shiftAvailableAnchor: 'SHIFT_START' | 'SHIFT_MIDPOINT' | 'SHIFT_END'
+  shiftAvailableOffsetMinutes: string
+  shiftDueAnchor: 'SHIFT_START' | 'SHIFT_MIDPOINT' | 'SHIFT_END'
+  shiftDueOffsetMinutes: string
   graceMinutes: string
   weekdays: number[]
   dayOfMonth: string
@@ -142,12 +146,64 @@ function reminderDraft(source: JsonRecord): ReminderMomentDraft {
   }
 }
 
+type ShiftAnchor = WorkPackageItemDraft['shiftAvailableAnchor']
+type MappedShiftTiming = {
+  availableAnchor: ShiftAnchor
+  availableOffsetMinutes: string
+  dueAnchor: ShiftAnchor
+  dueOffsetMinutes: string
+}
+
+function mappedShiftTiming(timing: JsonRecord): MappedShiftTiming {
+  const configuredAvailableAnchor = text(timing, 'availableAnchor')
+  const configuredDueAnchor = text(timing, 'dueAnchor')
+  const anchors: ShiftAnchor[] = ['SHIFT_START', 'SHIFT_MIDPOINT', 'SHIFT_END']
+  if (configuredAvailableAnchor || configuredDueAnchor
+    || value(timing, 'availableOffsetMinutes') !== undefined
+    || value(timing, 'dueOffsetMinutes') !== undefined) {
+    return {
+      availableAnchor: anchors.includes(configuredAvailableAnchor as ShiftAnchor)
+        ? configuredAvailableAnchor as ShiftAnchor : 'SHIFT_START',
+      availableOffsetMinutes: numericText(timing, '0', 'availableOffsetMinutes'),
+      dueAnchor: anchors.includes(configuredDueAnchor as ShiftAnchor)
+        ? configuredDueAnchor as ShiftAnchor : 'SHIFT_END',
+      dueOffsetMinutes: numericText(timing, '0', 'dueOffsetMinutes'),
+    }
+  }
+
+  const aroundMidpoint = Number(value(timing, 'aroundShiftMidpointMinutes') ?? 0)
+  const available = value(timing, 'startOffsetMinutes') !== undefined
+    ? { anchor: 'SHIFT_START' as ShiftAnchor, offset: Number(value(timing, 'startOffsetMinutes')) }
+    : value(timing, 'startBeforeShiftEndMinutes') !== undefined
+      ? { anchor: 'SHIFT_END' as ShiftAnchor, offset: -Number(value(timing, 'startBeforeShiftEndMinutes')) }
+      : value(timing, 'aroundShiftMidpointMinutes') !== undefined
+        ? { anchor: 'SHIFT_MIDPOINT' as ShiftAnchor, offset: -aroundMidpoint }
+        : { anchor: 'SHIFT_START' as ShiftAnchor, offset: 0 }
+  const due = value(timing, 'endOffsetMinutes') !== undefined
+    ? { anchor: 'SHIFT_START' as ShiftAnchor, offset: Number(value(timing, 'endOffsetMinutes')) }
+    : value(timing, 'endBeforeShiftEndMinutes') !== undefined
+      ? { anchor: 'SHIFT_END' as ShiftAnchor, offset: -Number(value(timing, 'endBeforeShiftEndMinutes')) }
+      : value(timing, 'endAfterShiftEndMinutes') !== undefined
+        ? { anchor: 'SHIFT_END' as ShiftAnchor, offset: Number(value(timing, 'endAfterShiftEndMinutes')) }
+        : value(timing, 'aroundShiftMidpointMinutes') !== undefined
+          ? { anchor: 'SHIFT_MIDPOINT' as ShiftAnchor, offset: aroundMidpoint }
+          : { anchor: 'SHIFT_END' as ShiftAnchor, offset: 0 }
+  return {
+    availableAnchor: available.anchor,
+    availableOffsetMinutes: String(available.offset),
+    dueAnchor: due.anchor,
+    dueOffsetMinutes: String(due.offset),
+  }
+}
+
 export function createWorkPackageItemDraft(sequence: number, formVersionId = ''): WorkPackageItemDraft {
   const code = `DAILY-${String(sequence).padStart(2, '0')}`
   return {
     key: newKey('item'), itemCode: code, name: `新工作项 ${sequence}`, description: '', itemType: 'SCHEDULED_RECORD',
     formVersionId, required: true, enabled: true, periodType: 'DAY', timezoneMode: 'HOTEL', fixedTimezone: '',
-    workWindowStart: '', workWindowEnd: '', dueLocalTime: '18:00', graceMinutes: '0', weekdays: [1, 2, 3, 4, 5, 6, 7],
+    workWindowStart: '', workWindowEnd: '', dueLocalTime: '18:00',
+    shiftAvailableAnchor: 'SHIFT_START', shiftAvailableOffsetMinutes: '0', shiftDueAnchor: 'SHIFT_END', shiftDueOffsetMinutes: '0',
+    graceMinutes: '0', weekdays: [1, 2, 3, 4, 5, 6, 7],
     dayOfMonth: '', holidayPolicy: 'INCLUDE', holidayDates: '', workdayOverrides: '', waiverAllowed: false, targetGranularity: 'ASSIGNMENT_ORG', reviewMode: 'MANUAL',
     completionStatementRequired: true, exceptionStatementRequired: false, nextActionRequired: false,
     attachmentRequired: false, attachmentCountUnlimited: false, maxAttachments: '10', maxFileSizeMb: '20',
@@ -164,6 +220,8 @@ export function mapWorkPackageItem(source: JsonRecord, _index: number): WorkPack
   const report = record(value(source, 'report_policy', 'reportPolicy'))
   const applicability = record(value(source, 'applicability_policy', 'applicabilityPolicy'))
   const execution = record(value(source, 'execution_policy', 'executionPolicy'))
+  const shiftTiming = record(execution.shiftTiming)
+  const mappedShift = mappedShiftTiming(shiftTiming)
   const standards = list<JsonRecord>(source.standards)
   return {
     key: text(source, 'id') || newKey('item'),
@@ -173,6 +231,10 @@ export function mapWorkPackageItem(source: JsonRecord, _index: number): WorkPack
     periodType: text(source, 'period_type', 'periodType') || 'DAY', timezoneMode: text(source, 'timezone_mode', 'timezoneMode') || 'HOTEL',
     fixedTimezone: text(source, 'fixed_timezone', 'fixedTimezone'), workWindowStart: normalizedTime(text(source, 'work_window_start', 'workWindowStart')),
     workWindowEnd: normalizedTime(text(source, 'work_window_end', 'workWindowEnd')), dueLocalTime: normalizedTime(text(source, 'due_local_time', 'dueLocalTime')),
+    shiftAvailableAnchor: mappedShift.availableAnchor,
+    shiftAvailableOffsetMinutes: mappedShift.availableOffsetMinutes,
+    shiftDueAnchor: mappedShift.dueAnchor,
+    shiftDueOffsetMinutes: mappedShift.dueOffsetMinutes,
     graceMinutes: numericText(source, '0', 'grace_minutes', 'graceMinutes'), weekdays: list<number>(value(source, 'weekdays')).map(Number),
     dayOfMonth: numericText(source, '', 'day_of_month', 'dayOfMonth'), holidayPolicy: text(source, 'holiday_policy', 'holidayPolicy') || 'INCLUDE',
     holidayDates: list<string>(applicability.holidayDates).join(','), workdayOverrides: list<string>(applicability.workdayOverrides).join(','),
@@ -191,7 +253,7 @@ export function mapWorkPackageItem(source: JsonRecord, _index: number): WorkPack
     responsibilities: list<JsonRecord>(source.responsibilities),
     submissionExtras: policyWithout(submission, ['completionStatementRequired', 'exceptionStatementRequired', 'nextActionRequired', 'attachmentRequired', 'attachmentCountUnlimited', 'maxAttachments', 'maxFileSizeBytes', 'allowedExtensions', 'evidenceRequirements']),
     reminderExtras: policyWithout(reminder, ['moments']), reportExtras: policyWithout(report, ['dailyReport', 'factLabel', 'includeEvidence', 'includeExceptions']),
-    applicabilityPolicy: policyWithout(applicability, ['holidayDates', 'workdayOverrides']), executionExtras: policyWithout(execution, ['enabled']),
+    applicabilityPolicy: policyWithout(applicability, ['holidayDates', 'workdayOverrides']), executionExtras: policyWithout(execution, ['enabled', 'shiftTiming']),
   }
 }
 
@@ -259,7 +321,16 @@ export function serializeWorkPackageItems(drafts: WorkPackageItemDraft[]): JsonR
       applicabilityPolicy: {
         ...draft.applicabilityPolicy, holidayDates: splitValues(draft.holidayDates), workdayOverrides: splitValues(draft.workdayOverrides),
       },
-      executionPolicy: { ...draft.executionExtras, enabled: draft.enabled },
+      executionPolicy: {
+        ...draft.executionExtras,
+        enabled: draft.enabled,
+        ...(draft.periodType === 'SHIFT' ? { shiftTiming: {
+          availableAnchor: draft.shiftAvailableAnchor,
+          availableOffsetMinutes: Number(draft.shiftAvailableOffsetMinutes || 0),
+          dueAnchor: draft.shiftDueAnchor,
+          dueOffsetMinutes: Number(draft.shiftDueOffsetMinutes || 0),
+        } } : {}),
+      },
       standards: standard, responsibilities: normalizedResponsibilities(draft),
     }
   })
@@ -283,6 +354,18 @@ export function validateWorkPackageItems(drafts: WorkPackageItemDraft[]): string
     if (!Number.isInteger(maxAttachments) || maxAttachments < 0 || maxAttachments > 200) issues.push(`${label}附件上限必须为 0 到 200。`)
     const maxFileSizeMb = Number(item.maxFileSizeMb)
     if (!Number.isInteger(maxFileSizeMb) || maxFileSizeMb < 1 || maxFileSizeMb > 20) issues.push(`${label}单文件上限必须为 1 到 20MB。`)
+    if (item.periodType === 'SHIFT') {
+      for (const [name, candidate] of [['可开始偏移', item.shiftAvailableOffsetMinutes], ['截止偏移', item.shiftDueOffsetMinutes]] as const) {
+        const minutes = Number(candidate)
+        if (!Number.isInteger(minutes) || Math.abs(minutes) > 2880) issues.push(`${label}${name}必须是 -2880 到 2880 的整数分钟。`)
+      }
+      if (item.shiftAvailableAnchor === item.shiftDueAnchor
+        && Number.isInteger(Number(item.shiftAvailableOffsetMinutes))
+        && Number.isInteger(Number(item.shiftDueOffsetMinutes))
+        && Number(item.shiftDueOffsetMinutes) <= Number(item.shiftAvailableOffsetMinutes)) {
+        issues.push(`${label}同一班次基准下，截止偏移必须晚于可开始偏移。`)
+      }
+    }
     for (const candidate of [...splitValues(item.holidayDates), ...splitValues(item.workdayOverrides)]) {
       const parsed = new Date(`${candidate}T00:00:00Z`)
       if (!/^\d{4}-\d{2}-\d{2}$/.test(candidate) || Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== candidate) {

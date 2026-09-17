@@ -493,10 +493,18 @@ public class DailyReportTemplateService {
         TenantPrincipal principal = prepare();
         BusinessDayService.BusinessDayContext day = businessDayService.resolve(orgUnitId, businessDate);
         UUID positionId = jdbc.queryForObject("""
-                select position_id from employee_position_assignment
-                where tenant_id = :tenantId and id = :assignmentId and org_unit_id = :orgUnitId
+                select assignment.position_id
+                from employee_position_assignment assignment
+                where assignment.tenant_id = :tenantId and assignment.id = :assignmentId
                   and status = 'ACTIVE' and valid_from <= :businessDate
                   and (valid_to is null or valid_to >= :businessDate)
+                  and exists (
+                    select 1
+                    from org_unit_closure report_scope
+                    where report_scope.tenant_id = assignment.tenant_id
+                      and report_scope.ancestor_id = :orgUnitId
+                      and report_scope.descendant_id = assignment.org_unit_id
+                  )
                 """, base(principal).addValue("assignmentId", positionAssignmentId)
                 .addValue("orgUnitId", orgUnitId).addValue("businessDate", day.businessDate()), UUID.class);
         OffsetDateTime effectiveAt = day.businessDate().atTime(day.cutoffLocalTime())

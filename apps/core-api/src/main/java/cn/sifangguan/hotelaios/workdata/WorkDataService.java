@@ -25,6 +25,19 @@ public class WorkDataService {
     private static final Set<String> RECORD_KINDS = Set.of(
             "LEGACY", "SCHEDULED", "EVENT", "INSPECTION", "METRIC_REVIEW", "REVIEW_APPROVAL"
     );
+    private static final Map<String, String> FACILITY_FLAG_KEYS = Map.ofEntries(
+            Map.entry("BREAKFAST_AREA", "breakfastArea"),
+            Map.entry("KITCHEN", "kitchen"),
+            Map.entry("AFTERNOON_TEA", "afternoonTea"),
+            Map.entry("BAR", "bar"),
+            Map.entry("PROJECTION", "projection"),
+            Map.entry("GYM", "gym"),
+            Map.entry("TERRACE", "terrace"),
+            Map.entry("TRENDY_PLAY_AREA", "trendyPlayArea")
+    );
+    private static final Set<String> ALLOWED_EVIDENCE_KINDS = Set.of(
+            "IMAGE", "PDF", "WORD", "EXCEL", "DOCUMENT"
+    );
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy accessPolicy;
@@ -226,7 +239,8 @@ public class WorkDataService {
         TenantPrincipal principal = prepare();
         accessPolicy.requirePermission("work-record.submit");
         UUID targetOrgUnitId = request.targetOrgUnitId() == null ? request.orgUnitId() : request.targetOrgUnitId();
-        accessPolicy.requireOrgScope(targetOrgUnitId);
+        requireTargetOrgScopeOrAssignmentMembership(principal, targetOrgUnitId,
+                request.positionAssignmentId(), request.businessDate());
         authorizeAssignmentSubmission(principal, request.positionAssignmentId(), request.orgUnitId());
         validateAssignmentAndForm(principal, request);
         WorkContext workContext = resolveWorkContext(principal, request, targetOrgUnitId);
@@ -239,10 +253,11 @@ public class WorkDataService {
         int attemptNo = nextAttempt(principal, request, workContext);
         String recordKind = resolveRecordKind(request.recordKind(), workContext.itemType());
         String status = saveAsDraft ? "DRAFT" : "SUBMITTED";
+        boolean applicable = true;
         if ("SUBMITTED".equals(status)) {
             requireFirstSharedSubmission(principal, workContext.expectationId(), null);
             validateConditionalFields(workContext.itemCode(), request.payload());
-            validateSubmissionPolicy(principal, workContext.itemId(), null,
+            applicable = validateSubmissionPolicy(principal, workContext.itemId(), null,
                     request.payload(), targetOrgUnitId,
                     request.completionStatement(), request.exceptionStatement(), request.nextAction());
         }
@@ -287,15 +302,19 @@ public class WorkDataService {
                 .addValue("completionStatement", trimToNull(request.completionStatement()))
                 .addValue("exceptionStatement", trimToNull(request.exceptionStatement()))
                 .addValue("nextAction", trimToNull(request.nextAction())));
-        updateExpectationAfterRecord(principal, workContext.expectationId(), status);
+        updateExpectationAfterRecord(principal, workContext.expectationId(), status, applicable);
         auditWriter.record("DRAFT".equals(status) ? "WORK_RECORD_DRAFT_CREATED" : "WORK_RECORD_SUBMITTED",
                 "WORK_RECORD", id, request.payload().toString());
         if ("SUBMITTED".equals(status)) {
             emitSubmitted(principal, id);
-            projectAndNotifySubmitted(principal, id);
+            routineProjectionService.projectWorkRecord(id);
+            if (applicable) {
+                notifySubmittedForReview(principal, id);
+            }
         }
         return response("id", id, "status", status, "businessDate", request.businessDate(),
-                "recordKind", recordKind, "attemptNo", attemptNo, "rowVersion", 0L);
+                "recordKind", recordKind, "attemptNo", attemptNo, "rowVersion", 0L,
+                "applicabilityStatus", applicable ? "APPLICABLE" : "NOT_APPLICABLE");
     }
 
     @Transactional
@@ -344,7 +363,7 @@ public class WorkDataService {
         }
         validatePayload(principal, record.formVersionId(), readJson(record.payloadJson()));
         requireFirstSharedSubmission(principal, record.expectationId(), recordId);
-        validateSubmissionPolicyForRecord(principal, recordId);
+        boolean applicable = validateSubmissionPolicyForRecord(principal, recordId);
         int changed = jdbc.update("""
                 update work_record
                 set status = 'SUBMITTED', submitted_at = now(), submitted_by_account_id = :actorId,
@@ -358,11 +377,15 @@ public class WorkDataService {
         if (changed != 1) {
             throw new IllegalArgumentException("工作记录版本已变化，请刷新后重试");
         }
-        updateExpectationAfterRecord(principal, record.expectationId(), "SUBMITTED");
+        updateExpectationAfterRecord(principal, record.expectationId(), "SUBMITTED", applicable);
         auditWriter.record("WORK_RECORD_SUBMITTED", "WORK_RECORD", recordId, record.payloadJson());
         emitSubmitted(principal, recordId);
-        projectAndNotifySubmitted(principal, recordId);
-        return response("id", recordId, "status", "SUBMITTED", "rowVersion", request.expectedVersion() + 1);
+        routineProjectionService.projectWorkRecord(recordId);
+        if (applicable) {
+            notifySubmittedForReview(principal, recordId);
+        }
+        return response("id", recordId, "status", "SUBMITTED", "rowVersion", request.expectedVersion() + 1,
+                "applicabilityStatus", applicable ? "APPLICABLE" : "NOT_APPLICABLE");
     }
 
     @Transactional
@@ -485,6 +508,13 @@ public class WorkDataService {
                 where a.tenant_id = :tenantId and a.id = :assignmentId and a.employee_id = :employeeId
                   and a.org_unit_id = :orgUnitId and a.status = 'ACTIVE'
                   and a.valid_from <= :businessDate and (a.valid_to is null or a.valid_to >= :businessDate)
+                  and exists (
+                    select 1
+                    from org_unit_closure target_scope
+                    where target_scope.tenant_id = a.tenant_id
+                      and target_scope.ancestor_id = :targetOrgUnitId
+                      and target_scope.descendant_id = a.org_unit_id
+                  )
                   and fv.lifecycle_status = 'PUBLISHED'
                   and (f.position_id is null or f.position_id = a.position_id or :linkedExpectation = true)
                 """, base(principal)
@@ -492,6 +522,8 @@ public class WorkDataService {
                 .addValue("assignmentId", request.positionAssignmentId())
                 .addValue("employeeId", request.employeeId())
                 .addValue("orgUnitId", request.orgUnitId())
+                .addValue("targetOrgUnitId", request.targetOrgUnitId() == null
+                        ? request.orgUnitId() : request.targetOrgUnitId())
                 .addValue("linkedExpectation", request.workExpectationId() != null)
                 .addValue("businessDate", request.businessDate()), Integer.class);
         if (validAssignment == null || validAssignment != 1) {
@@ -499,7 +531,39 @@ public class WorkDataService {
         }
     }
 
-    private void validateSubmissionPolicyForRecord(TenantPrincipal principal, UUID recordId) {
+    private void requireTargetOrgScopeOrAssignmentMembership(
+            TenantPrincipal principal,
+            UUID targetOrgUnitId,
+            UUID assignmentId,
+            java.time.LocalDate businessDate
+    ) {
+        if (principal.hasTenantScope() || principal.orgScopes().contains(targetOrgUnitId)) {
+            return;
+        }
+        Boolean belongsToTarget = jdbc.queryForObject("""
+                select exists (
+                  select 1
+                  from employee_position_assignment assignment
+                  join org_unit_closure target_scope
+                    on target_scope.tenant_id = assignment.tenant_id
+                   and target_scope.ancestor_id = :targetOrgUnitId
+                   and target_scope.descendant_id = assignment.org_unit_id
+                  where assignment.tenant_id = :tenantId
+                    and assignment.id = :assignmentId
+                    and assignment.status = 'ACTIVE'
+                    and assignment.valid_from <= :businessDate
+                    and (assignment.valid_to is null or assignment.valid_to >= :businessDate)
+                )
+                """, base(principal)
+                .addValue("targetOrgUnitId", targetOrgUnitId)
+                .addValue("assignmentId", assignmentId)
+                .addValue("businessDate", businessDate), Boolean.class);
+        if (!Boolean.TRUE.equals(belongsToTarget)) {
+            throw new AccessDeniedException("目标组织不在当前任职所属门店范围内");
+        }
+    }
+
+    private boolean validateSubmissionPolicyForRecord(TenantPrincipal principal, UUID recordId) {
         Map<String, Object> record = jdbc.queryForMap("""
                 select record.work_package_item_id, record.target_org_unit_id, record.completion_statement,
                        record.exception_statement, record.next_action, record.payload::text,
@@ -510,13 +574,13 @@ public class WorkDataService {
                 where record.tenant_id = :tenantId and record.id = :recordId
                 """, base(principal).addValue("recordId", recordId));
         validateConditionalFields((String) record.get("item_code"), readJson((String) record.get("payload")));
-        validateSubmissionPolicy(principal, (UUID) record.get("work_package_item_id"), recordId,
+        return validateSubmissionPolicy(principal, (UUID) record.get("work_package_item_id"), recordId,
                 readJson((String) record.get("payload")), (UUID) record.get("target_org_unit_id"),
                 (String) record.get("completion_statement"), (String) record.get("exception_statement"),
                 (String) record.get("next_action"));
     }
 
-    private void validateSubmissionPolicy(
+    private boolean validateSubmissionPolicy(
             TenantPrincipal principal,
             UUID workPackageItemId,
             UUID workRecordId,
@@ -527,26 +591,31 @@ public class WorkDataService {
             String nextAction
     ) {
         if (workPackageItemId == null) {
-            return;
+            return true;
         }
-        String raw = jdbc.queryForObject("""
-                select submission_policy::text from work_package_item
+        Map<String, Object> policyRow = jdbc.queryForMap("""
+                select submission_policy::text as submission_policy,
+                       applicability_policy::text as applicability_policy,
+                       execution_policy::text as execution_policy
+                from work_package_item
                 where tenant_id = :tenantId and id = :itemId
-                """, base(principal).addValue("itemId", workPackageItemId), String.class);
-        JsonNode policy = readJson(raw);
-        if (policy.path("completionStatementRequired").asBoolean(true)
+                """, base(principal).addValue("itemId", workPackageItemId));
+        JsonNode submissionPolicy = readJson(String.valueOf(policyRow.get("submission_policy")));
+        JsonNode applicabilityPolicy = readJson(String.valueOf(policyRow.get("applicability_policy")));
+        JsonNode executionPolicy = readJson(String.valueOf(policyRow.get("execution_policy")));
+        if (submissionPolicy.path("completionStatementRequired").asBoolean(true)
                 && (completionStatement == null || completionStatement.isBlank())) {
             throw new IllegalArgumentException("提交工作记录必须填写完成情况");
         }
-        if (policy.path("exceptionStatementRequired").asBoolean(false)
+        if (submissionPolicy.path("exceptionStatementRequired").asBoolean(false)
                 && (exceptionStatement == null || exceptionStatement.isBlank())) {
             throw new IllegalArgumentException("提交工作记录必须填写异常与协同事项");
         }
-        if (policy.path("nextActionRequired").asBoolean(false)
+        if (submissionPolicy.path("nextActionRequired").asBoolean(false)
                 && (nextAction == null || nextAction.isBlank())) {
             throw new IllegalArgumentException("提交工作记录必须填写下一步行动");
         }
-        int maxAttachments = Math.max(0, Math.min(200, policy.path("maxAttachments").asInt(10)));
+        int maxAttachments = Math.max(0, Math.min(200, submissionPolicy.path("maxAttachments").asInt(10)));
         int count = 0;
         if (workRecordId != null) {
             Integer stored = jdbc.queryForObject("""
@@ -559,56 +628,173 @@ public class WorkDataService {
         if (count > maxAttachments) {
             throw new IllegalArgumentException("工作记录附件数量超过模板上限" + maxAttachments + "个");
         }
-        for (JsonNode requirement : policy.path("evidenceRequirements")) {
+        if (!submissionApplicable(applicabilityPolicy, payload)) {
+            return false;
+        }
+        validateRequiredRoomCountFormula(executionPolicy, payload);
+        JsonNode operationalFeatureFlags = null;
+        JsonNode evidenceInstanceConfiguration = null;
+        for (JsonNode requirement : submissionPolicy.path("evidenceRequirements")) {
             JsonNode requiredWhen = requirement.path("requiredWhen");
+            boolean requiredWhenMatched = false;
             if (requiredWhen.isObject()) {
                 String field = requiredWhen.path("field").asText("");
                 JsonNode expected = requiredWhen.get("equals");
+                if (field.isBlank() || expected == null) {
+                    throw evidenceConfigurationError("requiredWhen必须同时配置field和equals");
+                }
                 JsonNode actual = payload == null ? null : payload.get(field);
-                if (field.isBlank() || expected == null || actual == null || !actual.equals(expected)) {
+                if (actual == null || !actual.equals(expected)) {
+                    continue;
+                }
+                requiredWhenMatched = true;
+            } else if (!requiredWhen.isMissingNode() && !requiredWhen.isNull()) {
+                throw evidenceConfigurationError("requiredWhen必须是对象");
+            }
+
+            String checkpointCode = requirement.path("checkpointCode").asText("").trim();
+            String captureSource = requirement.path("captureSource").asText("").trim();
+            String conditionalFacility = requirement.path("conditionalFacility").asText("").trim();
+            if (!conditionalFacility.isBlank()) {
+                if (operationalFeatureFlags == null) {
+                    operationalFeatureFlags = loadOperationalFeatureFlags(principal, targetOrgUnitId);
+                }
+                if (!configuredFacilityEnabled(operationalFeatureFlags, conditionalFacility)) {
                     continue;
                 }
             }
-            if (workRecordId == null) {
-                throw new IllegalArgumentException("模板要求先保存草稿并上传现场证据后再提交");
-            }
-            String checkpointCode = requirement.path("checkpointCode").asText("").trim();
-            String captureSource = requirement.path("captureSource").asText("").trim();
-            if (requirement.has("requiredInstances")) {
+
+            if (requirement.has("requiredInstances")
+                    || (requirement.has("minimumPerInstance")
+                    && !requirement.path("instanceField").asText("").isBlank())) {
                 validateInstanceEvidence(principal, workRecordId, payload, requirement,
                         checkpointCode, captureSource);
                 continue;
             }
-            int minimum = Math.max(1, requirement.path("minimum").asInt(1));
+
+            int minimum = baseEvidenceMinimum(requirement, requiredWhenMatched);
             if (requirement.has("minimumPerHotelFloor") && targetOrgUnitId != null) {
+                int minimumPerFloor = strictNonNegativeInt(requirement, "minimumPerHotelFloor");
                 Integer floors = jdbc.queryForObject("""
-                        select coalesce(max(guest_room_floor_count), 1)
-                        from hotel_profile where tenant_id = :tenantId and org_unit_id = :orgUnitId
+                        select coalesce(profile.guest_room_floor_count, 1)
+                        from org_unit_closure scope
+                        join hotel_profile profile
+                          on profile.tenant_id = scope.tenant_id
+                         and profile.org_unit_id = scope.ancestor_id
+                        where scope.tenant_id = :tenantId
+                          and scope.descendant_id = :orgUnitId
+                        order by scope.depth
+                        limit 1
                         """, base(principal).addValue("orgUnitId", targetOrgUnitId), Integer.class);
                 minimum = Math.max(minimum,
-                        Math.max(1, floors == null ? 1 : floors) * requirement.path("minimumPerHotelFloor").asInt(1));
+                        safeEvidenceProduct(Math.max(1, floors == null ? 1 : floors), minimumPerFloor));
             }
-            List<String> mediaTypes = new java.util.ArrayList<>();
-            requirement.path("mediaTypes").forEach(value -> mediaTypes.add(value.asText()));
-            Integer matching = jdbc.queryForObject("""
-                    select count(*) from attachment
-                    where tenant_id = :tenantId and work_record_id = :recordId
-                      and scan_status <> 'REJECTED'
-                      and (:checkpointCode = '' or checkpoint_code = :checkpointCode)
-                      and (:captureSource = '' or capture_source = :captureSource)
-                      and (cardinality(cast(:mediaTypes as text[])) = 0
-                           or media_type = any(cast(:mediaTypes as text[])))
-                    """, base(principal).addValue("recordId", workRecordId)
-                    .addValue("checkpointCode", checkpointCode)
-                    .addValue("captureSource", captureSource)
-                    .addValue("mediaTypes", "{" + String.join(",", mediaTypes) + "}"), Integer.class);
-            if (matching == null || matching < minimum) {
+
+            if (requirement.has("minimumPerConfiguredFacility")) {
+                if (evidenceInstanceConfiguration == null) {
+                    evidenceInstanceConfiguration = loadHotelEvidenceInstanceConfiguration(
+                            principal, targetOrgUnitId);
+                }
+                List<String> configuredFacilities = configuredInstanceKeys(
+                        evidenceInstanceConfiguration, requirement, checkpointCode, "facility");
+                int perFacility = strictPositiveInt(requirement, "minimumPerConfiguredFacility");
+                validateConfiguredInstanceEvidence(principal, workRecordId, requirement,
+                        checkpointCode, captureSource, configuredFacilities, perFacility, "设施");
+                minimum = Math.max(minimum,
+                        safeEvidenceProduct(configuredFacilities.size(), perFacility));
+            }
+
+            if (requirement.has("minimumPerConfiguredAsset")) {
+                if (evidenceInstanceConfiguration == null) {
+                    evidenceInstanceConfiguration = loadHotelEvidenceInstanceConfiguration(
+                            principal, targetOrgUnitId);
+                }
+                List<String> configuredAssets = configuredInstanceKeys(
+                        evidenceInstanceConfiguration, requirement, checkpointCode, "asset");
+                int perAsset = strictPositiveInt(requirement, "minimumPerConfiguredAsset");
+                validateConfiguredInstanceEvidence(principal, workRecordId, requirement,
+                        checkpointCode, captureSource, configuredAssets, perAsset, "设备");
+                minimum = Math.max(minimum, safeEvidenceProduct(configuredAssets.size(), perAsset));
+            }
+
+            if (minimum == 0) {
+                continue;
+            }
+            if (workRecordId == null) {
+                throw new IllegalArgumentException("模板要求先保存草稿并上传现场证据后再提交");
+            }
+            int matching = matchingEvidence(principal, workRecordId, requirement,
+                    checkpointCode, captureSource, null);
+            if (matching < minimum) {
                 String label = requirement.path("label").asText(checkpointCode.isBlank() ? "现场证据" : checkpointCode);
                 throw new IllegalArgumentException(label + "至少需要" + minimum + "份符合要求的证据");
             }
         }
-        if (policy.path("attachmentRequired").asBoolean(false) && count == 0) {
+        if (submissionPolicy.path("attachmentRequired").asBoolean(false) && count == 0) {
             throw new IllegalArgumentException("该岗位工作模板要求至少上传一个附件证据");
+        }
+        return true;
+    }
+
+    private int matchingEvidence(
+            TenantPrincipal principal,
+            UUID workRecordId,
+            JsonNode requirement,
+            String checkpointCode,
+            String captureSource,
+            String instanceKey
+    ) {
+        validateMediaRequirement(requirement);
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                    select media_type, evidence_metadata::text as evidence_metadata
+                    from attachment
+                    where tenant_id = :tenantId and work_record_id = :recordId
+                      and scan_status <> 'REJECTED'
+                      and (:checkpointCode = '' or checkpoint_code = :checkpointCode)
+                      and (:captureSource = '' or capture_source = :captureSource)
+                    """, base(principal).addValue("recordId", workRecordId)
+                    .addValue("checkpointCode", checkpointCode)
+                    .addValue("captureSource", captureSource));
+        int matching = 0;
+        for (Map<String, Object> row : rows) {
+            JsonNode metadata = readJson(String.valueOf(row.get("evidence_metadata")));
+            String storedInstanceKey = normalizeEvidenceInstanceKey(
+                    metadata.path("evidenceInstanceKey").asText(null));
+            if (instanceKey != null && !instanceKey.equals(storedInstanceKey)) {
+                continue;
+            }
+            boolean reference = metadata.path("reference").asBoolean(false)
+                    || metadata.hasNonNull("referenceAttachmentId");
+            if (reference && !requirement.path("allowReference").asBoolean(false)) {
+                continue;
+            }
+            if (mediaTypeAllowed(String.valueOf(row.get("media_type")), requirement)) {
+                matching++;
+            }
+        }
+        return matching;
+    }
+
+    private void validateConfiguredInstanceEvidence(
+            TenantPrincipal principal,
+            UUID workRecordId,
+            JsonNode requirement,
+            String checkpointCode,
+            String captureSource,
+            List<String> configuredInstanceKeys,
+            int minimumPerInstance,
+            String instanceLabel
+    ) {
+        if (workRecordId == null) {
+            throw new IllegalArgumentException("模板要求先保存草稿并上传现场证据后再提交");
+        }
+        String label = requirement.path("label").asText(checkpointCode.isBlank() ? "现场证据" : checkpointCode);
+        for (String instanceKey : configuredInstanceKeys) {
+            if (matchingEvidence(principal, workRecordId, requirement,
+                    checkpointCode, captureSource, instanceKey) < minimumPerInstance) {
+                throw new IllegalArgumentException(label + instanceLabel + instanceKey
+                        + "至少需要" + minimumPerInstance + "份对应证据");
+            }
         }
     }
 
@@ -620,18 +806,54 @@ public class WorkDataService {
             String checkpointCode,
             String captureSource
     ) {
-        int requiredInstances = requirement.path("requiredInstances").asInt(0);
-        String instanceField = requirement.path("instanceField").asText("").trim();
         String instanceLabel = requirement.path("instanceLabel").asText("房号").trim();
         String label = requirement.path("label").asText(checkpointCode.isBlank() ? "逐项证据" : checkpointCode);
-        if (requiredInstances < 1 || requiredInstances > 100 || instanceField.isBlank()) {
-            throw new IllegalArgumentException("逐项证据模板配置不正确");
+        List<String> instanceKeys = evidenceInstanceKeys(payload, requirement, label, instanceLabel);
+        if (instanceKeys.isEmpty()) return;
+        int minimumPerInstance = requirement.has("minimumPerInstance")
+                ? strictNonNegativeInt(requirement, "minimumPerInstance") : 1;
+        if (minimumPerInstance == 0) {
+            return;
+        }
+        if (workRecordId == null) {
+            throw new IllegalArgumentException("模板要求先保存草稿并上传现场证据后再提交");
+        }
+        for (String instanceKey : instanceKeys) {
+            if (matchingEvidence(principal, workRecordId, requirement,
+                    checkpointCode, captureSource, instanceKey) < minimumPerInstance) {
+                throw new IllegalArgumentException(label + instanceLabel + instanceKey
+                        + "至少需要" + minimumPerInstance + "张对应照片");
+            }
+        }
+    }
+
+    static List<String> evidenceInstanceKeys(
+            JsonNode payload,
+            JsonNode requirement,
+            String label,
+            String instanceLabel
+    ) {
+        boolean fixedInstanceCount = requirement.has("requiredInstances");
+        int requiredInstances = fixedInstanceCount
+                ? strictPositiveInt(requirement, "requiredInstances") : 0;
+        String instanceField = requirement.path("instanceField").asText("").trim();
+        if (requiredInstances > 100 || instanceField.isBlank()) {
+            throw evidenceConfigurationError("逐项证据必须配置有效的instanceField，requiredInstances最多100");
         }
         JsonNode values = payload == null ? null : payload.get(instanceField);
-        if (values == null || !values.isArray() || values.size() != requiredInstances) {
+        if (fixedInstanceCount && (values == null || !values.isArray() || values.size() != requiredInstances)) {
             throw new IllegalArgumentException(label + "必须填写" + requiredInstances + "个" + instanceLabel);
         }
-        List<String> instanceKeys = new ArrayList<>(requiredInstances);
+        if (!fixedInstanceCount && (values == null || values.isNull())) {
+            return List.of();
+        }
+        if (values == null || !values.isArray()) {
+            throw new IllegalArgumentException(label + instanceLabel + "必须是数组");
+        }
+        if (values.size() > 100) {
+            throw new IllegalArgumentException(label + instanceLabel + "最多填写100个");
+        }
+        List<String> instanceKeys = new ArrayList<>(values.size());
         Set<String> distinct = new LinkedHashSet<>();
         for (JsonNode value : values) {
             String key = normalizeEvidenceInstanceKey(value == null || !value.isTextual() ? null : value.asText());
@@ -643,45 +865,364 @@ public class WorkDataService {
             }
             instanceKeys.add(key);
         }
-        int minimumPerInstance = Math.max(1, requirement.path("minimumPerInstance").asInt(1));
-        List<String> mediaTypes = new ArrayList<>();
-        requirement.path("mediaTypes").forEach(value -> mediaTypes.add(value.asText()));
-        List<Map<String, Object>> rows = jdbc.queryForList("""
-                select evidence_metadata ->> 'evidenceInstanceKey' as instance_key,
-                       count(*) as evidence_count
-                from attachment
-                where tenant_id = :tenantId and work_record_id = :recordId
-                  and scan_status <> 'REJECTED'
-                  and (:checkpointCode = '' or checkpoint_code = :checkpointCode)
-                  and (:captureSource = '' or capture_source = :captureSource)
-                  and (cardinality(cast(:mediaTypes as text[])) = 0
-                       or media_type = any(cast(:mediaTypes as text[])))
-                group by evidence_metadata ->> 'evidenceInstanceKey'
-                """, base(principal).addValue("recordId", workRecordId)
-                .addValue("checkpointCode", checkpointCode)
-                .addValue("captureSource", captureSource)
-                .addValue("mediaTypes", "{" + String.join(",", mediaTypes) + "}"));
-        Map<String, Integer> evidenceCounts = new HashMap<>();
-        for (Map<String, Object> row : rows) {
-            Object rawKey = row.get("instance_key");
-            if (rawKey != null) {
-                evidenceCounts.put(String.valueOf(rawKey), ((Number) row.get("evidence_count")).intValue());
+        return List.copyOf(instanceKeys);
+    }
+
+    private JsonNode loadOperationalFeatureFlags(TenantPrincipal principal, UUID targetOrgUnitId) {
+        if (targetOrgUnitId == null) {
+            throw evidenceConfigurationError("按设施或设备取证时必须存在目标门店");
+        }
+        List<Map<String, Object>> profiles = jdbc.queryForList("""
+                select profile.operational_feature_flags::text as feature_flags
+                from org_unit_closure scope
+                join hotel_profile profile
+                  on profile.tenant_id = scope.tenant_id
+                 and profile.org_unit_id = scope.ancestor_id
+                where scope.tenant_id = :tenantId
+                  and scope.descendant_id = :orgUnitId
+                order by scope.depth
+                limit 1
+                """, base(principal).addValue("orgUnitId", targetOrgUnitId));
+        if (profiles.size() != 1) {
+            throw evidenceConfigurationError("目标门店缺少唯一的hotel_profile配置");
+        }
+        JsonNode flags = readJson(String.valueOf(profiles.get(0).get("feature_flags")));
+        if (!flags.isObject()) {
+            throw evidenceConfigurationError("operational_feature_flags必须是对象");
+        }
+        return flags;
+    }
+
+    private JsonNode loadHotelEvidenceInstanceConfiguration(
+            TenantPrincipal principal,
+            UUID targetOrgUnitId
+    ) {
+        if (targetOrgUnitId == null) {
+            throw evidenceConfigurationError("按设施或设备取证时必须存在目标门店");
+        }
+        List<Map<String, Object>> profiles = jdbc.queryForList("""
+                select profile.evidence_instance_configuration::text as evidence_configuration
+                from org_unit_closure scope
+                join hotel_profile profile
+                  on profile.tenant_id = scope.tenant_id
+                 and profile.org_unit_id = scope.ancestor_id
+                where scope.tenant_id = :tenantId
+                  and scope.descendant_id = :orgUnitId
+                order by scope.depth
+                limit 1
+                """, base(principal).addValue("orgUnitId", targetOrgUnitId));
+        if (profiles.size() != 1) {
+            throw evidenceConfigurationError("目标门店缺少唯一的hotel_profile配置");
+        }
+        JsonNode configuration = readJson(String.valueOf(
+                profiles.get(0).get("evidence_configuration")));
+        if (!configuration.isObject()) {
+            throw evidenceConfigurationError("门店证据清单必须是对象");
+        }
+        return configuration;
+    }
+
+    static int baseEvidenceMinimum(JsonNode requirement, boolean requiredWhenMatched) {
+        if (requirement.has("minimum")) {
+            return strictNonNegativeInt(requirement, "minimum");
+        }
+        if (requiredWhenMatched) {
+            return 1;
+        }
+        if (requirement.has("minimumPerHotelFloor")
+                || requirement.has("minimumPerConfiguredFacility")
+                || requirement.has("minimumPerConfiguredAsset")
+                || requirement.has("minimumPerInstance")) {
+            return 0;
+        }
+        return 1;
+    }
+
+    static boolean configuredFacilityEnabled(JsonNode featureFlags, String facilityCode) {
+        String normalized = facilityCode == null ? "" : facilityCode.trim().toUpperCase(Locale.ROOT);
+        String key = FACILITY_FLAG_KEYS.get(normalized);
+        if (key == null) {
+            throw evidenceConfigurationError("未知conditionalFacility：" + normalized);
+        }
+        JsonNode configured = featureFlags == null ? null : featureFlags.get(key);
+        if (configured == null || configured.isNull()) {
+            return false;
+        }
+        if (!configured.isBoolean()) {
+            throw evidenceConfigurationError("门店设施标识" + key + "必须是布尔值");
+        }
+        return configured.asBoolean();
+    }
+
+    static List<String> configuredInstanceKeys(
+            JsonNode evidenceConfiguration,
+            JsonNode requirement,
+            String checkpointCode,
+            String instanceType
+    ) {
+        if (!Set.of("facility", "asset").contains(instanceType)) {
+            throw evidenceConfigurationError("未知配置实例类型：" + instanceType);
+        }
+        String capitalized = Character.toUpperCase(instanceType.charAt(0)) + instanceType.substring(1);
+        String configuredField = requirement.path("configured" + capitalized + "InstanceField")
+                .asText("").trim();
+        if (configuredField.isBlank()) {
+            configuredField = checkpointCode;
+        }
+        if (configuredField == null || configuredField.isBlank()) {
+            throw evidenceConfigurationError("minimumPerConfigured" + capitalized
+                    + "必须配置门店证据清单字段");
+        }
+        String containerName = instanceType + "Instances";
+        JsonNode container = evidenceConfiguration == null ? null
+                : evidenceConfiguration.get(containerName);
+        if (container == null || !container.isObject()) {
+            throw evidenceConfigurationError("请管理员配置门店证据清单：缺少" + containerName);
+        }
+        JsonNode values = container.get(configuredField);
+        if (values == null || values.isNull()) {
+            throw evidenceConfigurationError("请管理员配置门店证据清单：缺少"
+                    + configuredField);
+        }
+        if (!values.isArray()) {
+            throw evidenceConfigurationError("门店证据清单" + configuredField + "必须是数组");
+        }
+        if (values.isEmpty()) {
+            throw evidenceConfigurationError("请管理员配置门店证据清单："
+                    + configuredField + "不能为空");
+        }
+        if (values.size() > 100) {
+            throw new IllegalArgumentException(instanceType + "实例列表最多100项");
+        }
+        List<String> keys = new ArrayList<>(values.size());
+        Set<String> distinct = new LinkedHashSet<>();
+        for (JsonNode value : values) {
+            String key = normalizeEvidenceInstanceKey(
+                    value == null || !value.isTextual() ? null : value.asText());
+            if (key == null) {
+                throw new IllegalArgumentException(instanceType + "实例编码不能为空或格式不正确");
+            }
+            if (!distinct.add(key)) {
+                throw new IllegalArgumentException(instanceType + "实例编码不能重复：" + key);
+            }
+            keys.add(key);
+        }
+        return List.copyOf(keys);
+    }
+
+    static boolean submissionApplicable(JsonNode applicabilityPolicy, JsonNode payload) {
+        if (applicabilityPolicy == null || applicabilityPolicy.isNull()
+                || applicabilityPolicy.isMissingNode() || applicabilityPolicy.isEmpty()) {
+            return true;
+        }
+        if (!applicabilityPolicy.isObject()) {
+            throw evidenceConfigurationError("applicability_policy必须是对象");
+        }
+        boolean excludesWhenNotApplicable = applicabilityPolicy
+                .path("excludeFromCompletionWhenNotApplicable").asBoolean(false);
+        String conditionField = applicabilityPolicy.path("conditionField").asText("").trim();
+        String namedCondition = applicabilityPolicy.path("condition").asText("").trim();
+        if (!conditionField.isBlank() && !namedCondition.isBlank()) {
+            throw evidenceConfigurationError("conditionField与condition不能同时配置");
+        }
+        if (!conditionField.isBlank()) {
+            JsonNode expected = applicabilityPolicy.get("equals");
+            if (expected == null) {
+                throw evidenceConfigurationError("conditionField必须配置equals");
+            }
+            JsonNode actual = payload == null ? null : payload.get(conditionField);
+            if (actual == null || actual.isNull()) {
+                throw new IllegalArgumentException("必须明确填写适用条件字段" + conditionField);
+            }
+            boolean matches = actual.equals(expected);
+            if (!matches && !excludesWhenNotApplicable) {
+                throw new IllegalArgumentException("当前记录不满足工作事项适用条件" + conditionField);
+            }
+            return matches;
+        }
+        if (!namedCondition.isBlank()) {
+            String payloadField = switch (namedCondition) {
+                case "HAS_SPECIAL_ARRIVAL_REQUIREMENT" -> "specialArrivalRequirement";
+                default -> throw evidenceConfigurationError("不支持的condition：" + namedCondition);
+            };
+            JsonNode actual = payload == null ? null : payload.get(payloadField);
+            if (actual == null || !actual.isBoolean()) {
+                throw new IllegalArgumentException("必须明确填写布尔适用条件字段" + payloadField);
+            }
+            boolean matches = actual.asBoolean();
+            if (!matches && !excludesWhenNotApplicable) {
+                throw new IllegalArgumentException("当前记录不满足工作事项适用条件" + namedCondition);
+            }
+            return matches;
+        }
+        if (excludesWhenNotApplicable) {
+            throw evidenceConfigurationError(
+                    "excludeFromCompletionWhenNotApplicable必须同时配置conditionField或condition");
+        }
+        return true;
+    }
+
+    static int validateRequiredRoomCountFormula(JsonNode policy, JsonNode payload) {
+        String formula = policy.path("requiredRoomCountFormula").asText("").replaceAll("\\s+", "");
+        if (formula.isBlank()) {
+            return 0;
+        }
+        if (!"max(ceil(completedRooms*0.20),onDutyHousekeepers*5)".equals(formula)) {
+            throw evidenceConfigurationError("不支持的requiredRoomCountFormula：" + formula);
+        }
+        int completedRooms = strictPayloadNonNegativeInt(payload, "completedRooms");
+        int onDutyHousekeepers = strictPayloadNonNegativeInt(payload, "onDutyHousekeepers");
+        long byCompletion = (completedRooms + 4L) / 5L;
+        long byStaffing = onDutyHousekeepers * 5L;
+        long calculated = Math.max(byCompletion, byStaffing);
+        if (calculated > 100) {
+            throw new IllegalArgumentException("按完成房数和当班客房员计算的查房数量超过100间，请核对数据");
+        }
+        JsonNode roomNumbers = payload == null ? null : payload.get("roomNumbers");
+        if (roomNumbers == null || !roomNumbers.isArray()) {
+            throw new IllegalArgumentException("查房任务必须填写roomNumbers房号数组");
+        }
+        Set<String> distinct = new LinkedHashSet<>();
+        for (JsonNode value : roomNumbers) {
+            String normalized = normalizeEvidenceInstanceKey(
+                    value == null || !value.isTextual() ? null : value.asText());
+            if (normalized == null) {
+                throw new IllegalArgumentException("查房房号不能为空或格式不正确");
+            }
+            if (!distinct.add(normalized)) {
+                throw new IllegalArgumentException("查房房号不能重复：" + normalized);
             }
         }
-        for (String instanceKey : instanceKeys) {
-            if (evidenceCounts.getOrDefault(instanceKey, 0) < minimumPerInstance) {
-                throw new IllegalArgumentException(label + instanceLabel + instanceKey
-                        + "至少需要" + minimumPerInstance + "张对应照片");
+        if (distinct.size() < calculated) {
+            throw new IllegalArgumentException("按完成房数和当班客房员计算，本次至少需要检查"
+                    + calculated + "间，当前仅填写" + distinct.size() + "间");
+        }
+        return (int) calculated;
+    }
+
+    static boolean mediaTypeAllowed(String rawMediaType, JsonNode requirement) {
+        String mediaType = rawMediaType == null
+                ? "" : rawMediaType.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+        JsonNode mediaTypes = requirement.get("mediaTypes");
+        if (mediaTypes != null && mediaTypes.size() > 0) {
+            boolean exactMatch = false;
+            for (JsonNode configured : mediaTypes) {
+                if (mediaType.equals(configured.asText("").trim().toLowerCase(Locale.ROOT))) {
+                    exactMatch = true;
+                    break;
+                }
             }
+            if (!exactMatch) {
+                return false;
+            }
+        }
+        JsonNode allowedKinds = requirement.get("allowedKinds");
+        if (allowedKinds == null || allowedKinds.isEmpty()) {
+            return true;
+        }
+        for (JsonNode configured : allowedKinds) {
+            String kind = configured.asText("").trim().toUpperCase(Locale.ROOT);
+            if (switch (kind) {
+                case "IMAGE" -> mediaType.startsWith("image/");
+                case "PDF" -> "application/pdf".equals(mediaType);
+                case "WORD" -> Set.of(
+                        "application/msword",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                ).contains(mediaType);
+                case "EXCEL" -> Set.of(
+                        "application/vnd.ms-excel",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "text/csv"
+                ).contains(mediaType);
+                case "DOCUMENT" -> "application/pdf".equals(mediaType)
+                        || "application/msword".equals(mediaType)
+                        || "application/vnd.openxmlformats-officedocument.wordprocessingml.document".equals(mediaType)
+                        || "application/vnd.ms-excel".equals(mediaType)
+                        || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".equals(mediaType)
+                        || "text/csv".equals(mediaType)
+                        || "text/plain".equals(mediaType);
+                default -> false;
+            }) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void validateMediaRequirement(JsonNode requirement) {
+        JsonNode mediaTypes = requirement.get("mediaTypes");
+        if (mediaTypes != null) {
+            if (!mediaTypes.isArray()) {
+                throw evidenceConfigurationError("mediaTypes必须是数组");
+            }
+            for (JsonNode configured : mediaTypes) {
+                if (!configured.isTextual() || configured.asText().isBlank()) {
+                    throw evidenceConfigurationError("mediaTypes只能包含非空MIME类型");
+                }
+            }
+        }
+        JsonNode allowedKinds = requirement.get("allowedKinds");
+        if (allowedKinds != null) {
+            if (!allowedKinds.isArray()) {
+                throw evidenceConfigurationError("allowedKinds必须是数组");
+            }
+            for (JsonNode configured : allowedKinds) {
+                String kind = configured.asText("").trim().toUpperCase(Locale.ROOT);
+                if (!configured.isTextual() || !ALLOWED_EVIDENCE_KINDS.contains(kind)) {
+                    throw evidenceConfigurationError("未知allowedKinds：" + configured.asText());
+                }
+            }
+        }
+        JsonNode allowReference = requirement.get("allowReference");
+        if (allowReference != null && !allowReference.isBoolean()) {
+            throw evidenceConfigurationError("allowReference必须是布尔值");
         }
     }
 
-    private String normalizeEvidenceInstanceKey(String value) {
+    private static int strictPayloadNonNegativeInt(JsonNode payload, String field) {
+        JsonNode value = payload == null ? null : payload.get(field);
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 0) {
+            throw new IllegalArgumentException("查房任务必须填写非负整数" + field);
+        }
+        return value.intValue();
+    }
+
+    private static int strictNonNegativeInt(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 0) {
+            throw evidenceConfigurationError(field + "必须是非负整数");
+        }
+        return value.intValue();
+    }
+
+    private static int strictPositiveInt(JsonNode node, String field) {
+        int value = strictNonNegativeInt(node, field);
+        if (value == 0) {
+            throw evidenceConfigurationError(field + "必须大于0");
+        }
+        return value;
+    }
+
+    private static int safeEvidenceProduct(int units, int perUnit) {
+        long product = (long) units * perUnit;
+        if (product > 200) {
+            throw evidenceConfigurationError("按门店配置计算的证据数量超过200份上限");
+        }
+        return (int) product;
+    }
+
+    private static IllegalArgumentException evidenceConfigurationError(String detail) {
+        return new IllegalArgumentException("证据模板配置错误：" + detail);
+    }
+
+    private static String normalizeEvidenceInstanceKey(String value) {
         if (value == null || value.isBlank()) {
             return null;
         }
         String normalized = value.trim().toUpperCase(Locale.ROOT);
-        return normalized.matches("[\\p{L}\\p{N}][\\p{L}\\p{N}_-]{0,31}") ? normalized : null;
+        return normalized.length() <= 120
+                && normalized.codePoints().noneMatch(Character::isISOControl)
+                ? normalized : null;
     }
 
     private void validateConditionalFields(String itemCode, JsonNode payload) {
@@ -773,7 +1314,7 @@ public class WorkDataService {
                 join work_package_item i on i.tenant_id = x.tenant_id and i.id = x.work_package_item_id
                 join employee_position_assignment candidate
                   on candidate.tenant_id = x.tenant_id and candidate.id = :assignmentId
-                 and candidate.org_unit_id = x.target_org_unit_id and candidate.status = 'ACTIVE'
+                 and candidate.status = 'ACTIVE'
                  and candidate.valid_from <= x.business_date
                  and (candidate.valid_to is null or candidate.valid_to >= x.business_date)
                 join position_definition position
@@ -782,6 +1323,13 @@ public class WorkDataService {
                   on delegation.tenant_id = x.tenant_id
                  and delegation.work_expectation_id = x.id and delegation.status = 'ACTIVE'
                 where x.tenant_id = :tenantId and x.id = :expectationId
+                  and exists (
+                    select 1
+                    from org_unit_closure execution_scope
+                    where execution_scope.tenant_id = x.tenant_id
+                      and execution_scope.ancestor_id = x.target_org_unit_id
+                      and execution_scope.descendant_id = candidate.org_unit_id
+                  )
                   and (
                     (delegation.id is not null and delegation.delegate_assignment_id = candidate.id)
                     or (delegation.id is null and (
@@ -877,8 +1425,28 @@ public class WorkDataService {
         }
     }
 
-    private void updateExpectationAfterRecord(TenantPrincipal principal, UUID expectationId, String recordStatus) {
+    private void updateExpectationAfterRecord(
+            TenantPrincipal principal,
+            UUID expectationId,
+            String recordStatus,
+            boolean applicable
+    ) {
         if (expectationId == null) {
+            return;
+        }
+        if ("SUBMITTED".equals(recordStatus) && !applicable) {
+            jdbc.update("""
+                    update work_expectation
+                    set status = 'WAIVED', waiver_reason = 'NOT_APPLICABLE_RECORDED',
+                        waived_by_account_id = :actorId, waived_at = now(),
+                        row_version = row_version + 1
+                    where tenant_id = :tenantId and id = :expectationId
+                      and status in ('PLANNED', 'AVAILABLE', 'IN_PROGRESS', 'FAILED', 'MISSED')
+                    """, base(principal)
+                    .addValue("expectationId", expectationId)
+                    .addValue("actorId", principal.actorId()));
+            auditWriter.record("WORK_EXPECTATION_NOT_APPLICABLE_RECORDED", "WORK_EXPECTATION", expectationId,
+                    "{\"reason\":\"NOT_APPLICABLE_RECORDED\"}");
             return;
         }
         String expectationStatus = "DRAFT".equals(recordStatus) ? "IN_PROGRESS" : "SUBMITTED";
@@ -1006,8 +1574,7 @@ public class WorkDataService {
         }
     }
 
-    private void projectAndNotifySubmitted(TenantPrincipal principal, UUID recordId) {
-        routineProjectionService.projectWorkRecord(recordId);
+    private void notifySubmittedForReview(TenantPrincipal principal, UUID recordId) {
         SupervisorNotificationContext context = jdbc.queryForObject("""
                 select record.business_date, coalesce(item.name, '工作记录') as item_name,
                        exists (

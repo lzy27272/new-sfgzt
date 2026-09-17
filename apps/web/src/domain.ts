@@ -111,6 +111,7 @@ export type WorkExpectation = {
       type?: string
       title?: string
       description?: string
+      enum?: Array<string | number>
       minimum?: number
       maximum?: number
       minItems?: number
@@ -132,8 +133,20 @@ export type WorkExpectation = {
   reminderPolicy?: Record<string, unknown>
   reportPolicy?: Record<string, unknown>
   applicabilityPolicy?: Record<string, unknown>
-  executionPolicy?: { sharedPerOrg?: boolean; allowedPositionCodes?: string[]; delegationAllowed?: boolean; ownerRestOption?: boolean }
+  executionPolicy?: {
+    sharedPerOrg?: boolean
+    allowedPositionCodes?: string[]
+    delegationAllowed?: boolean
+    ownerRestOption?: boolean
+    oneClickRestTransfer?: boolean
+    requiredRoomCountFormula?: string
+  }
   guestRoomFloorCount?: number
+  operationalFeatureFlags?: Record<string, boolean>
+  evidenceInstanceConfiguration?: {
+    facilityInstances: Record<string, string[]>
+    assetInstances: Record<string, string[]>
+  }
   delegateAssignmentId?: string
   delegatedEmployeeName?: string
   ownerResting?: boolean
@@ -188,6 +201,7 @@ export type EvidenceRequirement = {
   label: string
   captureSource?: 'CAMERA' | 'FILE_PICKER'
   mediaTypes?: string[]
+  allowedKinds?: Array<'IMAGE' | 'DOCUMENT' | 'PDF' | 'WORD' | 'EXCEL'>
   minimum?: number
   recommendedMaximum?: number
   minimumPerHotelFloor?: number
@@ -196,6 +210,14 @@ export type EvidenceRequirement = {
   instanceField?: string
   instanceLabel?: string
   minimumPerInstance?: number
+  minimumPerConfiguredFacility?: number
+  recommendedMaximumPerConfiguredFacility?: number
+  minimumPerConfiguredAsset?: number
+  configuredFacilityInstanceField?: string
+  configuredAssetInstanceField?: string
+  conditionalFacility?: string
+  unlimited?: boolean
+  allowReference?: boolean
   requiredWhen?: { field: string; equals: unknown }
 }
 

@@ -58,6 +58,13 @@ class StoreManagerDailyClosedLoopIntegrationTest {
     private static final String ASSISTANT_GENERAL_MANAGER_EMPLOYEE = "19100000-0000-0000-0000-000000000007";
     private static final String ASSISTANT_GENERAL_MANAGER_ASSIGNMENT = "19200000-0000-0000-0000-000000000008";
     private static final String HOTEL = "12000000-0000-0000-0000-000000000003";
+    private static final String OTHER_HOTEL = "12000000-0000-0000-0000-000000000004";
+    private static final String FRONT_OFFICE_DEPARTMENT = "12000000-0000-0000-0000-000000000005";
+    private static final String FRONT_OFFICE_SUPERVISOR = "19000000-0000-0000-0000-000000000005";
+    private static final String FRONT_OFFICE_SUPERVISOR_EMPLOYEE = "19100000-0000-0000-0000-000000000004";
+    private static final String FRONT_OFFICE_SUPERVISOR_ASSIGNMENT = "19200000-0000-0000-0000-000000000004";
+    private static final String FRONT_DESK = "19000000-0000-0000-0000-000000000003";
+    private static final String FRONT_DESK_ASSIGNMENT = "19200000-0000-0000-0000-000000000002";
     private static final String PACKAGE_VERSION = "47030000-0000-0000-0000-000000000001";
     private static final String MORNING_ITEM = "47050000-0000-0000-0000-000000000002";
     private static final String MORNING_FORM = "47020000-0000-0000-0000-000000000002";
@@ -378,6 +385,38 @@ class StoreManagerDailyClosedLoopIntegrationTest {
         assertThat(uploaded.path("captureSource").asText()).isEqualTo("CAMERA");
         assertThat(uploaded.path("checkpointCode").asText()).isEqualTo("full_body");
         assertThat(uploaded.path("sha256").asText()).isNotEqualTo(uploaded.path("sourceSha256").asText());
+        assertThat(uploaded.path("aiProcessing").path("status").asText())
+                .isEqualTo("MANUAL_FALLBACK_REQUIRED");
+        mockMvc.perform(identity(post(
+                        "/api/v1/work-data/records/{recordId}/attachments/{attachmentId}/ai-review",
+                        recordId, uploaded.path("id").asText()),
+                        GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT)
+                        .contentType("application/json")
+                        .content("""
+                                {"decision":"CONFIRM","summary":"不能把人工降级伪装成AI结果"}
+                                """))
+                .andExpect(status().isBadRequest());
+        assertThat(jdbc.queryForObject("""
+                select evidence_metadata #>> '{aiProcessing,status}'
+                from attachment where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, uploaded.path("id").asText()))
+                .isEqualTo("MANUAL_FALLBACK_REQUIRED");
+        mockMvc.perform(identity(post(
+                        "/api/v1/work-data/records/{recordId}/attachments/{attachmentId}/ai-review",
+                        recordId, uploaded.path("id").asText()),
+                        GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT)
+                        .contentType("application/json")
+                        .content("""
+                                {"decision":"MANUAL_FALLBACK","summary":"员工仪容仪表检查已完成",
+                                 "correctionReason":"AI服务未配置，人工确认"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.aiProcessing.status").value("MANUAL_FALLBACK_CONFIRMED"));
+        assertThat(jdbc.queryForObject("""
+                select evidence_metadata #>> '{aiProcessing,status}'
+                from attachment where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, uploaded.path("id").asText()))
+                .isEqualTo("MANUAL_FALLBACK_CONFIRMED");
         assertThat(jdbc.queryForObject("""
                 select evidence_metadata ->> 'trustedTimestampSource'
                 from attachment where tenant_id = ?::uuid and id = ?::uuid
@@ -498,6 +537,8 @@ class StoreManagerDailyClosedLoopIntegrationTest {
         assertThat(submittedExpectation.path("period_type").asText()).isEqualTo("DAY");
         assertThat(submittedExpectation.path("hotel_org_unit_id").asText()).isEqualTo(HOTEL);
         assertThat(submittedExpectation.path("hotel_name").asText()).isNotBlank();
+        assertThat(submittedExpectation.path("actual_executor_assignment_id").asText())
+                .isEqualTo(GENERAL_MANAGER_ASSIGNMENT);
         JsonNode workbenchSummary = response(identity(get(
                 "/api/v1/team/workbench-summary?businessDate=" + businessDate), CEO, null), 200);
         assertThat(workbenchSummary.path("asOfDate").asText()).isEqualTo(businessDate.toString());
@@ -544,6 +585,12 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
                   and source_summary ->> 'workRecordId' = ?
                 """, String.class, TENANT, revisionId, recordId)).isEqualTo("仪容仪表与晨会");
+        assertThat(jdbc.queryForObject("""
+                select value #>> '{actualExecutor,assignmentId}' from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
+                  and source_summary ->> 'workRecordId' = ?
+                """, String.class, TENANT, revisionId, recordId))
+                .isEqualTo(GENERAL_MANAGER_ASSIGNMENT);
         assertThat(jdbc.queryForObject("""
                 select result_status from daily_report_item_result
                 where tenant_id = ?::uuid and revision_id = ? and system_prefilled = true
@@ -740,6 +787,372 @@ class StoreManagerDailyClosedLoopIntegrationTest {
     }
 
     @Test
+    void sharedWorkProjectsOnceIntoTheActualExecutorsDailyReportAcrossPackageVariants() {
+        LocalDate businessDate = LocalDate.now().plusYears(3).plusDays(17);
+        Map<String, Object> sharedItems = jdbc.queryForMap("""
+                select manager_item.id as manager_item_id,
+                       manager_item.form_version_id as manager_form_version_id,
+                       manager_item.work_package_version_id as manager_package_version_id,
+                       manager_relation.template_version_id as manager_report_template_id,
+                       assistant_item.id as assistant_item_id,
+                       assistant_item.work_package_version_id as assistant_package_version_id,
+                       assistant_relation.template_version_id as assistant_report_template_id
+                from work_package_item manager_item
+                join daily_report_template_item manager_template_item
+                  on manager_template_item.tenant_id = manager_item.tenant_id
+                 and manager_template_item.work_package_item_id = manager_item.id
+                join daily_report_template_section manager_relation
+                  on manager_relation.tenant_id = manager_template_item.tenant_id
+                 and manager_relation.section_version_id = manager_template_item.section_version_id
+                join work_package_item assistant_item
+                  on assistant_item.tenant_id = manager_item.tenant_id
+                 and assistant_item.execution_policy ->> 'sharedKey'
+                        = manager_item.execution_policy ->> 'sharedKey'
+                 and assistant_item.item_code in (
+                        'AGM_WS_APPEARANCE_MEETING', 'AGM_NS_APPEARANCE_MEETING')
+                join daily_report_template_item assistant_template_item
+                  on assistant_template_item.tenant_id = assistant_item.tenant_id
+                 and assistant_template_item.work_package_item_id = assistant_item.id
+                join daily_report_template_section assistant_relation
+                  on assistant_relation.tenant_id = assistant_template_item.tenant_id
+                 and assistant_relation.section_version_id = assistant_template_item.section_version_id
+                where manager_item.tenant_id = ?::uuid
+                  and manager_item.item_code = 'GM_APPEARANCE_MEETING_V56'
+                order by assistant_item.item_code
+                limit 1
+                """, TENANT);
+        UUID managerItemId = (UUID) sharedItems.get("manager_item_id");
+        UUID managerPackageVersionId = (UUID) sharedItems.get("manager_package_version_id");
+        UUID assistantPackageVersionId = (UUID) sharedItems.get("assistant_package_version_id");
+        UUID allocationId = jdbc.queryForObject("""
+                select allocation.id
+                from work_package_allocation allocation
+                where allocation.tenant_id = ?::uuid
+                  and allocation.work_package_version_id = ?
+                  and allocation.position_assignment_id = ?::uuid
+                order by allocation.valid_from desc, allocation.id
+                limit 1
+                """, UUID.class, TENANT, managerPackageVersionId, GENERAL_MANAGER_ASSIGNMENT);
+
+        UUID managerReportId = UUID.randomUUID();
+        UUID managerRevisionId = UUID.randomUUID();
+        createDraftReportForAssignment(
+                managerReportId, managerRevisionId, businessDate,
+                UUID.fromString(GENERAL_MANAGER_EMPLOYEE), UUID.fromString(GENERAL_MANAGER_ASSIGNMENT),
+                (UUID) sharedItems.get("manager_report_template_id"), managerPackageVersionId,
+                UUID.fromString(GENERAL_MANAGER));
+        UUID assistantReportId = UUID.randomUUID();
+        UUID assistantRevisionId = UUID.randomUUID();
+        createDraftReportForAssignment(
+                assistantReportId, assistantRevisionId, businessDate,
+                UUID.fromString(ASSISTANT_GENERAL_MANAGER_EMPLOYEE),
+                UUID.fromString(ASSISTANT_GENERAL_MANAGER_ASSIGNMENT),
+                (UUID) sharedItems.get("assistant_report_template_id"), assistantPackageVersionId,
+                UUID.fromString(ASSISTANT_GENERAL_MANAGER));
+
+        UUID expectationId = UUID.randomUUID();
+        jdbc.update("""
+                insert into work_expectation
+                    (id, tenant_id, work_package_item_id, work_package_allocation_id,
+                     position_assignment_id, target_org_unit_id, business_date, period_key,
+                     available_at, due_at, status, waiver_allowed)
+                values (?, ?::uuid, ?, ?, ?::uuid, ?::uuid, ?, ?, now(), now() + interval '1 hour',
+                        'SUBMITTED', false)
+                """, expectationId, TENANT, managerItemId, allocationId,
+                GENERAL_MANAGER_ASSIGNMENT, HOTEL, businessDate,
+                "shared-report-projection-" + UUID.randomUUID());
+        UUID recordId = UUID.randomUUID();
+        jdbc.update("""
+                insert into work_record
+                    (id, tenant_id, org_unit_id, employee_id, position_assignment_id,
+                     form_version_id, business_date, status, payload, submitted_at,
+                     work_package_version_id, work_package_item_id, work_expectation_id,
+                     record_kind, target_org_unit_id, occurred_at, submitted_by_account_id,
+                     attempt_no, content_hash, completion_statement)
+                values (?, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?, ?, 'SUBMITTED',
+                        '{"summary":"店助实际完成共享晨会工作"}'::jsonb, now(), ?, ?, ?,
+                        'INSPECTION', ?::uuid, now(), ?::uuid, 1, repeat('c', 64),
+                        '共享晨会工作已完成')
+                """, recordId, TENANT, HOTEL, ASSISTANT_GENERAL_MANAGER_EMPLOYEE,
+                ASSISTANT_GENERAL_MANAGER_ASSIGNMENT, sharedItems.get("manager_form_version_id"),
+                businessDate, managerPackageVersionId, managerItemId, expectationId, HOTEL,
+                ASSISTANT_GENERAL_MANAGER);
+
+        projectAsCeo(recordId.toString());
+        projectAsCeo(recordId.toString());
+
+        assertThat(jdbc.queryForObject("""
+                select count(*)
+                from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?
+                  and source_summary ->> 'workRecordId' = ?
+                """, Integer.class, TENANT, assistantRevisionId, recordId.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                select value #>> '{actualExecutor,assignmentId}'
+                from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?
+                  and source_summary ->> 'workRecordId' = ?
+                """, String.class, TENANT, assistantRevisionId, recordId.toString()))
+                .isEqualTo(ASSISTANT_GENERAL_MANAGER_ASSIGNMENT);
+        assertThat(jdbc.queryForObject("""
+                select count(*)
+                from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?
+                  and source_summary ->> 'workRecordId' = ?
+                """, Integer.class, TENANT, managerRevisionId, recordId.toString())).isZero();
+        assertThat(jdbc.queryForObject("""
+                select narrative from daily_report_revision
+                where tenant_id = ?::uuid and id = ?
+                """, String.class, TENANT, assistantRevisionId))
+                .contains("已审核完成 0/1 项", "待主管审核 1 项");
+    }
+
+    @Test
+    void restingOwnerTransfersCurrentAndRemainingEligibleWorkExactlyOnce() throws Exception {
+        LocalDate businessDate = LocalDate.now().plusYears(6).plusDays(9);
+        UUID allocationId = jdbc.queryForObject("""
+                select allocation.id from work_package_allocation allocation
+                where allocation.tenant_id = ?::uuid
+                  and allocation.position_assignment_id = ?::uuid
+                  and exists (
+                    select 1 from work_package_item item
+                    where item.tenant_id = allocation.tenant_id
+                      and item.work_package_version_id = allocation.work_package_version_id
+                      and coalesce((item.execution_policy ->> 'oneClickRestTransfer')::boolean, false)
+                  )
+                order by allocation.valid_from desc limit 1
+                """, UUID.class, TENANT, GENERAL_MANAGER_ASSIGNMENT);
+        List<UUID> itemIds = jdbc.queryForList("""
+                select item.id from work_package_item item
+                join work_package_allocation allocation
+                  on allocation.tenant_id = item.tenant_id
+                 and allocation.work_package_version_id = item.work_package_version_id
+                where item.tenant_id = ?::uuid and allocation.id = ?
+                  and coalesce((item.execution_policy ->> 'oneClickRestTransfer')::boolean, false)
+                order by sort_order, id limit 4
+                """, UUID.class, TENANT, allocationId);
+        assertThat(itemIds).hasSize(4);
+
+        UUID delegateAssignmentId = jdbc.queryForObject("""
+                select assignment.id
+                from employee_position_assignment assignment
+                join employee on employee.tenant_id = assignment.tenant_id
+                             and employee.id = assignment.employee_id
+                join user_account account on account.tenant_id = employee.tenant_id
+                                         and account.id = employee.account_id
+                where assignment.tenant_id = ?::uuid and assignment.org_unit_id = ?::uuid
+                  and assignment.id <> ?::uuid and assignment.id <> ?::uuid
+                  and assignment.status = 'ACTIVE'
+                  and employee.employment_status = 'ACTIVE' and employee.deleted_at is null
+                  and account.status = 'ACTIVE'
+                order by assignment.id limit 1
+                """, UUID.class, TENANT, HOTEL, GENERAL_MANAGER_ASSIGNMENT,
+                ASSISTANT_GENERAL_MANAGER_ASSIGNMENT);
+
+        List<UUID> expectationIds = new java.util.ArrayList<>();
+        for (int index = 0; index < itemIds.size(); index++) {
+            UUID expectationId = UUID.randomUUID();
+            expectationIds.add(expectationId);
+            jdbc.update("""
+                    insert into work_expectation
+                        (id, tenant_id, work_package_item_id, work_package_allocation_id,
+                         position_assignment_id, target_org_unit_id, business_date, period_key,
+                         available_at, due_at, status, waiver_allowed)
+                    values (?, ?::uuid, ?, ?, ?::uuid, ?::uuid, ?, ?,
+                            now() + (? * interval '1 hour'), now() + ((? + 8) * interval '1 hour'),
+                            ?, false)
+                    """, expectationId, TENANT, itemIds.get(index), allocationId,
+                    GENERAL_MANAGER_ASSIGNMENT, HOTEL, businessDate,
+                    "rest-transfer-" + UUID.randomUUID(), index - 2, index - 2,
+                    index == 2 ? "IN_PROGRESS" : "AVAILABLE");
+        }
+
+        UUID currentId = expectationIds.get(1);
+        JsonNode first = response(identity(post(
+                        "/api/v1/work-expectations/{expectationId}/delegate", currentId)
+                        .contentType("application/json")
+                        .content("""
+                                {"delegateAssignmentId":"%s","ownerResting":true,
+                                 "reason":"本人今日休息","expectedVersion":0}
+                                """.formatted(delegateAssignmentId)),
+                ASSISTANT_GENERAL_MANAGER, ASSISTANT_GENERAL_MANAGER_ASSIGNMENT), 200);
+        assertThat(first.path("transferredCount").asInt()).isEqualTo(3);
+        List<String> transferredIds = new java.util.ArrayList<>();
+        first.path("transferredIds").forEach(node -> transferredIds.add(node.asText()));
+        assertThat(transferredIds).containsExactlyInAnyOrderElementsOf(
+                expectationIds.subList(1, 4).stream().map(UUID::toString).toList());
+        assertThat(jdbc.queryForObject("""
+                select count(*) from work_expectation_delegation
+                where tenant_id = ?::uuid and status = 'ACTIVE'
+                  and work_expectation_id = any(?::uuid[])
+                  and delegate_assignment_id = ?
+                  and owner_resting
+                """, Integer.class, TENANT,
+                "{" + String.join(",", expectationIds.stream().map(UUID::toString).toList()) + "}",
+                delegateAssignmentId)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from notification
+                where tenant_id = ?::uuid and notification_type = 'WORK_EXPECTATION_DELEGATED'
+                  and source_id = any(?::uuid[])
+                """, Integer.class, TENANT,
+                "{" + String.join(",", expectationIds.stream().map(UUID::toString).toList()) + "}"))
+                .isEqualTo(3);
+
+        JsonNode retry = response(identity(post(
+                        "/api/v1/work-expectations/{expectationId}/delegate", currentId)
+                        .contentType("application/json")
+                        .content("""
+                                {"delegateAssignmentId":"%s","ownerResting":true,
+                                 "reason":"重复请求","expectedVersion":1}
+                                """.formatted(delegateAssignmentId)),
+                ASSISTANT_GENERAL_MANAGER, ASSISTANT_GENERAL_MANAGER_ASSIGNMENT), 200);
+        assertThat(retry.path("transferredCount").asInt()).isZero();
+        response(identity(post("/api/v1/work-expectations/{expectationId}/delegate", currentId)
+                        .contentType("application/json")
+                        .content("""
+                                {"delegateAssignmentId":"%s","ownerResting":true,"expectedVersion":0}
+                                """.formatted(delegateAssignmentId)),
+                ASSISTANT_GENERAL_MANAGER, ASSISTANT_GENERAL_MANAGER_ASSIGNMENT), 400);
+    }
+
+    @Test
+    void departmentAssignmentCanExecuteViewAndReceiveHotelWorkButCannotCrossHotels() throws Exception {
+        LocalDate businessDate = LocalDate.now().plusYears(8).plusDays(17);
+        Map<String, Object> source = jdbc.queryForMap("""
+                select item.id as item_id, item.form_version_id, allocation.id as allocation_id
+                from work_package_item item
+                join work_package_allocation allocation
+                  on allocation.tenant_id = item.tenant_id
+                 and allocation.work_package_version_id = item.work_package_version_id
+                where item.tenant_id = ?::uuid
+                  and item.item_code = 'GM_FRONT_DESK_COACHING_V56'
+                  and allocation.position_assignment_id = ?::uuid
+                  and allocation.target_org_unit_id = ?::uuid
+                order by allocation.valid_from desc limit 1
+                """, TENANT, GENERAL_MANAGER_ASSIGNMENT, HOTEL);
+        UUID itemId = (UUID) source.get("item_id");
+        UUID formVersionId = (UUID) source.get("form_version_id");
+        UUID allocationId = (UUID) source.get("allocation_id");
+
+        UUID sharedExpectationId = insertHotelExpectation(
+                itemId, allocationId, businessDate, OffsetDateTime.now().minusMinutes(5));
+        UUID transferExpectationId = insertHotelExpectation(
+                itemId, allocationId, businessDate, OffsetDateTime.now());
+        UUID laterExpectationId = insertHotelExpectation(
+                itemId, allocationId, businessDate, OffsetDateTime.now().plusMinutes(5));
+
+        UUID otherAccountId = UUID.randomUUID();
+        UUID otherEmployeeId = UUID.randomUUID();
+        UUID otherAssignmentId = UUID.randomUUID();
+        jdbc.update("""
+                insert into user_account (id, tenant_id, login_name, display_name, status)
+                values (?, ?::uuid, ?, '跨店候选人', 'ACTIVE')
+                """, otherAccountId, TENANT, "cross-store-" + otherAccountId);
+        jdbc.update("""
+                insert into employee
+                    (id, tenant_id, account_id, employee_no, name, employment_status, hired_on)
+                values (?, ?::uuid, ?, ?, '跨店候选人', 'ACTIVE', current_date)
+                """, otherEmployeeId, TENANT, otherAccountId, "CROSS-" + otherEmployeeId);
+        jdbc.update("""
+                insert into employee_position_assignment
+                    (id, tenant_id, employee_id, org_unit_id, position_id,
+                     is_primary, assignment_type, valid_from, status)
+                values (?, ?::uuid, ?, ?::uuid, '14000000-0000-0000-0000-000000000003'::uuid,
+                        true, 'PERMANENT', current_date, 'ACTIVE')
+                """, otherAssignmentId, TENANT, otherEmployeeId, OTHER_HOTEL);
+
+        JsonNode sharedWork = response(identity(get("/api/v1/my/work-expectations")
+                        .param("businessDate", businessDate.toString()),
+                FRONT_OFFICE_SUPERVISOR, FRONT_OFFICE_SUPERVISOR_ASSIGNMENT), 200);
+        assertThat(findById(sharedWork, sharedExpectationId.toString()).path("id").asText())
+                .isEqualTo(sharedExpectationId.toString());
+
+        JsonNode submitted = response(identity(post("/api/v1/work-data/records"),
+                        FRONT_OFFICE_SUPERVISOR, FRONT_OFFICE_SUPERVISOR_ASSIGNMENT)
+                .contentType("application/json")
+                .content("""
+                        {
+                          "orgUnitId":"%s",
+                          "employeeId":"%s",
+                          "positionAssignmentId":"%s",
+                          "formVersionId":"%s",
+                          "businessDate":"%s",
+                          "payload":{"workSummary":"已完成前台带教和三跟进检查","issueFound":false},
+                          "completionStatement":"前台带教与三跟进已完成",
+                          "workExpectationId":"%s",
+                          "targetOrgUnitId":"%s"
+                        }
+                        """.formatted(FRONT_OFFICE_DEPARTMENT, FRONT_OFFICE_SUPERVISOR_EMPLOYEE,
+                        FRONT_OFFICE_SUPERVISOR_ASSIGNMENT, formVersionId, businessDate,
+                        sharedExpectationId, HOTEL)), 201);
+        assertThat(submitted.path("status").asText()).isEqualTo("SUBMITTED");
+
+        JsonNode candidates = response(identity(get(
+                        "/api/v1/work-expectations/{expectationId}/delegation-candidates", transferExpectationId),
+                FRONT_OFFICE_SUPERVISOR, FRONT_OFFICE_SUPERVISOR_ASSIGNMENT), 200);
+        assertThat(candidates.findValuesAsText("assignment_id"))
+                .contains(FRONT_DESK_ASSIGNMENT)
+                .doesNotContain(otherAssignmentId.toString());
+
+        mockMvc.perform(identity(post("/api/v1/work-expectations/{expectationId}/delegate", transferExpectationId),
+                        FRONT_OFFICE_SUPERVISOR, FRONT_OFFICE_SUPERVISOR_ASSIGNMENT)
+                        .contentType("application/json")
+                        .content("""
+                                {"delegateAssignmentId":"%s","ownerResting":true,
+                                 "reason":"跨门店必须拒绝","expectedVersion":0}
+                                """.formatted(otherAssignmentId)))
+                .andExpect(status().isBadRequest());
+
+        JsonNode transfer = response(identity(post(
+                        "/api/v1/work-expectations/{expectationId}/delegate", transferExpectationId),
+                        FRONT_OFFICE_SUPERVISOR, FRONT_OFFICE_SUPERVISOR_ASSIGNMENT)
+                .contentType("application/json")
+                .content("""
+                        {"delegateAssignmentId":"%s","ownerResting":true,
+                         "reason":"店助休息一键转交","expectedVersion":0}
+                        """.formatted(FRONT_DESK_ASSIGNMENT)), 200);
+        assertThat(transfer.path("transferredCount").asInt()).isEqualTo(2);
+        List<String> transferredIds = new java.util.ArrayList<>();
+        transfer.path("transferredIds").forEach(node -> transferredIds.add(node.asText()));
+        assertThat(transferredIds)
+                .containsExactlyInAnyOrder(transferExpectationId.toString(), laterExpectationId.toString());
+
+        JsonNode delegatedWork = response(identity(get("/api/v1/my/work-expectations")
+                        .param("businessDate", businessDate.toString()),
+                FRONT_DESK, FRONT_DESK_ASSIGNMENT), 200);
+        assertThat(findById(delegatedWork, transferExpectationId.toString()).path("id").asText())
+                .isEqualTo(transferExpectationId.toString());
+
+        JsonNode report = response(identity(post("/api/v1/daily-reports"),
+                        FRONT_OFFICE_SUPERVISOR, FRONT_OFFICE_SUPERVISOR_ASSIGNMENT)
+                .header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType("application/json")
+                .content("""
+                        {"orgUnitId":"%s","positionAssignmentId":"%s","businessDate":"%s"}
+                        """.formatted(HOTEL, FRONT_OFFICE_SUPERVISOR_ASSIGNMENT, businessDate)), 201);
+        assertThat(report.path("id").asText()).isNotBlank();
+    }
+
+    private UUID insertHotelExpectation(
+            UUID itemId,
+            UUID allocationId,
+            LocalDate businessDate,
+            OffsetDateTime availableAt
+    ) {
+        UUID expectationId = UUID.randomUUID();
+        jdbc.update("""
+                insert into work_expectation
+                    (id, tenant_id, work_package_item_id, work_package_allocation_id,
+                     position_assignment_id, target_org_unit_id, business_date, period_key,
+                     available_at, due_at, status, waiver_allowed)
+                values (?, ?::uuid, ?, ?, ?::uuid, ?::uuid, ?, ?, ?, ?, 'AVAILABLE', false)
+                """, expectationId, TENANT, itemId, allocationId, GENERAL_MANAGER_ASSIGNMENT,
+                HOTEL, businessDate, "department-scope-" + expectationId, availableAt,
+                availableAt.plusHours(8));
+        return expectationId;
+    }
+
+    @Test
     void roomInspectionRequiresFiveRoomsTwoDirtyRoomsAndEvidenceForEveryRoom() throws Exception {
         LocalDate businessDate = LocalDate.now();
         slaService.processTenantAsSystem(UUID.fromString(TENANT), 100, UUID.randomUUID());
@@ -932,6 +1345,23 @@ class StoreManagerDailyClosedLoopIntegrationTest {
     }
 
     private void createDraftReport(UUID reportId, UUID revisionId, LocalDate businessDate) {
+        createDraftReportForAssignment(
+                reportId, revisionId, businessDate,
+                UUID.fromString(GENERAL_MANAGER_EMPLOYEE), UUID.fromString(GENERAL_MANAGER_ASSIGNMENT),
+                UUID.fromString(REPORT_TEMPLATE), UUID.fromString(PACKAGE_VERSION),
+                UUID.fromString(GENERAL_MANAGER));
+    }
+
+    private void createDraftReportForAssignment(
+            UUID reportId,
+            UUID revisionId,
+            LocalDate businessDate,
+            UUID employeeId,
+            UUID assignmentId,
+            UUID templateVersionId,
+            UUID packageVersionId,
+            UUID createdByAccountId
+    ) {
         jdbc.update("""
                 insert into daily_report
                     (id, tenant_id, hotel_org_unit_id, org_unit_id, employee_id,
@@ -942,15 +1372,15 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 values (?, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?, 'Asia/Shanghai',
                         time '06:00', now() + interval '12 hours', ?::uuid, ?::uuid,
                         'DRAFT', 'NOT_REQUIRED', 1, ?, ?::uuid)
-                """, reportId, TENANT, HOTEL, HOTEL, GENERAL_MANAGER_EMPLOYEE,
-                GENERAL_MANAGER_ASSIGNMENT, businessDate, REPORT_TEMPLATE, PACKAGE_VERSION,
-                UUID.randomUUID(), GENERAL_MANAGER);
+                """, reportId, TENANT, HOTEL, HOTEL, employeeId,
+                assignmentId, businessDate, templateVersionId, packageVersionId,
+                UUID.randomUUID(), createdByAccountId);
         jdbc.update("""
                 insert into daily_report_revision
                     (id, tenant_id, report_id, revision_no, revision_type,
                      revision_status, payload_snapshot, created_by_account_id)
                 values (?, ?::uuid, ?, 1, 'ORIGINAL', 'DRAFT', '{}'::jsonb, ?::uuid)
-                """, revisionId, TENANT, reportId, GENERAL_MANAGER);
+                """, revisionId, TENANT, reportId, createdByAccountId);
         jdbc.update("""
                 update daily_report set current_revision_id = ?
                 where tenant_id = ?::uuid and id = ?

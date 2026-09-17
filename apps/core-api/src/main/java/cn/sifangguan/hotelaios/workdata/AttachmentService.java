@@ -5,6 +5,7 @@ import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
@@ -123,6 +124,15 @@ public class AttachmentService {
         var evidenceMetadata = JsonNodeFactory.instance.objectNode()
                 .put("trustedTimestampSource", "SERVER_RECEIVED_AT")
                 .put("watermarked", "CAMERA".equals(captureSource));
+        evidenceMetadata.putObject("aiProcessing")
+                .put("schemaVersion", 1)
+                .put("status", "MANUAL_FALLBACK_REQUIRED")
+                .put("provider", "DETERMINISTIC_FALLBACK")
+                .putNull("summary")
+                .putNull("confidence")
+                .put("humanConfirmationRequired", true)
+                .put("humanConfirmed", false)
+                .put("fallbackReason", "AI_PROCESSOR_NOT_CONFIGURED");
         if (upload.isImage()) {
             evidenceMetadata.put("orientationPolicy", "ADAPTIVE")
                     .put("displayOrientation", imageOrientation(upload.normalizedWidth(), upload.normalizedHeight()))
@@ -177,7 +187,76 @@ public class AttachmentService {
                         + "\",\"scanStatus\":\"" + scanStatus + "\"}");
         return attachmentResponse(attachmentId, workRecordId, objectKey, originalName, mediaType,
                 content.length, sha256, scanStatus, captureSource, checkpointCode,
-                evidenceInstanceKey, capturedAtClient, receivedAt, upload.sourceSha256());
+                evidenceInstanceKey, capturedAtClient, receivedAt, upload.sourceSha256(),
+                evidenceMetadata);
+    }
+
+    /**
+     * Confirms an AI-produced summary or records the employee's deterministic manual
+     * fallback. AI availability never blocks evidence submission; the metadata makes the
+     * downgrade and the human decision explicit and auditable.
+     */
+    @Transactional
+    public Map<String, Object> reviewAiProcessing(
+            UUID workRecordId,
+            UUID attachmentId,
+            WorkDataModels.ReviewAttachmentAi request
+    ) {
+        TenantPrincipal principal = prepare();
+        accessPolicy.requirePermission("work-record.submit");
+        RecordTarget record = recordTargetForUpdate(principal, workRecordId);
+        requireOwnerOrDelegatedSubmit(principal, record);
+        if (Set.of("APPROVED", "REJECTED").contains(record.status())) {
+            throw new IllegalArgumentException("已完成复核的工作记录不能修改AI整理结果");
+        }
+        String decision = request.decision().trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("CONFIRM", "MANUAL_FALLBACK").contains(decision)) {
+            throw new IllegalArgumentException("AI整理确认只支持CONFIRM或MANUAL_FALLBACK");
+        }
+        String summary = request.summary().trim();
+        String resultingStatus = "CONFIRM".equals(decision)
+                ? "HUMAN_CONFIRMED" : "MANUAL_FALLBACK_CONFIRMED";
+        ObjectNode review = JsonNodeFactory.instance.objectNode()
+                .put("status", resultingStatus)
+                .put("summary", summary)
+                .put("humanConfirmationRequired", false)
+                .put("humanConfirmed", true)
+                .put("confirmedByAccountId", principal.actorId().toString())
+                .put("confirmedAt", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        if (request.correctionReason() != null && !request.correctionReason().isBlank()) {
+            review.put("correctionReason", request.correctionReason().trim());
+        }
+        int changed = jdbc.update("""
+                update attachment
+                set evidence_metadata = jsonb_set(
+                        evidence_metadata,
+                        '{aiProcessing}',
+                        coalesce(evidence_metadata -> 'aiProcessing', '{}'::jsonb)
+                          || cast(:review as jsonb),
+                        true)
+                where tenant_id = :tenantId and id = :attachmentId
+                  and work_record_id = :workRecordId
+                  and (
+                    (:decision = 'CONFIRM'
+                     and evidence_metadata #>> '{aiProcessing,status}' = 'AI_READY')
+                    or
+                    (:decision = 'MANUAL_FALLBACK'
+                     and evidence_metadata #>> '{aiProcessing,status}' in
+                         ('MANUAL_FALLBACK_REQUIRED', 'AI_FAILED'))
+                  )
+                """, base(principal).addValue("attachmentId", attachmentId)
+                .addValue("workRecordId", workRecordId)
+                .addValue("decision", decision)
+                .addValue("review", review.toString()));
+        if (changed != 1) {
+            throw new IllegalArgumentException("附件不存在，或当前AI整理状态不允许执行该确认操作");
+        }
+        auditWriter.record("WORK_RECORD_ATTACHMENT_AI_REVIEWED", "ATTACHMENT", attachmentId,
+                "{\"workRecordId\":\"" + workRecordId + "\",\"decision\":\"" + decision + "\"}");
+        return Map.of(
+                "id", attachmentId,
+                "workRecordId", workRecordId,
+                "aiProcessing", review);
     }
 
     public StoredObject storeObject(String objectKey, MultipartFile file) {
@@ -346,6 +425,11 @@ public class AttachmentService {
                        nullif(evidence_metadata ->> 'normalizedWidth', '')::integer as normalized_width,
                        nullif(evidence_metadata ->> 'normalizedHeight', '')::integer as normalized_height,
                        evidence_metadata ->> 'evidenceInstanceKey' as evidence_instance_key,
+                       evidence_metadata #>> '{aiProcessing,status}' as ai_processing_status,
+                       evidence_metadata #>> '{aiProcessing,summary}' as ai_processing_summary,
+                       coalesce((evidence_metadata #>> '{aiProcessing,humanConfirmed}')::boolean, false)
+                           as ai_human_confirmed,
+                       evidence_metadata #>> '{aiProcessing,fallbackReason}' as ai_fallback_reason,
                        created_at
                 from attachment
                 where tenant_id = :tenantId and work_record_id = :workRecordId
@@ -709,7 +793,7 @@ public class AttachmentService {
             long sizeBytes, String sha256, String scanStatus, String captureSource,
             String checkpointCode, String evidenceInstanceKey,
             OffsetDateTime capturedAtClient, OffsetDateTime receivedAt,
-            String sourceSha256
+            String sourceSha256, ObjectNode evidenceMetadata
     ) {
         Map<String, Object> result = new java.util.LinkedHashMap<>();
         result.put("id", id);
@@ -727,6 +811,7 @@ public class AttachmentService {
         result.put("capturedAtClient", capturedAtClient);
         result.put("receivedAt", receivedAt);
         result.put("contentUrl", "/api/v1/work-data/attachments/" + id + "/content");
+        result.put("aiProcessing", evidenceMetadata.path("aiProcessing"));
         return result;
     }
 
@@ -836,8 +921,8 @@ public class AttachmentService {
             return null;
         }
         String normalized = value.trim().toUpperCase(Locale.ROOT);
-        if (!normalized.matches("[\\p{L}\\p{N}][\\p{L}\\p{N}_-]{0,31}")) {
-            throw new IllegalArgumentException("房号格式不正确，仅支持字母、数字、下划线或短横线，最长32位");
+        if (normalized.length() > 120 || normalized.codePoints().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("证据项名称或房号格式不正确，最长120个字符且不能包含控制字符");
         }
         return normalized;
     }

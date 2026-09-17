@@ -179,7 +179,6 @@ public class DailyReportService {
         accessPolicy.requirePermission("daily-report.submit");
         TenantPrincipal principal = prepare();
         accessPolicy.requireActiveAssignment(request.positionAssignmentId());
-        accessPolicy.requireOrgScope(request.orgUnitId());
         BusinessDayService.BusinessDayContext day = businessDayService.resolve(
                 request.orgUnitId(), request.businessDate());
         UUID employeeId = jdbc.queryForObject("""
@@ -188,9 +187,16 @@ public class DailyReportService {
                 join employee on employee.tenant_id = assignment.tenant_id
                  and employee.id = assignment.employee_id
                 where assignment.tenant_id = :tenantId and assignment.id = :assignmentId
-                  and assignment.org_unit_id = :orgUnitId and assignment.status = 'ACTIVE'
+                  and assignment.status = 'ACTIVE'
                   and assignment.valid_from <= :businessDate
                   and (assignment.valid_to is null or assignment.valid_to >= :businessDate)
+                  and exists (
+                    select 1
+                    from org_unit_closure report_scope
+                    where report_scope.tenant_id = assignment.tenant_id
+                      and report_scope.ancestor_id = :orgUnitId
+                      and report_scope.descendant_id = assignment.org_unit_id
+                  )
                   and employee.account_id = :actorId and employee.employment_status = 'ACTIVE'
                 """, base(principal).addValue("assignmentId", request.positionAssignmentId())
                 .addValue("orgUnitId", request.orgUnitId()).addValue("businessDate", day.businessDate())

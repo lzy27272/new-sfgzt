@@ -73,6 +73,13 @@ public final class WorkDataModels {
     ) {
     }
 
+    public record ReviewAttachmentAi(
+            @NotBlank String decision,
+            @NotBlank String summary,
+            String correctionReason
+    ) {
+    }
+
     public record AddSupplement(
             @NotNull UUID submittedByAssignmentId,
             @NotBlank String content

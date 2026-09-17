@@ -324,7 +324,34 @@ type PendingWorkEvidence = {
 
 type NewWorkEvidence = Omit<PendingWorkEvidence, 'draftFileId'>
 
-type WorkRecordFieldValue = string | number | boolean | string[]
+type WorkRecordObjectValue = Record<string, string | number | boolean>
+type WorkRecordFieldValue = string | number | boolean | string[] | WorkRecordObjectValue
+
+const isWorkRecordFieldValue = (entry: [string, unknown]): entry is [string, WorkRecordFieldValue] => {
+  const value = entry[1]
+  if (['string', 'number', 'boolean'].includes(typeof value)) return true
+  if (Array.isArray(value)) return value.every((item) => typeof item === 'string')
+  return Boolean(value && typeof value === 'object'
+    && Object.values(value).every((item) => ['string', 'number', 'boolean'].includes(typeof item)))
+}
+
+const structuredObjectText = (value: WorkRecordFieldValue | undefined) =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.entries(value).map(([key, entry]) => `${key}=${String(entry)}`).join('\n')
+    : ''
+
+const structuredObjectValue = (value: string): WorkRecordObjectValue => Object.fromEntries(value
+  .split(/\r?\n/)
+  .map((line) => line.trim())
+  .filter(Boolean)
+  .map((line) => {
+    const separator = line.search(/[=：:]/)
+    if (separator < 1) return [line, '']
+    const key = line.slice(0, separator).trim()
+    const raw = line.slice(separator + 1).trim()
+    return [key, /^-?\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : raw]
+  })
+  .filter(([key]) => Boolean(key)))
 
 type WorkRecordSaveProgress = {
   phase: 'draft' | 'upload' | 'submit'
@@ -351,7 +378,9 @@ const hasWorkRecordDraftContent = (draft: WorkRecordFormDraft) => Boolean(
   || draft.nextAction.length
   || Object.values(draft.payload).some((value) => Array.isArray(value)
     ? value.some((entry) => entry.length > 0)
-    : typeof value === 'string' ? value.length > 0 : value !== undefined),
+    : value && typeof value === 'object'
+      ? Object.keys(value).length > 0
+      : typeof value === 'string' ? value.length > 0 : value !== undefined),
 )
 
 const workEvidenceToStored = (entry: PendingWorkEvidence): StoredWorkEvidence => ({
@@ -371,7 +400,13 @@ const storedToWorkEvidence = (entry: StoredWorkEvidence): PendingWorkEvidence =>
   capturedAtClient: entry.capturedAtClient,
 })
 
-function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpectation; identity: RoleContext; onClose: () => void; onSaved: () => void }) {
+function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
+  item: WorkExpectation
+  identity: RoleContext
+  onClose: () => void
+  onSaved: () => Promise<void>
+  onDelegated: (message: string) => void
+}) {
   const [completion, setCompletion] = useState('')
   const [exception, setException] = useState('')
   const [nextAction, setNextAction] = useState('')
@@ -409,41 +444,130 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
   const properties = item.formSchema?.properties ?? {}
   const required = item.formSchema?.required ?? []
   const policy = item.submissionPolicy ?? { completionStatementRequired: true, exceptionStatementRequired: false, nextActionRequired: false, attachmentRequired: false, maxAttachments: 10, maxFileSizeBytes: 20 * 1024 * 1024, allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf', 'docx', 'xlsx'], evidenceRequirements: [] }
+  const applicabilityConditionField = typeof item.applicabilityPolicy?.conditionField === 'string'
+    ? item.applicabilityPolicy.conditionField
+    : item.applicabilityPolicy?.condition === 'HAS_SPECIAL_ARRIVAL_REQUIREMENT'
+      ? 'specialArrivalRequirement'
+      : undefined
+  const itemSubmissionApplicable = applicabilityConditionField
+    ? payload[applicabilityConditionField] === undefined || payload[applicabilityConditionField] === ''
+      ? undefined
+      : item.applicabilityPolicy?.condition === 'HAS_SPECIAL_ARRIVAL_REQUIREMENT'
+        ? payload[applicabilityConditionField] === true
+        : payload[applicabilityConditionField] === item.applicabilityPolicy?.equals
+    : true
   const viewOnly = Boolean(existing && ['SUBMITTED', 'APPROVED'].includes(existing.status) && item.status !== 'FAILED')
   const fieldLabels: Record<string, string> = { checkins: '今日入住数', complaints: '客诉数量', vipReception: 'VIP接待情况', roomsChecked: '检查房间数', issues: '发现问题数', attendance: '出勤人数', employeeStatus: '员工状态', handover: '交接事项', operationsReviewed: '已查看经营数据', otaChecked: '已完成OTA巡查', employeeTalks: '员工沟通人数', summary: '完成情况' }
   const requiredReady = required.every((key) => {
     const value = payload[key]
     return Array.isArray(value)
       ? value.length > 0 && value.every((entry) => entry.trim().length > 0)
+      : value && typeof value === 'object'
+        ? Object.keys(value).length > 0
       : value !== undefined && value !== ''
   })
   const isOwner = item.assignmentId === identity.businessActorAssignmentId
+    || (item.executionPolicy?.sharedPerOrg === true
+      && item.executionPolicy.allowedPositionCodes?.includes(identity.roleCode) === true)
+  const facilityFlagKeys: Record<string, string> = {
+    BREAKFAST_AREA: 'breakfastArea', KITCHEN: 'kitchen', AFTERNOON_TEA: 'afternoonTea',
+    BAR: 'bar', PROJECTION: 'projection', GYM: 'gym', TERRACE: 'terrace',
+    TRENDY_PLAY_AREA: 'trendyPlayArea',
+  }
+  const requirementApplies = (requirement: SubmissionPolicy['evidenceRequirements'][number]) => {
+    if (requirement.requiredWhen && payload[requirement.requiredWhen.field] !== requirement.requiredWhen.equals) return false
+    if (!requirement.conditionalFacility) return true
+    const flagKey = facilityFlagKeys[requirement.conditionalFacility]
+    return Boolean(flagKey && item.operationalFeatureFlags?.[flagKey] === true)
+  }
   const requirementMinimum = (requirement: SubmissionPolicy['evidenceRequirements'][number]) => {
-    if (requirement.requiredWhen && payload[requirement.requiredWhen.field] !== requirement.requiredWhen.equals) return 0
+    if (!requirementApplies(requirement)) return 0
     const perFloor = requirement.minimumPerHotelFloor ?? 0
     return Math.max(requirement.minimum ?? 0, perFloor * Math.max(1, item.guestRoomFloorCount ?? 1))
   }
+  const requirementInstanceField = (requirement: SubmissionPolicy['evidenceRequirements'][number]) =>
+    requirement.instanceField ?? requirement.configuredFacilityInstanceField ?? requirement.configuredAssetInstanceField
+  const requirementInstanceLabel = (requirement: SubmissionPolicy['evidenceRequirements'][number]) =>
+    requirement.instanceLabel ?? (requirement.minimumPerConfiguredAsset !== undefined ? '设备编号' : requirement.minimumPerConfiguredFacility !== undefined ? '设施编号' : '房号')
+  const requirementInstanceMinimum = (requirement: SubmissionPolicy['evidenceRequirements'][number]) =>
+    requirement.minimumPerInstance ?? requirement.minimumPerConfiguredFacility ?? requirement.minimumPerConfiguredAsset ?? 0
+  const requirementUsesStoreConfiguration = (requirement: SubmissionPolicy['evidenceRequirements'][number]) =>
+    requirement.minimumPerConfiguredFacility !== undefined || requirement.minimumPerConfiguredAsset !== undefined
+  const configuredInstanceValues = (requirement: SubmissionPolicy['evidenceRequirements'][number]) => {
+    const field = requirement.minimumPerConfiguredFacility !== undefined
+      ? requirement.configuredFacilityInstanceField
+      : requirement.configuredAssetInstanceField
+    if (!field) return []
+    const configured = requirement.minimumPerConfiguredFacility !== undefined
+      ? item.evidenceInstanceConfiguration?.facilityInstances[field]
+      : item.evidenceInstanceConfiguration?.assetInstances[field]
+    return configured ?? []
+  }
   const activeRequirements = policy.evidenceRequirements.filter((requirement) =>
-    (requirement.requiredInstances ?? 0) > 0 || requirementMinimum(requirement) > 0)
-  const hasInstanceRequirements = activeRequirements.some((requirement) => (requirement.requiredInstances ?? 0) > 0)
+    itemSubmissionApplicable !== false && requirementApplies(requirement) && ((requirement.requiredInstances ?? 0) > 0
+      || requirementInstanceMinimum(requirement) > 0
+      || requirementMinimum(requirement) > 0))
+  const hasInstanceRequirements = activeRequirements.some((requirement) =>
+    Boolean(requirementInstanceField(requirement)) && requirementInstanceMinimum(requirement) > 0)
   const normalizedInstanceKey = (value: string) => value.trim().toUpperCase()
   const instanceValues = (requirement: SubmissionPolicy['evidenceRequirements'][number]) => {
+    if (requirementUsesStoreConfiguration(requirement)) return configuredInstanceValues(requirement)
     const count = requirement.requiredInstances ?? 0
-    const source = requirement.instanceField && Array.isArray(payload[requirement.instanceField])
-      ? payload[requirement.instanceField] as string[]
+    const field = requirementInstanceField(requirement)
+    const source = field && Array.isArray(payload[field])
+      ? payload[field] as string[]
       : []
-    return Array.from({ length: count }, (_, index) => source[index] ?? '')
+    return count > 0 ? Array.from({ length: count }, (_, index) => source[index] ?? '') : source
   }
   const updateInstanceValue = (requirement: SubmissionPolicy['evidenceRequirements'][number], index: number, value: string) => {
-    if (!requirement.instanceField) return
+    if (requirementUsesStoreConfiguration(requirement)) return
+    const field = requirementInstanceField(requirement)
+    if (!field) return
     setPayload((current) => {
       const count = requirement.requiredInstances ?? 0
-      const currentValue = current[requirement.instanceField!]
-      const values = Array.from({ length: count }, (_, currentIndex) =>
-        Array.isArray(currentValue) ? currentValue[currentIndex] ?? '' : '')
+      const currentValue = current[field]
+      const source = Array.isArray(currentValue) ? currentValue : []
+      const values = count > 0
+        ? Array.from({ length: count }, (_, currentIndex) => source[currentIndex] ?? '')
+        : [...source]
       values[index] = value
-      return { ...current, [requirement.instanceField!]: values }
+      return { ...current, [field]: values }
     })
+  }
+  const addInstanceValue = (requirement: SubmissionPolicy['evidenceRequirements'][number]) => {
+    if (requirementUsesStoreConfiguration(requirement)) return
+    const field = requirementInstanceField(requirement)
+    if (!field || (requirement.requiredInstances ?? 0) > 0) return
+    setPayload((current) => {
+      const currentValue = current[field]
+      const values = Array.isArray(currentValue) ? currentValue : []
+      return values.length >= 100 ? current : { ...current, [field]: [...values, ''] }
+    })
+  }
+  const removeInstanceValue = (requirement: SubmissionPolicy['evidenceRequirements'][number], index: number) => {
+    if (requirementUsesStoreConfiguration(requirement)) return
+    const field = requirementInstanceField(requirement)
+    if (!field || (requirement.requiredInstances ?? 0) > 0) return
+    setPayload((current) => {
+      const currentValue = current[field]
+      const values = Array.isArray(currentValue) ? [...currentValue] : []
+      values.splice(index, 1)
+      return { ...current, [field]: values }
+    })
+  }
+  const requirementAllowsImages = (requirement: SubmissionPolicy['evidenceRequirements'][number]) =>
+    !requirement.allowedKinds?.length || requirement.allowedKinds.includes('IMAGE')
+  const requirementAllowsDocuments = (requirement: SubmissionPolicy['evidenceRequirements'][number]) =>
+    requirement.allowedKinds?.some((kind) => ['DOCUMENT', 'PDF', 'WORD', 'EXCEL'].includes(kind)) === true
+  const requirementDocumentAccept = (requirement: SubmissionPolicy['evidenceRequirements'][number]) => {
+    const extensions = new Set<string>()
+    for (const kind of requirement.allowedKinds ?? []) {
+      if (kind === 'DOCUMENT') ['.pdf', '.docx', '.xlsx'].forEach((extension) => extensions.add(extension))
+      if (kind === 'PDF') extensions.add('.pdf')
+      if (kind === 'WORD') extensions.add('.docx')
+      if (kind === 'EXCEL') extensions.add('.xlsx')
+    }
+    return [...extensions].join(',')
   }
   const persistWorkFiles = (entries: PendingWorkEvidence[]) => {
     const stored = entries.map(workEvidenceToStored)
@@ -516,12 +640,20 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
         catch (reason) { loadError = reason }
       }
       if (!active) return
-      activeRecordIdRef.current = serverRecord?.id ?? recordId
+      // A resting owner's in-progress draft remains immutable evidence.  The
+      // delegate starts a new attempt instead of accidentally editing a draft
+      // created under another assignment.
+      const inheritedOwnerDraft = Boolean(serverRecord
+        && serverRecord.status === 'DRAFT'
+        && serverRecord.positionAssignmentId
+        && serverRecord.positionAssignmentId !== executionAssignmentId)
+      if (inheritedOwnerDraft) serverRecord = undefined
+      activeRecordIdRef.current = inheritedOwnerDraft ? undefined : (serverRecord?.id ?? recordId)
       setExisting(serverRecord)
       const serverLocked = Boolean(serverRecord && ['SUBMITTED', 'APPROVED'].includes(serverRecord.status) && item.status !== 'FAILED')
-      const serverPayload = serverRecord ? Object.fromEntries(Object.entries(serverRecord.payload).filter((entry): entry is [string, WorkRecordFieldValue] =>
-        ['string', 'number', 'boolean'].includes(typeof entry[1])
-        || (Array.isArray(entry[1]) && entry[1].every((value) => typeof value === 'string')))) : {}
+      const serverPayload = serverRecord
+        ? Object.fromEntries(Object.entries(serverRecord.payload).filter(isWorkRecordFieldValue))
+        : {}
       const serverForm: WorkRecordFormDraft | undefined = serverRecord ? {
         schemaVersion: 1,
         completion: serverRecord.completionStatement ?? '',
@@ -531,7 +663,7 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
         serverRecordId: serverRecord.id,
         serverRowVersion: serverRecord.rowVersion,
       } : undefined
-      const validLocalForm = localForm?.schemaVersion === 1 ? localForm : undefined
+      const validLocalForm = localForm?.schemaVersion === 1 && !inheritedOwnerDraft ? localForm : undefined
       const localHasContent = Boolean(validLocalForm && hasWorkRecordDraftContent(validLocalForm))
       const localConflictsWithServer = Boolean(
         serverRecord
@@ -578,7 +710,9 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
         .map(storedToWorkEvidence)
       setAttachments(restoredFiles)
       filesDraftRef.current = restoredFiles.map(workEvidenceToStored)
-      if (!localConflictsWithServer && ((localForm?.schemaVersion === 1 && hasWorkRecordDraftContent(localForm)) || restoredFiles.length) && !serverLocked) {
+      if (inheritedOwnerDraft) {
+        setDraftNotice('原执行人的草稿已保留；你将以受托人身份新建工作记录。')
+      } else if (!localConflictsWithServer && ((localForm?.schemaVersion === 1 && hasWorkRecordDraftContent(localForm)) || restoredFiles.length) && !serverLocked) {
         setDraftNotice(`已恢复上次未完成的内容${restoredFiles.length ? `和 ${restoredFiles.length} 个待上传附件` : ''}。`)
       } else if (loadError) {
         setMessage(loadError instanceof Error ? loadError.message : '工作记录加载失败')
@@ -593,23 +727,30 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
           try {
             const serverRecord = (await loadWorkRecord(identity, item.recordId)).data
             if (!active) return
-            activeRecordIdRef.current = serverRecord.id
-            setExisting(serverRecord)
-            const recoveredPayload = Object.fromEntries(Object.entries(serverRecord.payload).filter((entry): entry is [string, WorkRecordFieldValue] =>
-              ['string', 'number', 'boolean'].includes(typeof entry[1])
-              || (Array.isArray(entry[1]) && entry[1].every((value) => typeof value === 'string'))))
-            setCompletion(serverRecord.completionStatement ?? '')
-            setException(serverRecord.exceptionStatement ?? '')
-            setNextAction(serverRecord.nextAction ?? '')
-            setPayload(recoveredPayload)
-            formDraftRef.current = {
-              schemaVersion: 1,
-              completion: serverRecord.completionStatement ?? '',
-              exception: serverRecord.exceptionStatement ?? '',
-              nextAction: serverRecord.nextAction ?? '',
-              payload: recoveredPayload,
-              serverRecordId: serverRecord.id,
-              serverRowVersion: serverRecord.rowVersion,
+            const inheritedOwnerDraft = serverRecord.status === 'DRAFT'
+              && Boolean(serverRecord.positionAssignmentId)
+              && serverRecord.positionAssignmentId !== executionAssignmentId
+            if (inheritedOwnerDraft) {
+              activeRecordIdRef.current = undefined
+              setExisting(undefined)
+              setDraftNotice('原执行人的草稿已保留；你将以受托人身份新建工作记录。')
+            } else {
+              activeRecordIdRef.current = serverRecord.id
+              setExisting(serverRecord)
+            const recoveredPayload = Object.fromEntries(Object.entries(serverRecord.payload).filter(isWorkRecordFieldValue))
+              setCompletion(serverRecord.completionStatement ?? '')
+              setException(serverRecord.exceptionStatement ?? '')
+              setNextAction(serverRecord.nextAction ?? '')
+              setPayload(recoveredPayload)
+              formDraftRef.current = {
+                schemaVersion: 1,
+                completion: serverRecord.completionStatement ?? '',
+                exception: serverRecord.exceptionStatement ?? '',
+                nextAction: serverRecord.nextAction ?? '',
+                payload: recoveredPayload,
+                serverRecordId: serverRecord.id,
+                serverRowVersion: serverRecord.rowVersion,
+              }
             }
           } catch (reason) {
             serverLoadError = reason
@@ -632,9 +773,7 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
       completion: existing.completionStatement ?? '',
       exception: existing.exceptionStatement ?? '',
       nextAction: existing.nextAction ?? '',
-      payload: Object.fromEntries(Object.entries(existing.payload).filter((entry): entry is [string, WorkRecordFieldValue] =>
-        ['string', 'number', 'boolean'].includes(typeof entry[1])
-        || (Array.isArray(entry[1]) && entry[1].every((value) => typeof value === 'string')))),
+      payload: Object.fromEntries(Object.entries(existing.payload).filter(isWorkRecordFieldValue)),
       serverRecordId: existing.id,
       serverRowVersion: existing.rowVersion,
     }
@@ -737,19 +876,44 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
     if (forSubmission && policy.completionStatementRequired && !completion.trim()) throw new Error('请填写完成情况。')
     if (forSubmission && policy.exceptionStatementRequired && !exception.trim()) throw new Error('请填写异常与协同事项。')
     if (forSubmission && policy.nextActionRequired && !nextAction.trim()) throw new Error('请填写下一步行动。')
+    if (forSubmission && applicabilityConditionField && itemSubmissionApplicable === undefined) {
+      throw new Error(`请明确选择“${properties[applicabilityConditionField]?.title ?? applicabilityConditionField}”。`)
+    }
     const totalAttachments = (existing?.status === 'DRAFT' ? existing.attachments.length : 0) + attachments.length
     if (totalAttachments > policy.maxAttachments) throw new Error(`最多上传 ${policy.maxAttachments} 个附件。`)
     const oversized = attachments.find((entry) => entry.file.size > policy.maxFileSizeBytes)
     if (oversized) throw new Error(`${oversized.file.name} 超过单文件大小上限。`)
+    const allowedExtensions = new Set(policy.allowedExtensions.map((extension) => extension.toLowerCase()))
+    const unsupported = attachments.find((entry) => {
+      const extension = entry.file.name.toLowerCase().split('.').pop() ?? ''
+      return !allowedExtensions.has(extension)
+    })
+    if (unsupported) throw new Error(`${unsupported.file.name} 的文件格式不在该工作模板允许范围内。`)
+    if (forSubmission && item.executionPolicy?.requiredRoomCountFormula === 'max(ceil(completedRooms*0.20),onDutyHousekeepers*5)') {
+      const completedRooms = payload.completedRooms
+      const onDutyHousekeepers = payload.onDutyHousekeepers
+      if (typeof completedRooms !== 'number' || !Number.isInteger(completedRooms) || completedRooms < 0) throw new Error('请填写非负整数“已完成客房数”。')
+      if (typeof onDutyHousekeepers !== 'number' || !Number.isInteger(onDutyHousekeepers) || onDutyHousekeepers < 0) throw new Error('请填写非负整数“当班客房服务员人数”。')
+      const requiredRoomCount = Math.max(Math.ceil(completedRooms * 0.2), onDutyHousekeepers * 5)
+      const roomNumbers = Array.isArray(payload.roomNumbers) ? payload.roomNumbers.map(normalizedInstanceKey).filter(Boolean) : []
+      if (new Set(roomNumbers).size < requiredRoomCount) {
+        throw new Error(`按完成房数和当班人数计算，本次至少需要填写 ${requiredRoomCount} 个不重复查房房号。`)
+      }
+    }
     if (forSubmission) for (const requirement of activeRequirements) {
-      if ((requirement.requiredInstances ?? 0) > 0 && requirement.instanceField) {
+      const instanceField = requirementInstanceField(requirement)
+      const minimumPerInstance = requirementInstanceMinimum(requirement)
+      if (instanceField && minimumPerInstance > 0) {
         const values = instanceValues(requirement)
         const normalizedValues = values.map(normalizedInstanceKey)
-        if (normalizedValues.some((value) => !value)) {
+        if ((requirement.requiredInstances ?? 0) > 0 && normalizedValues.some((value) => !value)) {
           throw new Error(`${requirement.label}需填写 ${requirement.requiredInstances} 个${requirement.instanceLabel ?? '编号'}。`)
         }
+        if ((requirement.requiredInstances ?? 0) === 0 && normalizedValues.some((value) => !value)) {
+          throw new Error(`${requirement.label}中的${requirementInstanceLabel(requirement)}不能为空。`)
+        }
         if (new Set(normalizedValues).size !== normalizedValues.length) {
-          throw new Error(`${requirement.label}中的${requirement.instanceLabel ?? '编号'}不能重复。`)
+          throw new Error(`${requirement.label}中的${requirementInstanceLabel(requirement)}不能重复。`)
         }
         for (const value of normalizedValues) {
           const stored = existing?.status === 'DRAFT'
@@ -760,7 +924,6 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
           const pending = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode
             && (!requirement.captureSource || entry.captureSource === requirement.captureSource)
             && normalizedInstanceKey(entry.evidenceInstanceKey ?? '') === value).length
-          const minimumPerInstance = requirement.minimumPerInstance ?? 1
           if (stored + pending < minimumPerInstance) {
             throw new Error(`${requirement.label}·${value}至少需要 ${minimumPerInstance} 张现场照片。`)
           }
@@ -776,7 +939,7 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
       const minimum = requirementMinimum(requirement)
       if (stored + pending < minimum) throw new Error(`${requirement.label}至少需要 ${minimum} 张现场照片。`)
     }
-    if (forSubmission && policy.attachmentRequired && totalAttachments === 0) throw new Error('该岗位工作要求必须上传附件证据。')
+    if (forSubmission && itemSubmissionApplicable !== false && policy.attachmentRequired && totalAttachments === 0) throw new Error('该岗位工作要求必须上传附件证据。')
   }
   const persist = async (submitAfterUpload: boolean) => {
     if (recordLoadFailed) {
@@ -878,8 +1041,11 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
     if (!delegateAssignmentId) { setMessage('请选择同店受托员工。'); return }
     setDelegating(true); setMessage(undefined)
     try {
-      await delegateExpectation(identity, item.id, { delegateAssignmentId, ownerResting, reason: delegationReason || undefined, expectedVersion: item.rowVersion ?? 0 })
-      onSaved(); onClose()
+      const result = await delegateExpectation(identity, item.id, { delegateAssignmentId, ownerResting, reason: delegationReason || undefined, expectedVersion: item.rowVersion ?? 0 })
+      onDelegated(ownerResting && item.executionPolicy?.oneClickRestTransfer
+        ? `已将本人今日当前及后续 ${result.transferredCount} 项工作转交给受托人。`
+        : `已成功转交 ${result.transferredCount} 项工作。`)
+      await onSaved(); onClose()
     } catch (error) { setMessage(error instanceof Error ? error.message : '转交失败') }
     finally { setDelegating(false) }
   }
@@ -904,39 +1070,47 @@ function WorkRecordDialog({ item, identity, onClose, onSaved }: { item: WorkExpe
   return <div className="modal-backdrop" role="presentation"><section className="modal work-record-modal" role="dialog" aria-modal="true">
     <header><div><span className="panel-kicker">WORK RECORD · REAL API</span><h2>{item.title}</h2></div><button className="close" aria-label="关闭" disabled={!!saving || validatingAttachments} onClick={onClose}>×</button></header>
     <div className="form-body"><div className="form-context"><strong>{item.formName ?? '岗位工作记录'}</strong><small>{item.formCode ?? '结构化表单'} · {policy.attachmentCountUnlimited ? `每个房号照片数量不限，整单安全上限 ${policy.maxAttachments} 个附件` : `最多 ${policy.maxAttachments} 个附件`} · 单文件 ≤ {Math.round(policy.maxFileSizeBytes / 1024 / 1024)}MB</small></div>
-      {item.delegateAssignmentId && <div className="inline-warning">本事项已转交给 {item.delegatedEmployeeName ?? '指定员工'}{item.ownerResting ? '，店长今日休息' : ''}。</div>}
-      {isOwner && item.executionPolicy?.delegationAllowed && !viewOnly && <section className="action-box"><label>转交本项工作<select value={delegateAssignmentId} onChange={(event) => setDelegateAssignmentId(event.target.value)}><option value="">请选择同店员工</option>{candidates.map((candidate) => <option value={candidate.assignmentId} key={candidate.assignmentId}>{candidate.employeeName} · {candidate.positionName}</option>)}</select></label><label className="checkbox-line"><input type="checkbox" checked={ownerResting} onChange={(event) => setOwnerResting(event.target.checked)} />店长今日休息</label><label>转交说明<input value={delegationReason} onChange={(event) => setDelegationReason(event.target.value)} placeholder="选填" /></label><div className="button-row"><button className="secondary" disabled={delegating || !delegateAssignmentId} onClick={() => void saveDelegation()}>{delegating ? '处理中…' : '确认转交'}</button>{item.delegateAssignmentId && <button className="secondary" disabled={delegating} onClick={() => void revokeDelegation()}>撤销转交</button>}</div></section>}
+      {item.delegateAssignmentId && <div className="inline-warning">本事项已转交给 {item.delegatedEmployeeName ?? '指定员工'}{item.ownerResting ? '，原执行人今日休息' : ''}。</div>}
+      {isOwner && item.executionPolicy?.delegationAllowed && !viewOnly && <section className="action-box"><label>转交本项工作<select value={delegateAssignmentId} onChange={(event) => setDelegateAssignmentId(event.target.value)}><option value="">请选择同店员工</option>{candidates.map((candidate) => <option value={candidate.assignmentId} key={candidate.assignmentId}>{candidate.employeeName} · {candidate.positionName}</option>)}</select></label>{item.executionPolicy.oneClickRestTransfer && <label className="checkbox-line"><input type="checkbox" checked={ownerResting} onChange={(event) => setOwnerResting(event.target.checked)} />本人今日休息，将当日后续工作一键转交</label>}<label>转交说明<input value={delegationReason} onChange={(event) => setDelegationReason(event.target.value)} placeholder="选填" /></label><div className="button-row"><button className="secondary" disabled={delegating || !delegateAssignmentId} onClick={() => void saveDelegation()}>{delegating ? '处理中…' : ownerResting ? '确认一键转交' : '确认转交'}</button>{item.delegateAssignmentId && <button className="secondary" disabled={delegating} onClick={() => void revokeDelegation()}>撤销转交</button>}</div></section>}
       {loadingRecord && <div className="state-card"><div className="spinner" /><strong>正在读取已提交记录</strong></div>}
       {conflictingLocalForm && <div className="inline-warning"><strong>发现两个版本的未提交内容</strong><p>服务器草稿已在其他页面或设备更新，本机仍保留一份未提交内容。请选择一个版本后再继续，系统不会自动覆盖。</p><div className="button-row"><button className="secondary" onClick={chooseServerDraft}>使用服务器最新草稿</button><button className="secondary" onClick={chooseLocalDraft}>恢复本机未提交内容</button></div></div>}
-      {existing && <section className="detail-section"><h3>最近一次提交 · {label(existing.status)}</h3><dl><div><dt>完成情况</dt><dd>{existing.completionStatement ?? String(existing.payload.summary ?? '—')}</dd></div><div><dt>异常事项</dt><dd>{existing.exceptionStatement ?? String(existing.payload.exception ?? '无')}</dd></div><div><dt>下一步行动</dt><dd>{existing.nextAction ?? '—'}</dd></div><div><dt>提交时间</dt><dd>{formatDate(existing.submittedAt)}</dd></div></dl>{existing.reviewReason && <div className="inline-warning">复核意见：{existing.reviewReason}</div>}<div className="attachment-list">{existing.attachments.map((attachment) => <button className="secondary" key={attachment.id} onClick={() => void preview(attachment.id, attachment.originalName, attachment.mediaType)}>{attachment.evidenceInstanceKey ? `房号 ${attachment.evidenceInstanceKey} · ` : ''}{attachment.originalName} · {Math.ceil(attachment.sizeBytes / 1024)}KB</button>)}</div>{existing.supplements.map((entry) => <p className="muted" key={entry.id}>补充：{entry.content} · {entry.submittedByName}</p>)}</section>}
-      {viewOnly && !!attachments.length && <section className="detail-section"><div className="inline-warning"><strong>本机还有 {attachments.length} 个未上传附件</strong><p>该工作记录已在其他页面或设备提交，系统没有自动删除这些照片。你可以先逐个导出留存，再明确选择是否丢弃。</p></div><div className="pending-evidence-list">{attachments.map((entry) => <button type="button" className="secondary" key={entry.draftFileId} onClick={() => downloadPendingAttachment(entry)}>{entry.evidenceInstanceKey ? `房号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · 导出 {entry.file.name}</button>)}</div><button type="button" className="danger-button" onClick={() => void discardLockedPendingAttachments()}>丢弃本机未上传附件</button></section>}
+      {existing && <section className="detail-section"><h3>最近一次提交 · {label(existing.status)}</h3><dl><div><dt>完成情况</dt><dd>{existing.completionStatement ?? String(existing.payload.summary ?? '—')}</dd></div><div><dt>异常事项</dt><dd>{existing.exceptionStatement ?? String(existing.payload.exception ?? '无')}</dd></div><div><dt>下一步行动</dt><dd>{existing.nextAction ?? '—'}</dd></div><div><dt>提交时间</dt><dd>{formatDate(existing.submittedAt)}</dd></div></dl>{existing.reviewReason && <div className="inline-warning">复核意见：{existing.reviewReason}</div>}<div className="attachment-list">{existing.attachments.map((attachment) => <button className="secondary" key={attachment.id} onClick={() => void preview(attachment.id, attachment.originalName, attachment.mediaType)}>{attachment.evidenceInstanceKey ? `编号 ${attachment.evidenceInstanceKey} · ` : ''}{attachment.originalName} · {Math.ceil(attachment.sizeBytes / 1024)}KB</button>)}</div>{existing.supplements.map((entry) => <p className="muted" key={entry.id}>补充：{entry.content} · {entry.submittedByName}</p>)}</section>}
+      {viewOnly && !!attachments.length && <section className="detail-section"><div className="inline-warning"><strong>本机还有 {attachments.length} 个未上传附件</strong><p>该工作记录已在其他页面或设备提交，系统没有自动删除这些照片。你可以先逐个导出留存，再明确选择是否丢弃。</p></div><div className="pending-evidence-list">{attachments.map((entry) => <button type="button" className="secondary" key={entry.draftFileId} onClick={() => downloadPendingAttachment(entry)}>{entry.evidenceInstanceKey ? `编号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · 导出 {entry.file.name}</button>)}</div><button type="button" className="danger-button" onClick={() => void discardLockedPendingAttachments()}>丢弃本机未上传附件</button></section>}
       {viewOnly && existing?.status === 'SUBMITTED' && <section className="action-box"><label>补充说明<textarea rows={3} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="待主管复核前可追加说明，原提交内容不会被覆盖" /></label><button className="secondary" disabled={saving === 'supplement' || !supplement.trim()} onClick={() => void addSupplement()}>{saving === 'supplement' ? '补充中…' : '追加说明'}</button></section>}
-      {!viewOnly && !loadingRecord && !conflictingLocalForm && <>{item.status === 'FAILED' && <div className="inline-warning">上一版未通过，本次提交会生成新的尝试记录，不覆盖历史证据。</div>}{Object.values(properties).some((definition) => definition.type !== 'array') && <div className="dynamic-form">{Object.entries(properties).filter(([, definition]) => definition.type !== 'array').map(([key, definition]) => <label key={key}>{fieldLabels[key] ?? definition.title ?? key}{required.includes(key) ? ' *' : ''}{definition.type === 'boolean' ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === 'true' }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select> : ['integer', 'number'].includes(definition.type ?? '') ? <input type="number" min={definition.minimum} max={definition.maximum} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : Number(event.target.value) }))} /> : <textarea rows={3} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))} />}{definition.description && <small>{definition.description}</small>}</label>)}</div>}
+      {!viewOnly && !loadingRecord && !conflictingLocalForm && <>{item.status === 'FAILED' && <div className="inline-warning">上一版未通过，本次提交会生成新的尝试记录，不覆盖历史证据。</div>}{Object.values(properties).some((definition) => definition.type !== 'array') && <div className="dynamic-form">{Object.entries(properties).filter(([, definition]) => definition.type !== 'array').map(([key, definition]) => <label key={key}>{fieldLabels[key] ?? definition.title ?? key}{required.includes(key) ? ' *' : ''}{definition.type === 'object' ? <textarea rows={4} value={structuredObjectText(payload[key])} placeholder="每行填写一项，例如：牙刷=2" onChange={(event) => setPayload((current) => ({ ...current, [key]: structuredObjectValue(event.target.value) }))} /> : definition.enum?.length ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))}><option value="">请选择</option>{definition.enum.map((option) => <option key={String(option)} value={String(option)}>{String(option)}</option>)}</select> : definition.type === 'boolean' ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : event.target.value === 'true' }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select> : ['integer', 'number'].includes(definition.type ?? '') ? <input type="number" min={definition.minimum} max={definition.maximum} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : Number(event.target.value) }))} /> : <textarea rows={3} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))} />}{definition.type === 'object' && <small>按“名称=数量或读数”逐行填写，系统会保存为结构化数据。</small>}{definition.description && <small>{definition.description}</small>}</label>)}</div>}
+        {itemSubmissionApplicable === false && <div className="inline-success">本项已明确为当日不适用；提交后将保留记录并从完成率分母排除，无需上传证据。</div>}
         <label>完成情况{policy.completionStatementRequired ? ' *' : ''}<textarea rows={4} value={completion} onChange={(event) => setCompletion(event.target.value)} placeholder="说明实际完成内容、结果和关键数据" /></label><label>异常与需协同事项{policy.exceptionStatementRequired ? ' *' : ''}<textarea rows={3} value={exception} onChange={(event) => setException(event.target.value)} placeholder="没有异常请填写“无”" /></label><label>下一步行动{policy.nextActionRequired ? ' *' : ''}<textarea rows={2} value={nextAction} onChange={(event) => setNextAction(event.target.value)} placeholder="需要继续跟进时填写" /></label>
         {!!activeRequirements.length && <section className="camera-evidence">
-          <div><strong>现场拍照</strong><small>照片可横拍或竖拍，系统会校正手机照片方向并按实际比例展示；上传后由服务端加盖门店、可信时间和证据编号水印{hasInstanceRequirements ? '；每个房号至少上传 1 张，可继续追加，照片数量不限' : `；楼层公区按本店 ${item.guestRoomFloorCount ?? 1} 层计算`}</small></div>
+          <div><strong>现场证据</strong><small>照片可横拍或竖拍，系统会校正手机照片方向并按实际比例展示；上传后由服务端加盖门店、可信时间和证据编号水印{hasInstanceRequirements ? '；按房号、设施或设备逐项留证，不得混用编号' : `；楼层公区按本店 ${item.guestRoomFloorCount ?? 1} 层计算`}</small></div>
           {activeRequirements.map((requirement) => {
-            if ((requirement.requiredInstances ?? 0) > 0 && requirement.instanceField) {
+            const instanceField = requirementInstanceField(requirement)
+            const minimumPerInstance = requirementInstanceMinimum(requirement)
+            if (instanceField && minimumPerInstance > 0) {
+              const fixedCount = requirement.requiredInstances ?? 0
+              const instanceLabel = requirementInstanceLabel(requirement)
+              const storeConfigured = requirementUsesStoreConfiguration(requirement)
+              const configuredValues = instanceValues(requirement)
               return <section className="room-evidence-group" key={requirement.checkpointCode}>
-                <header><strong>{requirement.label}</strong><small>需完成 {requirement.requiredInstances} 间，房号不可重复</small></header>
-                <div className="room-evidence-grid">{instanceValues(requirement).map((roomNumber, roomIndex) => {
-                  const instanceKey = normalizedInstanceKey(roomNumber)
+                <header><strong>{requirement.label}</strong><small>{storeConfigured ? `门店后台已配置 ${configuredValues.length} 个${instanceLabel}` : fixedCount > 0 ? `需填写 ${fixedCount} 个${instanceLabel}` : `逐项填写${instanceLabel}`}，每项至少 {minimumPerInstance} 份证据且编号不可重复</small>{!storeConfigured && fixedCount === 0 && <button type="button" className="secondary" onClick={() => addInstanceValue(requirement)}>+ 添加{instanceLabel}</button>}</header>
+                {!configuredValues.length && fixedCount === 0 && <div className="inline-warning">门店后台尚未配置该证据点的{instanceLabel}清单，请联系管理员完成配置后再提交。</div>}
+                <div className="room-evidence-grid">{configuredValues.map((instanceValue, instanceIndex) => {
+                  const instanceKey = normalizedInstanceKey(instanceValue)
                   const storedCount = existing?.status === 'DRAFT' ? existing.attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode && normalizedInstanceKey(entry.evidenceInstanceKey ?? '') === instanceKey).length : 0
                   const pendingCount = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode && normalizedInstanceKey(entry.evidenceInstanceKey ?? '') === instanceKey).length
-                  const photoCount = instanceKey ? storedCount + pendingCount : 0
-                  return <article className={photoCount >= (requirement.minimumPerInstance ?? 1) ? 'room-evidence-card completed' : 'room-evidence-card'} key={`${requirement.checkpointCode}-${roomIndex}`}>
-                    <label>{requirement.instanceLabel ?? '房号'} {roomIndex + 1} *<input value={roomNumber} maxLength={32} placeholder="例如 1208" onChange={(event) => updateInstanceValue(requirement, roomIndex, event.target.value)} onBlur={(event) => updateInstanceValue(requirement, roomIndex, normalizedInstanceKey(event.target.value))} /></label>
-                    <div><span>{photoCount} 张·数量不限</span><label className="room-photo-button"><input type="file" accept="image/jpeg,image/png" capture="environment" multiple disabled={!instanceKey || validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'CAMERA' as const, checkpointCode: requirement.checkpointCode, evidenceInstanceKey: instanceKey, capturedAtClient: new Date().toISOString() })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} />{validatingAttachments ? '校验中…' : photoCount ? '继续上传' : '拍照上传'}</label></div>
+                  const evidenceCount = instanceKey ? storedCount + pendingCount : 0
+                  return <article className={evidenceCount >= minimumPerInstance ? 'room-evidence-card completed' : 'room-evidence-card'} key={`${requirement.checkpointCode}-${instanceIndex}`}>
+                    <label>{instanceLabel} {instanceIndex + 1} *<input value={instanceValue} maxLength={120} readOnly={storeConfigured} aria-readonly={storeConfigured} placeholder={instanceLabel === '房号' ? '例如 1208' : '例如 设备-01'} onChange={(event) => updateInstanceValue(requirement, instanceIndex, event.target.value)} onBlur={(event) => updateInstanceValue(requirement, instanceIndex, normalizedInstanceKey(event.target.value))} /></label>
+                    <div><span>{evidenceCount} 份{requirement.unlimited ? '·数量不限' : ''}</span>{requirementAllowsImages(requirement) && <label className="room-photo-button"><input type="file" accept="image/jpeg,image/png" capture="environment" multiple disabled={!instanceKey || validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'CAMERA' as const, checkpointCode: requirement.checkpointCode, evidenceInstanceKey: instanceKey, capturedAtClient: new Date().toISOString() })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} />{validatingAttachments ? '校验中…' : evidenceCount ? '继续拍照' : '拍照上传'}</label>}{requirementAllowsDocuments(requirement) && <label className="room-photo-button"><input type="file" accept={requirementDocumentAccept(requirement)} multiple disabled={!instanceKey || validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const, checkpointCode: requirement.checkpointCode, evidenceInstanceKey: instanceKey })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} />上传文件</label>}{!storeConfigured && fixedCount === 0 && <button type="button" className="secondary" disabled={!!saving} onClick={() => removeInstanceValue(requirement, instanceIndex)}>删除此项</button>}</div>
                   </article>
                 })}</div>
               </section>
             }
             const minimum = requirementMinimum(requirement)
-            const count = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode && entry.captureSource === 'CAMERA').length + (existing?.status === 'DRAFT' ? existing.attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode && entry.captureSource === 'CAMERA').length : 0)
-            return <div className="camera-grid" key={requirement.checkpointCode}><label className={count >= minimum ? 'camera-checkpoint completed' : 'camera-checkpoint'}><span>{requirement.label}<small>{count}/{minimum} 张{requirement.recommendedMaximum ? `，建议不超过 ${requirement.recommendedMaximum}` : ''}</small></span><input type="file" accept="image/jpeg,image/png" capture="environment" disabled={validatingAttachments || !!saving} onChange={(event) => { const file = event.target.files?.[0]; if (file) void appendValidatedAttachments([{ file, captureSource: 'CAMERA', checkpointCode: requirement.checkpointCode, capturedAtClient: new Date().toISOString() }]); event.currentTarget.value = '' }} /><b>{validatingAttachments ? '校验中…' : count >= minimum ? '已拍摄' : '拍照上传'}</b></label></div>
+            const count = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode).length + (existing?.status === 'DRAFT' ? existing.attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode).length : 0)
+            return <div className="camera-grid" key={requirement.checkpointCode}>{requirementAllowsImages(requirement) && <label className={count >= minimum ? 'camera-checkpoint completed' : 'camera-checkpoint'}><span>{requirement.label}<small>{count}/{minimum} 份{requirement.recommendedMaximum ? `，建议不超过 ${requirement.recommendedMaximum}` : ''}</small></span><input type="file" accept="image/jpeg,image/png" capture="environment" multiple disabled={validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'CAMERA' as const, checkpointCode: requirement.checkpointCode, capturedAtClient: new Date().toISOString() })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><b>{validatingAttachments ? '校验中…' : count >= minimum ? '已满足，可继续上传' : '拍照上传'}</b></label>}{requirementAllowsDocuments(requirement) && <label className={count >= minimum ? 'camera-checkpoint completed' : 'camera-checkpoint'}><span>{requirement.label}文件<small>支持该证据点允许的文档格式</small></span><input type="file" accept={requirementDocumentAccept(requirement)} multiple disabled={validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const, checkpointCode: requirement.checkpointCode })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><b>选择文件</b></label>}</div>
           })}
         </section>}
-        <label className="attachment-picker">补充文件{policy.attachmentRequired ? ' *' : '（可选）'}<input type="file" multiple disabled={validatingAttachments || !!saving} accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx" onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><small>{validatingAttachments ? '正在校验图片…' : attachments.length ? `待上传 ${attachments.length} 个：${attachments.map((entry) => entry.file.name).join('、')}` : '照片支持横拍或竖拍；选中的文件会先保存在本机草稿，切出后可继续；可追加 JPG、PNG、PDF、Word、Excel，提交时服务端会再次校验'}</small></label>{!!attachments.length && <div className="pending-evidence-list">{attachments.map((entry) => <button type="button" className="secondary" key={entry.draftFileId} onClick={() => removePendingAttachment(entry.draftFileId)}>{entry.evidenceInstanceKey ? `房号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · {entry.file.name} ×</button>)}</div>}</>}
+        <label className="attachment-picker">补充文件{policy.attachmentRequired && itemSubmissionApplicable !== false ? ' *' : '（可选）'}<input type="file" multiple disabled={validatingAttachments || !!saving} accept={policy.allowedExtensions.map((extension) => `.${extension}`).join(',')} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><small>{validatingAttachments ? '正在校验图片…' : attachments.length ? `待上传 ${attachments.length} 个：${attachments.map((entry) => entry.file.name).join('、')}` : `选中的文件会先保存在本机草稿，切出后可继续；允许 ${policy.allowedExtensions.map((extension) => extension.toUpperCase()).join('、')}，提交时服务端会再次校验`}</small></label>{!!attachments.length && <div className="pending-evidence-list">{attachments.map((entry) => <button type="button" className="secondary" key={entry.draftFileId} onClick={() => removePendingAttachment(entry.draftFileId)}>{entry.evidenceInstanceKey ? `编号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · {entry.file.name} ×</button>)}</div>}</>}
       {!canSubmit && !viewOnly && <div className="inline-warning">此条接口数据尚未返回完整提交上下文；页面不会猜测任职或表单版本。</div>}{saveProgressText && <div className="work-save-progress" role="status" aria-live="polite"><strong>{saveProgressText}</strong>{saveProgress?.phase === 'upload' && <><progress value={saveProgress.completed} max={Math.max(1, saveProgress.total)} /><small>每个附件都要完成服务端安全扫描；已成功的附件会立即从待上传列表移除，失败后可断点重试。</small></>}</div>}{draftNotice && <div className="inline-success">{draftNotice}</div>}{message && <div className="inline-error">{message}</div>}
     </div><footer><button className="secondary" disabled={!!saving || validatingAttachments} onClick={onClose}>关闭</button>{!viewOnly && !loadingRecord && <><button className="secondary" disabled={!!saving || validatingAttachments || !!conflictingLocalForm} onClick={() => void persist(false)}>{saving === 'draft' ? saveProgress?.phase === 'upload' ? `上传 ${saveProgress.completed}/${saveProgress.total}` : '保存中…' : '保存草稿'}</button><button className="primary" disabled={!!saving || validatingAttachments || !!conflictingLocalForm} onClick={() => void persist(true)}>{submitButtonText}</button></>}</footer>
     {attachmentPreview && <AttachmentPreviewDialog preview={attachmentPreview} onClose={() => setAttachmentPreview(undefined)} />}
@@ -953,6 +1127,7 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
   const [opening, setOpening] = useState<string>()
   const [deepLinkHandled, setDeepLinkHandled] = useState<string>()
   const [openError, setOpenError] = useState<string>()
+  const [delegationNotice, setDelegationNotice] = useState<string>()
   useEffect(() => setFilter(requestedFilter), [requestedFilter])
   const items = filter === 'ALL'
     ? resource.data
@@ -979,8 +1154,9 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
   return <section className="page-section"><PageHeader eyebrow="POSITION WORK" title="我的工作" description={`当前任职：${identity.label} · ${identity.orgName}。每条记录绑定精确任职，不因切换岗位而串岗。`} actions={<SourceFlag source={resource.source} />} />
     <div className="filters">{workFilters.map((item) => <button className={filter === item ? 'active' : ''} onClick={() => { setFilter(item); go('my-work', { ...routeParams, status: item === 'ALL' ? undefined : item }) }} key={item}>{item === 'ALL' ? '全部' : item === 'PENDING_WORK' ? '待完成' : label(item)}</button>)}</div>
     {openError && <div className="inline-error page-error">{openError}</div>}
+    {delegationNotice && <div className="inline-success" role="status">{delegationNotice}</div>}
     <article className="panel table-panel"><DataState loading={resource.loading || !!opening} error={resource.error} empty={!items.length} onRetry={resource.reload} />{!resource.loading && !opening && !resource.error && !!items.length && <WorkTable items={items} own onFill={openRecord} />}</article>
-    {editing && <WorkRecordDialog key={`${identity.key}:${editing.id}`} item={editing} identity={identity} onClose={() => { setEditing(undefined); if (routeParams.expectationId) go('my-work', { ...routeParams, expectationId: undefined }) }} onSaved={resource.reload} />}
+    {editing && <WorkRecordDialog key={`${identity.key}:${editing.id}`} item={editing} identity={identity} onClose={() => { setEditing(undefined); if (routeParams.expectationId) go('my-work', { ...routeParams, expectationId: undefined }) }} onSaved={resource.reload} onDelegated={setDelegationNotice} />}
   </section>
 }
 

@@ -6,6 +6,8 @@ import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
 import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.PilotPasswordHasher;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -13,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -26,19 +29,22 @@ public class OrganizationService {
     private final AccessPolicy accessPolicy;
     private final PilotPasswordHasher passwordHasher;
     private final AuditWriter auditWriter;
+    private final ObjectMapper objectMapper;
 
     public OrganizationService(
             NamedParameterJdbcTemplate jdbc,
             TenantDatabaseContext databaseContext,
             AccessPolicy accessPolicy,
             PilotPasswordHasher passwordHasher,
-            AuditWriter auditWriter
+            AuditWriter auditWriter,
+            ObjectMapper objectMapper
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
         this.passwordHasher = passwordHasher;
         this.auditWriter = auditWriter;
+        this.objectMapper = objectMapper;
     }
 
     @Transactional(readOnly = true)
@@ -53,7 +59,17 @@ public class OrganizationService {
         return jdbc.queryForList("""
                 select o.id, o.parent_id, o.code, o.name, o.unit_type, o.status, o.sort_order,
                        h.property_code, h.city, h.room_count, h.opening_date,
-                       h.breakfast_service_enabled, h.guest_room_floor_count
+                       h.breakfast_service_enabled, h.guest_room_floor_count,
+                       h.assistant_work_template_mode,
+                       coalesce((h.operational_feature_flags ->> 'kitchen')::boolean, false) as kitchen_enabled,
+                       coalesce((h.operational_feature_flags ->> 'afternoonTea')::boolean, false) as afternoon_tea_enabled,
+                       coalesce((h.operational_feature_flags ->> 'bar')::boolean, false) as bar_enabled,
+                       coalesce((h.operational_feature_flags ->> 'projection')::boolean, false) as projection_enabled,
+                       coalesce((h.operational_feature_flags ->> 'gym')::boolean, false) as gym_enabled,
+                       coalesce((h.operational_feature_flags ->> 'terrace')::boolean, false) as terrace_enabled,
+                       coalesce((h.operational_feature_flags ->> 'trendyPlayArea')::boolean, false) as trendy_play_area_enabled,
+                       coalesce(h.evidence_instance_configuration,
+                           '{"facilityInstances":{},"assetInstances":{}}'::jsonb) as evidence_instance_configuration
                 from org_unit o
                 left join hotel_profile h on h.tenant_id = o.tenant_id and h.org_unit_id = o.id
                 where o.tenant_id = :tenantId
@@ -85,6 +101,13 @@ public class OrganizationService {
         if (request.roomCount() != null && request.roomCount() < 0) {
             throw new IllegalArgumentException("房间数不能小于0");
         }
+        String assistantMode = assistantWorkTemplateMode(request.assistantWorkTemplateMode());
+        Map<String, List<String>> facilityEvidenceInstances = request.facilityEvidenceInstances() == null
+                ? defaultFacilityEvidenceInstances(request.gymEnabled())
+                : normalizeEvidenceInstances(request.facilityEvidenceInstances(), "设施");
+        Map<String, List<String>> assetEvidenceInstances = request.assetEvidenceInstances() == null
+                ? defaultAssetEvidenceInstances(request.breakfastServiceEnabled())
+                : normalizeEvidenceInstances(request.assetEvidenceInstances(), "设备");
         requireUniqueCode("org_unit", principal, id, request.code(), "组织编码已存在");
         MapSqlParameterSource parameters = base(principal)
                 .addValue("id", id)
@@ -99,7 +122,17 @@ public class OrganizationService {
                 .addValue("openingDate", request.openingDate())
                 .addValue("breakfastServiceEnabled", Boolean.TRUE.equals(request.breakfastServiceEnabled()))
                 .addValue("guestRoomFloorCount", request.guestRoomFloorCount() == null
-                        ? 1 : request.guestRoomFloorCount());
+                        ? 1 : request.guestRoomFloorCount())
+                .addValue("assistantWorkTemplateMode", assistantMode)
+                .addValue("kitchenEnabled", Boolean.TRUE.equals(request.kitchenEnabled()))
+                .addValue("afternoonTeaEnabled", Boolean.TRUE.equals(request.afternoonTeaEnabled()))
+                .addValue("barEnabled", Boolean.TRUE.equals(request.barEnabled()))
+                .addValue("projectionEnabled", Boolean.TRUE.equals(request.projectionEnabled()))
+                .addValue("gymEnabled", Boolean.TRUE.equals(request.gymEnabled()))
+                .addValue("terraceEnabled", Boolean.TRUE.equals(request.terraceEnabled()))
+                .addValue("trendyPlayAreaEnabled", Boolean.TRUE.equals(request.trendyPlayAreaEnabled()))
+                .addValue("facilityEvidenceInstances", writeJson(facilityEvidenceInstances))
+                .addValue("assetEvidenceInstances", writeJson(assetEvidenceInstances));
         jdbc.update("""
                 insert into org_unit (id, tenant_id, parent_id, code, name, unit_type, sort_order)
                 values (:id, :tenantId, :parentId, :code, :name, :unitType, :sortOrder)
@@ -120,11 +153,27 @@ public class OrganizationService {
             jdbc.update("""
                     insert into hotel_profile
                         (id, tenant_id, org_unit_id, property_code, city, room_count, opening_date,
-                         breakfast_service_enabled, guest_room_floor_count)
+                         breakfast_service_enabled, guest_room_floor_count,
+                         assistant_work_template_mode, operational_feature_flags,
+                         evidence_instance_configuration)
                     values
                         (:hotelId, :tenantId, :id, :propertyCode, :city, :roomCount, :openingDate,
-                         :breakfastServiceEnabled, :guestRoomFloorCount)
+                         :breakfastServiceEnabled, :guestRoomFloorCount, :assistantWorkTemplateMode,
+                         jsonb_build_object(
+                           'breakfastArea', :breakfastServiceEnabled,
+                           'kitchen', :kitchenEnabled,
+                           'afternoonTea', :afternoonTeaEnabled,
+                           'bar', :barEnabled,
+                           'projection', :projectionEnabled,
+                           'gym', :gymEnabled,
+                           'terrace', :terraceEnabled,
+                           'trendyPlayArea', :trendyPlayAreaEnabled
+                         ), jsonb_build_object(
+                           'facilityInstances', cast(:facilityEvidenceInstances as jsonb),
+                           'assetInstances', cast(:assetEvidenceInstances as jsonb)
+                         ))
                     """, parameters.addValue("hotelId", UUID.randomUUID()));
+            reconcileHotelOperationalTemplates(principal, id, assistantMode);
         }
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("id", id);
@@ -156,6 +205,19 @@ public class OrganizationService {
         if ("HOTEL".equals(unitType) && isBlank(request.propertyCode())) {
             throw new IllegalArgumentException("门店必须保留门店编码");
         }
+        String assistantMode = request.assistantWorkTemplateMode() == null
+                ? null : assistantWorkTemplateMode(request.assistantWorkTemplateMode());
+        String facilityEvidenceInstances = request.facilityEvidenceInstances() == null
+                ? null : writeJson(normalizeEvidenceInstances(request.facilityEvidenceInstances(), "设施"));
+        String assetEvidenceInstances = request.assetEvidenceInstances() == null
+                ? null : writeJson(normalizeEvidenceInstances(request.assetEvidenceInstances(), "设备"));
+        String previousAssistantMode = "HOTEL".equals(unitType)
+                ? jdbc.queryForObject("""
+                        select assistant_work_template_mode
+                        from hotel_profile
+                        where tenant_id = :tenantId and org_unit_id = :id
+                        """, base(principal).addValue("id", orgUnitId), String.class)
+                : null;
         requireUniqueCode("org_unit", principal, orgUnitId, request.code(), "组织编码已存在");
         if ("ACTIVE".equals(status) && current.get("parent_id") != null) {
             Integer activeParent = jdbc.queryForObject("""
@@ -178,7 +240,17 @@ public class OrganizationService {
                 .addValue("openingDate", request.openingDate())
                 .addValue("breakfastServiceEnabled", Boolean.TRUE.equals(request.breakfastServiceEnabled()))
                 .addValue("guestRoomFloorCount", request.guestRoomFloorCount() == null
-                        ? 1 : request.guestRoomFloorCount());
+                        ? 1 : request.guestRoomFloorCount())
+                .addValue("assistantWorkTemplateMode", assistantMode)
+                .addValue("kitchenEnabled", request.kitchenEnabled())
+                .addValue("afternoonTeaEnabled", request.afternoonTeaEnabled())
+                .addValue("barEnabled", request.barEnabled())
+                .addValue("projectionEnabled", request.projectionEnabled())
+                .addValue("gymEnabled", request.gymEnabled())
+                .addValue("terraceEnabled", request.terraceEnabled())
+                .addValue("trendyPlayAreaEnabled", request.trendyPlayAreaEnabled())
+                .addValue("facilityEvidenceInstances", facilityEvidenceInstances)
+                .addValue("assetEvidenceInstances", assetEvidenceInstances);
         jdbc.update("""
                 update org_unit
                 set code = :code, name = :name, sort_order = :sortOrder, status = :status, updated_at = now()
@@ -191,9 +263,31 @@ public class OrganizationService {
                         opening_date = :openingDate,
                         breakfast_service_enabled = :breakfastServiceEnabled,
                         guest_room_floor_count = :guestRoomFloorCount,
+                        assistant_work_template_mode = coalesce(:assistantWorkTemplateMode, assistant_work_template_mode),
+                        operational_feature_flags = operational_feature_flags || jsonb_strip_nulls(jsonb_build_object(
+                          'breakfastArea', :breakfastServiceEnabled,
+                          'kitchen', :kitchenEnabled,
+                          'afternoonTea', :afternoonTeaEnabled,
+                          'bar', :barEnabled,
+                          'projection', :projectionEnabled,
+                          'gym', :gymEnabled,
+                          'terrace', :terraceEnabled,
+                          'trendyPlayArea', :trendyPlayAreaEnabled
+                        )),
+                        evidence_instance_configuration = jsonb_build_object(
+                          'facilityInstances', coalesce(
+                            cast(:facilityEvidenceInstances as jsonb),
+                            evidence_instance_configuration -> 'facilityInstances', '{}'::jsonb),
+                          'assetInstances', coalesce(
+                            cast(:assetEvidenceInstances as jsonb),
+                            evidence_instance_configuration -> 'assetInstances', '{}'::jsonb)
+                        ),
                         updated_at = now()
                     where tenant_id = :tenantId and org_unit_id = :id
                     """, parameters);
+            if (assistantMode != null && !assistantMode.equals(previousAssistantMode)) {
+                reconcileHotelOperationalTemplates(principal, orgUnitId, assistantMode);
+            }
         }
         if ("INACTIVE".equals(status)) {
             deactivateOrgTree(principal, orgUnitId);
@@ -202,6 +296,446 @@ public class OrganizationService {
                 "{\"status\":\"" + status + "\",\"code\":\"" + jsonEscape(request.code().trim()) + "\"}");
         return Map.of("id", orgUnitId, "code", request.code().trim(), "name", request.name().trim(),
                 "unitType", unitType, "status", status);
+    }
+
+    private static String assistantWorkTemplateMode(String value) {
+        String normalized = value == null || value.isBlank() ? null : value.trim().toUpperCase();
+        if (normalized == null) return "WITH_FRONT_OFFICE_SUPERVISOR";
+        if (!Set.of("WITH_FRONT_OFFICE_SUPERVISOR", "WITHOUT_FRONT_OFFICE_SUPERVISOR")
+                .contains(normalized)) {
+            throw new IllegalArgumentException("店助工作模板必须选择有前厅主管或无前厅主管");
+        }
+        return normalized;
+    }
+
+    private static Map<String, List<String>> defaultFacilityEvidenceInstances(Boolean gymEnabled) {
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        List<String> serviceFacilities = new java.util.ArrayList<>(List.of("百宝箱", "水吧台", "行李房"));
+        List<String> publicAreas = new java.util.ArrayList<>(List.of("大堂", "百宝箱", "水吧台", "行李房", "洗衣房"));
+        if (Boolean.TRUE.equals(gymEnabled)) {
+            serviceFacilities.add("健身房");
+            publicAreas.add("健身房");
+        }
+        result.put("serviceFacilityIds", List.copyOf(serviceFacilities));
+        result.put("publicAreaFacilityIds", List.copyOf(publicAreas));
+        result.put("eveningPublicAreaFacilityIds", List.of("门头灯光", "前厅大堂", "洗衣房", "楼层过道及电梯间"));
+        return result;
+    }
+
+    private static Map<String, List<String>> defaultAssetEvidenceInstances(Boolean breakfastServiceEnabled) {
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        result.put("warmingEquipmentIds", Boolean.TRUE.equals(breakfastServiceEnabled)
+                ? List.of("保温设备") : List.of());
+        result.put("equipmentAssetIds", List.of("空气能机组"));
+        return result;
+    }
+
+    private static Map<String, List<String>> normalizeEvidenceInstances(
+            Map<String, List<String>> configured,
+            String label
+    ) {
+        Map<String, List<String>> normalized = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> entry : configured.entrySet()) {
+            String field = entry.getKey() == null ? "" : entry.getKey().trim();
+            if (!field.matches("[A-Za-z][A-Za-z0-9]{0,63}")) {
+                throw new IllegalArgumentException(label + "证据清单字段格式不正确");
+            }
+            List<String> values = entry.getValue() == null ? List.of() : entry.getValue();
+            if (values.size() > 100) {
+                throw new IllegalArgumentException(label + "证据清单每组最多100项");
+            }
+            Set<String> distinct = new LinkedHashSet<>();
+            List<String> items = new java.util.ArrayList<>(values.size());
+            for (String value : values) {
+                String item = value == null ? "" : value.trim();
+                if (item.isBlank() || item.length() > 120) {
+                    throw new IllegalArgumentException(label + "名称不能为空且最多120个字符");
+                }
+                if (!distinct.add(item.toUpperCase(java.util.Locale.ROOT))) {
+                    throw new IllegalArgumentException(label + "名称不能重复：" + item);
+                }
+                items.add(item);
+            }
+            normalized.put(field, List.copyOf(items));
+        }
+        return Map.copyOf(normalized);
+    }
+
+    private String writeJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalArgumentException("门店证据清单无法序列化", exception);
+        }
+    }
+
+    /**
+     * Keeps the release-owned store-assistant/front-office work packages and daily-report
+     * schedules aligned with the explicit hotel mode.  The switch becomes effective on
+     * the next database business date; today's expectations and reports remain immutable.
+     */
+    private void reconcileHotelOperationalTemplates(
+            TenantPrincipal principal,
+            UUID hotelOrgUnitId,
+            String assistantMode
+    ) {
+        LocalDate databaseToday = jdbc.queryForObject(
+                "select current_date", base(principal), LocalDate.class);
+        if (databaseToday == null) throw new IllegalStateException("无法读取数据库营业日期");
+        LocalDate effectiveDate = databaseToday.plusDays(1);
+        MapSqlParameterSource params = base(principal)
+                .addValue("hotelOrgUnitId", hotelOrgUnitId)
+                .addValue("assistantMode", assistantMode)
+                .addValue("today", databaseToday)
+                .addValue("effectiveDate", effectiveDate)
+                .addValue("actorId", principal.actorId());
+
+        jdbc.update("""
+                update work_package_allocation allocation
+                set status = case when allocation.valid_from > :today then 'REVOKED' else allocation.status end,
+                    valid_to = case when allocation.valid_from <= :today then :today else allocation.valid_to end,
+                    updated_at = now()
+                from work_package_version version
+                join work_package_definition definition
+                  on definition.tenant_id = version.tenant_id
+                 and definition.id = version.work_package_definition_id
+                , employee_position_assignment employee_assignment
+                where allocation.tenant_id = :tenantId
+                  and allocation.work_package_version_id = version.id
+                  and employee_assignment.tenant_id = allocation.tenant_id
+                  and employee_assignment.id = allocation.position_assignment_id
+                  and allocation.allocation_source = 'SYSTEM'
+                  and allocation.status = 'ACTIVE'
+                  and definition.code in ('WP-PILOT-AGM-DAILY','WP-PILOT-FO-SUPERVISOR-DAILY')
+                  and exists (
+                    select 1 from org_unit_closure scope
+                    where scope.tenant_id = allocation.tenant_id
+                      and scope.ancestor_id = :hotelOrgUnitId
+                      and scope.descendant_id = employee_assignment.org_unit_id
+                  )
+                """, params);
+
+        jdbc.update("""
+                insert into work_package_allocation
+                    (id,tenant_id,work_package_version_id,position_assignment_id,
+                     target_org_unit_id,allocation_source,valid_from,status,allocated_by)
+                select gen_random_uuid(), employee_assignment.tenant_id, selected_version.id,
+                       employee_assignment.id, :hotelOrgUnitId,
+                       'SYSTEM', :effectiveDate, 'ACTIVE', :actorId
+                from employee_position_assignment employee_assignment
+                join position_definition position
+                  on position.tenant_id = employee_assignment.tenant_id
+                 and position.id = employee_assignment.position_id
+                join employee
+                  on employee.tenant_id = employee_assignment.tenant_id
+                 and employee.id = employee_assignment.employee_id
+                join user_account account
+                  on account.tenant_id = employee.tenant_id and account.id = employee.account_id
+                join lateral (
+                    select version.id
+                    from work_package_definition definition
+                    join work_package_version version
+                      on version.tenant_id = definition.tenant_id
+                     and version.work_package_definition_id = definition.id
+                    where definition.tenant_id = employee_assignment.tenant_id
+                      and definition.code = case position.code
+                          when 'ASSISTANT_GENERAL_MANAGER' then 'WP-PILOT-AGM-DAILY'
+                          else 'WP-PILOT-FO-SUPERVISOR-DAILY' end
+                      and version.lifecycle_status = 'PUBLISHED'
+                      and version.effective_from::date <= :effectiveDate
+                      and (version.effective_to is null or version.effective_to::date >= :effectiveDate)
+                      and (
+                        position.code = 'FRONT_OFFICE_SUPERVISOR'
+                        or exists (
+                          select 1 from work_package_item item
+                          where item.tenant_id = version.tenant_id
+                            and item.work_package_version_id = version.id
+                            and item.applicability_policy ->> 'assistantWorkTemplateMode' = :assistantMode
+                        )
+                      )
+                    order by version.version_no desc
+                    limit 1
+                ) selected_version on true
+                where employee_assignment.tenant_id = :tenantId
+                  and position.code in ('ASSISTANT_GENERAL_MANAGER','FRONT_OFFICE_SUPERVISOR')
+                  and (position.code <> 'FRONT_OFFICE_SUPERVISOR'
+                       or :assistantMode = 'WITH_FRONT_OFFICE_SUPERVISOR')
+                  and employee_assignment.status = 'ACTIVE'
+                  and employee_assignment.valid_from <= :effectiveDate
+                  and (employee_assignment.valid_to is null or employee_assignment.valid_to >= :effectiveDate)
+                  and employee.employment_status = 'ACTIVE' and employee.deleted_at is null
+                  and account.status = 'ACTIVE'
+                  and exists (
+                    select 1 from org_unit_closure scope
+                    where scope.tenant_id = employee_assignment.tenant_id
+                      and scope.ancestor_id = :hotelOrgUnitId
+                      and scope.descendant_id = employee_assignment.org_unit_id
+                  )
+                on conflict (tenant_id,work_package_version_id,position_assignment_id,
+                             target_org_unit_id,valid_from)
+                do update set status = 'ACTIVE', valid_to = null,
+                              allocated_by = excluded.allocated_by, updated_at = now()
+                """, params);
+
+        jdbc.update("""
+                update daily_report_template_assignment template_assignment
+                set status = case when template_assignment.valid_from > :today then 'REVOKED'
+                                  else template_assignment.status end,
+                    valid_to = case when template_assignment.valid_from <= :today then :today
+                                    else template_assignment.valid_to end,
+                    row_version = template_assignment.row_version + 1,
+                    updated_at = now()
+                from daily_report_template_version version
+                join daily_report_template_definition definition
+                  on definition.tenant_id = version.tenant_id and definition.id = version.template_id
+                where template_assignment.tenant_id = :tenantId
+                  and template_assignment.template_version_id = version.id
+                  and template_assignment.assignment_kind = 'BASE'
+                  and template_assignment.scope_type = 'ORG_TREE'
+                  and template_assignment.org_unit_id = :hotelOrgUnitId
+                  and template_assignment.status = 'ACTIVE'
+                  and definition.code in (
+                    'DRT-PILOT-AGM-WITH-SUPERVISOR',
+                    'DRT-PILOT-AGM-WITHOUT-SUPERVISOR',
+                    'DRT-PILOT-FO-SUPERVISOR-DAILY'
+                  )
+                """, params);
+
+        jdbc.update("""
+                update daily_report_template_assignment template_assignment
+                set status = 'ACTIVE', valid_to = null, assigned_by = :actorId,
+                    row_version = template_assignment.row_version + 1, updated_at = now()
+                from daily_report_template_version version
+                join daily_report_template_definition definition
+                  on definition.tenant_id = version.tenant_id and definition.id = version.template_id
+                where template_assignment.tenant_id = :tenantId
+                  and template_assignment.template_version_id = version.id
+                  and template_assignment.assignment_kind = 'BASE'
+                  and template_assignment.scope_type = 'ORG_TREE'
+                  and template_assignment.org_unit_id = :hotelOrgUnitId
+                  and template_assignment.valid_from = :effectiveDate
+                  and (
+                    definition.code = case :assistantMode
+                      when 'WITH_FRONT_OFFICE_SUPERVISOR' then 'DRT-PILOT-AGM-WITH-SUPERVISOR'
+                      else 'DRT-PILOT-AGM-WITHOUT-SUPERVISOR' end
+                    or (definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY'
+                        and :assistantMode = 'WITH_FRONT_OFFICE_SUPERVISOR')
+                  )
+                """, params);
+
+        jdbc.update("""
+                insert into daily_report_template_assignment
+                    (id,tenant_id,template_version_id,assignment_kind,scope_type,
+                     org_unit_id,priority,valid_from,status,assigned_by)
+                select gen_random_uuid(), version.tenant_id, version.id, 'BASE', 'ORG_TREE',
+                       :hotelOrgUnitId, 900, :effectiveDate, 'ACTIVE', :actorId
+                from daily_report_template_version version
+                join daily_report_template_definition definition
+                  on definition.tenant_id = version.tenant_id and definition.id = version.template_id
+                where version.tenant_id = :tenantId
+                  and version.lifecycle_status = 'PUBLISHED'
+                  and version.effective_from::date <= :effectiveDate
+                  and (version.effective_to is null or version.effective_to::date >= :effectiveDate)
+                  and (
+                    definition.code = case :assistantMode
+                      when 'WITH_FRONT_OFFICE_SUPERVISOR' then 'DRT-PILOT-AGM-WITH-SUPERVISOR'
+                      else 'DRT-PILOT-AGM-WITHOUT-SUPERVISOR' end
+                    or (definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY'
+                        and :assistantMode = 'WITH_FRONT_OFFICE_SUPERVISOR')
+                  )
+                  and not exists (
+                    select 1 from daily_report_template_assignment existing
+                    where existing.tenant_id = version.tenant_id
+                      and existing.template_version_id = version.id
+                      and existing.assignment_kind = 'BASE'
+                      and existing.scope_type = 'ORG_TREE'
+                      and existing.org_unit_id = :hotelOrgUnitId
+                      and existing.valid_from = :effectiveDate
+                  )
+                  and version.version_no = (
+                    select max(candidate.version_no)
+                    from daily_report_template_version candidate
+                    where candidate.tenant_id = version.tenant_id
+                      and candidate.template_id = version.template_id
+                      and candidate.lifecycle_status = 'PUBLISHED'
+                      and candidate.effective_from::date <= :effectiveDate
+                      and (candidate.effective_to is null or candidate.effective_to::date >= :effectiveDate)
+                  )
+                """, params);
+
+        jdbc.update("""
+                insert into daily_report_delivery_policy
+                    (id,tenant_id,template_assignment_id,enabled,open_local_time,due_local_time,
+                     grace_minutes,pre_due_reminder_minutes,overdue_reminder_minutes,backfill_days,
+                     created_by,updated_by)
+                select gen_random_uuid(), template_assignment.tenant_id, template_assignment.id, true,
+                       case
+                         when definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY' then time '18:00'
+                         else time '19:00' end,
+                       case
+                         when definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY' then time '20:00'
+                         else time '21:30' end,
+                       0, array[15]::integer[], array[5,20]::integer[], 1,
+                       :actorId, :actorId
+                from daily_report_template_assignment template_assignment
+                join daily_report_template_version version
+                  on version.tenant_id = template_assignment.tenant_id
+                 and version.id = template_assignment.template_version_id
+                join daily_report_template_definition definition
+                  on definition.tenant_id = version.tenant_id and definition.id = version.template_id
+                where template_assignment.tenant_id = :tenantId
+                  and template_assignment.scope_type = 'ORG_TREE'
+                  and template_assignment.org_unit_id = :hotelOrgUnitId
+                  and template_assignment.valid_from = :effectiveDate
+                  and template_assignment.status = 'ACTIVE'
+                  and definition.code in (
+                    'DRT-PILOT-AGM-WITH-SUPERVISOR',
+                    'DRT-PILOT-AGM-WITHOUT-SUPERVISOR',
+                    'DRT-PILOT-FO-SUPERVISOR-DAILY'
+                  )
+                  and not exists (
+                    select 1 from daily_report_delivery_policy existing
+                    where existing.tenant_id = template_assignment.tenant_id
+                      and existing.template_assignment_id = template_assignment.id
+                  )
+                """, params);
+
+        auditWriter.record("HOTEL_OPERATIONAL_TEMPLATE_MODE_RECONCILED", "ORG_UNIT", hotelOrgUnitId,
+                "{\"assistantWorkTemplateMode\":\"" + assistantMode
+                        + "\",\"effectiveFrom\":\"" + effectiveDate + "\"}");
+    }
+
+    /**
+     * Reconciles the release-owned operational daily package for one assignment.
+     * Allocations start no earlier than the next business date, are always owned
+     * by the closest HOTEL ancestor, and select the store's explicit assistant
+     * mode/facility configuration.
+     */
+    private void reconcileOperationalDailyAllocation(TenantPrincipal principal, UUID assignmentId) {
+        LocalDate databaseToday = jdbc.queryForObject(
+                "select current_date", base(principal), LocalDate.class);
+        if (databaseToday == null) throw new IllegalStateException("无法读取数据库营业日期");
+        LocalDate effectiveDate = databaseToday.plusDays(1);
+        MapSqlParameterSource params = base(principal)
+                .addValue("assignmentId", assignmentId)
+                .addValue("today", databaseToday)
+                .addValue("effectiveDate", effectiveDate)
+                .addValue("actorId", principal.actorId());
+
+        jdbc.update("""
+                update work_package_allocation allocation
+                set status = case when allocation.valid_from > :today then 'REVOKED'
+                                  else allocation.status end,
+                    valid_to = case when allocation.valid_from <= :today then :today
+                                    else allocation.valid_to end,
+                    updated_at = now()
+                from work_package_version version
+                join work_package_definition definition
+                  on definition.tenant_id = version.tenant_id
+                 and definition.id = version.work_package_definition_id
+                where allocation.tenant_id = :tenantId
+                  and allocation.position_assignment_id = :assignmentId
+                  and allocation.work_package_version_id = version.id
+                  and allocation.allocation_source = 'SYSTEM'
+                  and allocation.status = 'ACTIVE'
+                  and definition.code in (
+                    'WP-PILOT-GM-DAILY','WP-PILOT-AGM-DAILY',
+                    'WP-PILOT-FO-SUPERVISOR-DAILY','WP-PILOT-SERVICE-STEWARD-DAILY',
+                    'WP-PILOT-FRONT-DAILY','WP-PILOT-HK-SUPERVISOR-DAILY',
+                    'WP-PILOT-HK-ATTENDANT-DAILY','WP-PILOT-NIGHT-ATTENDANT-DAILY',
+                    'WP-PILOT-BREAKFAST-LEAD-DAILY'
+                  )
+                  and (allocation.valid_to is null or allocation.valid_to >= :today)
+                """, params);
+
+        jdbc.update("""
+                insert into work_package_allocation
+                    (id,tenant_id,work_package_version_id,position_assignment_id,
+                     target_org_unit_id,allocation_source,valid_from,valid_to,status,allocated_by)
+                select gen_random_uuid(), assignment.tenant_id, selected_version.id, assignment.id,
+                       hotel_config.hotel_org_unit_id, 'SYSTEM',
+                       greatest(:effectiveDate, assignment.valid_from), assignment.valid_to,
+                       'ACTIVE', :actorId
+                from employee_position_assignment assignment
+                join position_definition position
+                  on position.tenant_id = assignment.tenant_id
+                 and position.id = assignment.position_id
+                join employee employee_row
+                  on employee_row.tenant_id = assignment.tenant_id
+                 and employee_row.id = assignment.employee_id
+                join user_account account
+                  on account.tenant_id = employee_row.tenant_id
+                 and account.id = employee_row.account_id
+                join lateral (
+                    select profile.org_unit_id as hotel_org_unit_id,
+                           profile.assistant_work_template_mode,
+                           coalesce(
+                             (profile.operational_feature_flags ->> 'breakfastArea')::boolean,
+                             profile.breakfast_service_enabled
+                           ) as breakfast_area_enabled
+                    from org_unit_closure scope
+                    join hotel_profile profile
+                      on profile.tenant_id = scope.tenant_id
+                     and profile.org_unit_id = scope.ancestor_id
+                    where scope.tenant_id = assignment.tenant_id
+                      and scope.descendant_id = assignment.org_unit_id
+                    order by scope.depth asc
+                    limit 1
+                ) hotel_config on true
+                join lateral (
+                    select version.id
+                    from work_package_definition definition
+                    join work_package_version version
+                      on version.tenant_id = definition.tenant_id
+                     and version.work_package_definition_id = definition.id
+                    where definition.tenant_id = assignment.tenant_id
+                      and definition.code = case position.code
+                        when 'GENERAL_MANAGER' then 'WP-PILOT-GM-DAILY'
+                        when 'ASSISTANT_GENERAL_MANAGER' then 'WP-PILOT-AGM-DAILY'
+                        when 'FRONT_OFFICE_SUPERVISOR' then 'WP-PILOT-FO-SUPERVISOR-DAILY'
+                        when 'SERVICE_STEWARD' then 'WP-PILOT-SERVICE-STEWARD-DAILY'
+                        when 'FRONT_DESK' then 'WP-PILOT-FRONT-DAILY'
+                        when 'HOUSEKEEPING_SUPERVISOR' then 'WP-PILOT-HK-SUPERVISOR-DAILY'
+                        when 'HOUSEKEEPING_ATTENDANT' then 'WP-PILOT-HK-ATTENDANT-DAILY'
+                        when 'NIGHT_SERVICE_ATTENDANT' then 'WP-PILOT-NIGHT-ATTENDANT-DAILY'
+                        when 'BREAKFAST_AREA_LEAD' then 'WP-PILOT-BREAKFAST-LEAD-DAILY'
+                        else null end
+                      and version.lifecycle_status = 'PUBLISHED'
+                      and version.effective_from is not null
+                      and version.effective_from::date <= greatest(:effectiveDate, assignment.valid_from)
+                      and (version.effective_to is null
+                           or version.effective_to::date >= greatest(:effectiveDate, assignment.valid_from))
+                      and (
+                        position.code <> 'ASSISTANT_GENERAL_MANAGER'
+                        or exists (
+                          select 1 from work_package_item item
+                          where item.tenant_id = version.tenant_id
+                            and item.work_package_version_id = version.id
+                            and item.applicability_policy ->> 'assistantWorkTemplateMode'
+                                = hotel_config.assistant_work_template_mode
+                        )
+                      )
+                    order by version.version_no desc
+                    limit 1
+                ) selected_version on true
+                where assignment.tenant_id = :tenantId
+                  and assignment.id = :assignmentId
+                  and assignment.status = 'ACTIVE'
+                  and position.status = 'ACTIVE'
+                  and position.deleted_at is null and position.permanently_deleted_at is null
+                  and employee_row.employment_status = 'ACTIVE' and employee_row.deleted_at is null
+                  and account.status = 'ACTIVE'
+                  and (assignment.valid_to is null
+                       or assignment.valid_to >= greatest(:effectiveDate, assignment.valid_from))
+                  and (position.code <> 'FRONT_OFFICE_SUPERVISOR'
+                       or hotel_config.assistant_work_template_mode = 'WITH_FRONT_OFFICE_SUPERVISOR')
+                  and (position.code <> 'BREAKFAST_AREA_LEAD'
+                       or hotel_config.breakfast_area_enabled)
+                on conflict (tenant_id,work_package_version_id,position_assignment_id,
+                             target_org_unit_id,valid_from)
+                do update set status = 'ACTIVE', valid_to = excluded.valid_to,
+                              allocated_by = excluded.allocated_by, updated_at = now()
+                """, params);
     }
 
     @Transactional
@@ -864,6 +1398,7 @@ public class OrganizationService {
                   and source_assignment_id = :assignmentId
                 """, parameters);
         replaceAssignmentHotelScope(principal, assignmentId, responsibleHotelIds);
+        reconcileOperationalDailyAllocation(principal, assignmentId);
         UUID effectivePrimaryId = ensurePrimaryAssignment(principal, current.employeeId(),
                 primary ? null : assignmentId);
         auditWriter.record("POSITION_ASSIGNMENT_UPDATED", "POSITION_ASSIGNMENT", assignmentId,
@@ -958,6 +1493,7 @@ public class OrganizationService {
                      :actorId, 'POSITION_ASSIGNMENT', :id)
                 """, parameters);
         replaceAssignmentHotelScope(principal, id, responsibleHotelIds);
+        reconcileOperationalDailyAllocation(principal, id);
         if (!primary) {
             ensurePrimaryAssignment(principal, employeeId, id);
         }
@@ -1101,6 +1637,16 @@ public class OrganizationService {
                 where tenant_id = :tenantId and source_type = 'POSITION_ASSIGNMENT'
                   and source_assignment_id = :assignmentId
                   and (valid_to is null or valid_to > now())
+                """, parameters);
+        jdbc.update("""
+                update work_package_allocation
+                set status = case when valid_from > current_date then 'REVOKED' else status end,
+                    valid_to = case when valid_from <= current_date then current_date else valid_to end,
+                    updated_at = now()
+                where tenant_id = :tenantId
+                  and position_assignment_id = :assignmentId
+                  and status = 'ACTIVE'
+                  and (valid_to is null or valid_to >= current_date)
                 """, parameters);
     }
 

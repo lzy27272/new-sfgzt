@@ -10,6 +10,7 @@ docs/uat/evidence/runtime/
 **/target/
 **/node_modules/
 **/dist/
+apps/core-api/var/
 apps/ota-standalone-web/*.tsbuildinfo
 **/.DS_Store
 *.log

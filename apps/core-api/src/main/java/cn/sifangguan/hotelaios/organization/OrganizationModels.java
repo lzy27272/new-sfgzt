@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotNull;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public final class OrganizationModels {
@@ -22,8 +23,28 @@ public final class OrganizationModels {
             Integer roomCount,
             LocalDate openingDate,
             Boolean breakfastServiceEnabled,
-            Integer guestRoomFloorCount
+            Integer guestRoomFloorCount,
+            String assistantWorkTemplateMode,
+            Boolean kitchenEnabled,
+            Boolean afternoonTeaEnabled,
+            Boolean barEnabled,
+            Boolean projectionEnabled,
+            Boolean gymEnabled,
+            Boolean terraceEnabled,
+            Boolean trendyPlayAreaEnabled,
+            Map<String, List<String>> facilityEvidenceInstances,
+            Map<String, List<String>> assetEvidenceInstances
     ) {
+        public CreateOrgUnit(
+                UUID parentId, String code, String name, String unitType, Integer sortOrder,
+                String propertyCode, String city, Integer roomCount, LocalDate openingDate,
+                Boolean breakfastServiceEnabled, Integer guestRoomFloorCount
+        ) {
+            this(parentId, code, name, unitType, sortOrder, propertyCode, city, roomCount,
+                    openingDate, breakfastServiceEnabled, guestRoomFloorCount, null,
+                    null, null, null, null, null, null, null, null, null);
+        }
+
         public CreateOrgUnit(
                 UUID parentId, String code, String name, String unitType, Integer sortOrder,
                 String propertyCode, String city, Integer roomCount, LocalDate openingDate
@@ -43,8 +64,28 @@ public final class OrganizationModels {
             Integer roomCount,
             LocalDate openingDate,
             Boolean breakfastServiceEnabled,
-            Integer guestRoomFloorCount
+            Integer guestRoomFloorCount,
+            String assistantWorkTemplateMode,
+            Boolean kitchenEnabled,
+            Boolean afternoonTeaEnabled,
+            Boolean barEnabled,
+            Boolean projectionEnabled,
+            Boolean gymEnabled,
+            Boolean terraceEnabled,
+            Boolean trendyPlayAreaEnabled,
+            Map<String, List<String>> facilityEvidenceInstances,
+            Map<String, List<String>> assetEvidenceInstances
     ) {
+        public UpdateOrgUnit(
+                String code, String name, Integer sortOrder, String status,
+                String propertyCode, String city, Integer roomCount, LocalDate openingDate,
+                Boolean breakfastServiceEnabled, Integer guestRoomFloorCount
+        ) {
+            this(code, name, sortOrder, status, propertyCode, city, roomCount,
+                    openingDate, breakfastServiceEnabled, guestRoomFloorCount, null,
+                    null, null, null, null, null, null, null, null, null);
+        }
+
         public UpdateOrgUnit(
                 String code, String name, Integer sortOrder, String status,
                 String propertyCode, String city, Integer roomCount, LocalDate openingDate

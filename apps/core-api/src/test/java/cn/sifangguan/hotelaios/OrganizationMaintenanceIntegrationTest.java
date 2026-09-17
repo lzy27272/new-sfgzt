@@ -18,6 +18,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.time.LocalDate;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -291,6 +292,197 @@ class OrganizationMaintenanceIntegrationTest {
         putJson("/api/v1/org/units/" + HOTEL, FRONT_DESK, """
                 {"code":"HZ-CENTER","name":"不应修改","sortOrder":1,"status":"ACTIVE","propertyCode":"HZ001"}
                 """, 403);
+    }
+
+    @Test
+    void changingAssistantTemplateModeReconcilesNextDayWorkAndReportAssignments() throws Exception {
+        Map<String, Object> hotel = jdbc.queryForMap("""
+                select org.code, org.name, org.sort_order, profile.property_code, profile.city,
+                       profile.room_count, profile.opening_date, profile.breakfast_service_enabled,
+                       profile.guest_room_floor_count, profile.assistant_work_template_mode,
+                       coalesce((profile.operational_feature_flags ->> 'kitchen')::boolean,false) kitchen,
+                       coalesce((profile.operational_feature_flags ->> 'afternoonTea')::boolean,false) afternoon_tea,
+                       coalesce((profile.operational_feature_flags ->> 'bar')::boolean,false) bar,
+                       coalesce((profile.operational_feature_flags ->> 'projection')::boolean,false) projection,
+                       coalesce((profile.operational_feature_flags ->> 'gym')::boolean,false) gym,
+                       coalesce((profile.operational_feature_flags ->> 'terrace')::boolean,false) terrace,
+                       coalesce((profile.operational_feature_flags ->> 'trendyPlayArea')::boolean,false) trendy_play_area
+                from org_unit org
+                join hotel_profile profile on profile.tenant_id=org.tenant_id and profile.org_unit_id=org.id
+                where org.id=?
+                """, UUID.fromString(HOTEL));
+        String currentMode = String.valueOf(hotel.get("assistant_work_template_mode"));
+        String targetMode = "WITH_FRONT_OFFICE_SUPERVISOR".equals(currentMode)
+                ? "WITHOUT_FRONT_OFFICE_SUPERVISOR" : "WITH_FRONT_OFFICE_SUPERVISOR";
+        var body = objectMapper.createObjectNode();
+        body.put("code", String.valueOf(hotel.get("code")));
+        body.put("name", String.valueOf(hotel.get("name")));
+        body.put("sortOrder", ((Number) hotel.get("sort_order")).intValue());
+        body.put("status", "ACTIVE");
+        body.put("propertyCode", String.valueOf(hotel.get("property_code")));
+        if (hotel.get("city") != null) body.put("city", String.valueOf(hotel.get("city")));
+        if (hotel.get("room_count") != null) body.put("roomCount", ((Number) hotel.get("room_count")).intValue());
+        if (hotel.get("opening_date") != null) body.put("openingDate", hotel.get("opening_date").toString());
+        body.put("breakfastServiceEnabled", Boolean.TRUE.equals(hotel.get("breakfast_service_enabled")));
+        body.put("guestRoomFloorCount", ((Number) hotel.get("guest_room_floor_count")).intValue());
+        body.put("assistantWorkTemplateMode", targetMode);
+        body.put("kitchenEnabled", Boolean.TRUE.equals(hotel.get("kitchen")));
+        body.put("afternoonTeaEnabled", Boolean.TRUE.equals(hotel.get("afternoon_tea")));
+        body.put("barEnabled", Boolean.TRUE.equals(hotel.get("bar")));
+        body.put("projectionEnabled", Boolean.TRUE.equals(hotel.get("projection")));
+        body.put("gymEnabled", Boolean.TRUE.equals(hotel.get("gym")));
+        body.put("terraceEnabled", Boolean.TRUE.equals(hotel.get("terrace")));
+        body.put("trendyPlayAreaEnabled", Boolean.TRUE.equals(hotel.get("trendy_play_area")));
+
+        putJson("/api/v1/org/units/" + HOTEL, CEO, body.toString(), 200);
+
+        assertThat(jdbc.queryForObject(
+                "select assistant_work_template_mode from hotel_profile where org_unit_id=?",
+                String.class, UUID.fromString(HOTEL))).isEqualTo(targetMode);
+        assertThat(jdbc.queryForObject("""
+                select count(distinct allocation.id)
+                from work_package_allocation allocation
+                join work_package_version version on version.tenant_id=allocation.tenant_id
+                    and version.id=allocation.work_package_version_id
+                join work_package_item item on item.tenant_id=version.tenant_id
+                    and item.work_package_version_id=version.id
+                join employee_position_assignment employee_assignment
+                    on employee_assignment.tenant_id=allocation.tenant_id
+                    and employee_assignment.id=allocation.position_assignment_id
+                join position_definition position on position.tenant_id=employee_assignment.tenant_id
+                    and position.id=employee_assignment.position_id
+                where allocation.status='ACTIVE' and allocation.valid_from=current_date+1
+                  and allocation.target_org_unit_id=?
+                  and position.code='ASSISTANT_GENERAL_MANAGER'
+                  and item.applicability_policy ->> 'assistantWorkTemplateMode'=?
+                  and exists (select 1 from org_unit_closure scope
+                    where scope.tenant_id=allocation.tenant_id and scope.ancestor_id=?
+                      and scope.descendant_id=employee_assignment.org_unit_id)
+                """, Integer.class, UUID.fromString(HOTEL), targetMode,
+                UUID.fromString(HOTEL))).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                select count(*)
+                from daily_report_template_assignment template_assignment
+                join daily_report_template_version version on version.tenant_id=template_assignment.tenant_id
+                    and version.id=template_assignment.template_version_id
+                join daily_report_template_definition definition on definition.tenant_id=version.tenant_id
+                    and definition.id=version.template_id
+                where template_assignment.status='ACTIVE'
+                  and template_assignment.scope_type='ORG_TREE'
+                  and template_assignment.org_unit_id=? and template_assignment.valid_from=current_date+1
+                  and definition.code like 'DRT-PILOT-AGM-%'
+                  and definition.code like case when ?='WITH_FRONT_OFFICE_SUPERVISOR'
+                      then '%WITH-SUPERVISOR' else '%WITHOUT-SUPERVISOR' end
+                """, Integer.class, UUID.fromString(HOTEL), targetMode)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                select count(*)
+                from daily_report_template_assignment template_assignment
+                join daily_report_template_version version on version.tenant_id=template_assignment.tenant_id
+                    and version.id=template_assignment.template_version_id
+                join daily_report_template_definition definition on definition.tenant_id=version.tenant_id
+                    and definition.id=version.template_id
+                where template_assignment.status='ACTIVE'
+                  and template_assignment.scope_type='POSITION'
+                  and template_assignment.valid_from=current_date+1
+                  and definition.code='DRT-PILOT-GM-DAILY'
+                """, Integer.class)).isEqualTo(1);
+        int activeFrontOfficeReports = jdbc.queryForObject("""
+                select count(*)
+                from daily_report_template_assignment template_assignment
+                join daily_report_template_version version on version.tenant_id=template_assignment.tenant_id
+                    and version.id=template_assignment.template_version_id
+                join daily_report_template_definition definition on definition.tenant_id=version.tenant_id
+                    and definition.id=version.template_id
+                where template_assignment.status='ACTIVE' and template_assignment.org_unit_id=?
+                  and template_assignment.valid_from=current_date+1
+                  and definition.code='DRT-PILOT-FO-SUPERVISOR-DAILY'
+                """, Integer.class, UUID.fromString(HOTEL));
+        assertThat(activeFrontOfficeReports).isEqualTo(
+                "WITH_FRONT_OFFICE_SUPERVISOR".equals(targetMode) ? 1 : 0);
+    }
+
+    @Test
+    void operationalAssignmentPublishesProfileAndMaintainsOneHotelAllocationAcrossTransfer() throws Exception {
+        assertThat(jdbc.queryForObject("""
+                select count(distinct position.code)
+                from position_definition position
+                join position_function_profile profile
+                  on profile.tenant_id=position.tenant_id and profile.position_id=position.id
+                 and profile.scope_type='GROUP'
+                join position_function_profile_version published
+                  on published.tenant_id=profile.tenant_id and published.profile_id=profile.id
+                 and published.lifecycle_status='PUBLISHED'
+                where position.tenant_id=?
+                  and position.code in ('SERVICE_STEWARD','NIGHT_SERVICE_ATTENDANT','BREAKFAST_AREA_LEAD')
+                  and exists (select 1 from position_function_profile_permission grant_item
+                    where grant_item.tenant_id=published.tenant_id
+                      and grant_item.profile_version_id=published.id)
+                """, Integer.class, UUID.fromString(TENANT))).isEqualTo(3);
+
+        UUID serviceStewardPosition = jdbc.queryForObject("""
+                select id from position_definition where tenant_id=? and code='SERVICE_STEWARD'
+                """, UUID.class, UUID.fromString(TENANT));
+        UUID nightAttendantPosition = jdbc.queryForObject("""
+                select id from position_definition where tenant_id=? and code='NIGHT_SERVICE_ATTENDANT'
+                """, UUID.class, UUID.fromString(TENANT));
+        String suffix = UUID.randomUUID().toString().substring(0, 8).toLowerCase();
+        UUID employeeId = UUID.fromString(json(postJson("/api/v1/org/employees", CEO, """
+                {"employeeNo":"OP-AUTO-%s","name":"日清自动分配测试员工","hiredOn":"%s",
+                 "loginName":"op.auto.%s","temporaryPassword":"TempPass!2026"}
+                """.formatted(suffix.toUpperCase(), LocalDate.now(), suffix))).path("id").asText());
+
+        UUID assignmentId = UUID.fromString(json(postJson(
+                "/api/v1/org/employees/" + employeeId + "/assignments", CEO, """
+                {"orgUnitId":"%s","positionId":"%s","primary":true,
+                 "assignmentType":"PERMANENT","validFrom":"%s"}
+                """.formatted(FRONT_OFFICE, serviceStewardPosition, LocalDate.now())))
+                .path("id").asText());
+        assertOneActiveOperationalAllocation(assignmentId, "WP-PILOT-SERVICE-STEWARD-DAILY");
+
+        putJson("/api/v1/org/assignments/" + assignmentId, CEO, """
+                {"orgUnitId":"%s","positionId":"%s","primary":true,
+                 "assignmentType":"PERMANENT","validFrom":"%s","validTo":null,
+                 "responsibleHotelIds":[]}
+                """.formatted(FRONT_OFFICE, serviceStewardPosition, LocalDate.now()), 200);
+        assertOneActiveOperationalAllocation(assignmentId, "WP-PILOT-SERVICE-STEWARD-DAILY");
+
+        JsonNode replacement = json(putJson("/api/v1/org/assignments/" + assignmentId, CEO, """
+                {"orgUnitId":"%s","positionId":"%s","primary":true,
+                 "assignmentType":"PERMANENT","validFrom":"%s","validTo":null,
+                 "responsibleHotelIds":[]}
+                """.formatted(FRONT_OFFICE, nightAttendantPosition, LocalDate.now()), 200));
+        UUID replacementId = UUID.fromString(replacement.path("replacementAssignmentId").asText());
+        assertThat(activeOperationalAllocationCount(assignmentId)).isZero();
+        assertOneActiveOperationalAllocation(replacementId, "WP-PILOT-NIGHT-ATTENDANT-DAILY");
+
+        deleteJson("/api/v1/org/assignments/" + replacementId, CEO, 204);
+        assertThat(activeOperationalAllocationCount(replacementId)).isZero();
+    }
+
+    private void assertOneActiveOperationalAllocation(UUID assignmentId, String definitionCode) {
+        assertThat(jdbc.queryForObject("""
+                select count(*)
+                from work_package_allocation allocation
+                join work_package_version version
+                  on version.tenant_id=allocation.tenant_id
+                 and version.id=allocation.work_package_version_id
+                join work_package_definition definition
+                  on definition.tenant_id=version.tenant_id
+                 and definition.id=version.work_package_definition_id
+                where allocation.position_assignment_id=?
+                  and allocation.target_org_unit_id=?
+                  and allocation.status='ACTIVE'
+                  and allocation.valid_from=current_date+1
+                  and definition.code=?
+                """, Integer.class, assignmentId, UUID.fromString(HOTEL), definitionCode)).isEqualTo(1);
+    }
+
+    private int activeOperationalAllocationCount(UUID assignmentId) {
+        return jdbc.queryForObject("""
+                select count(*) from work_package_allocation
+                where position_assignment_id=? and status='ACTIVE'
+                  and (valid_to is null or valid_to>=current_date)
+                """, Integer.class, assignmentId);
     }
 
     private MvcResult postJson(String path, String actorId, String body) throws Exception {

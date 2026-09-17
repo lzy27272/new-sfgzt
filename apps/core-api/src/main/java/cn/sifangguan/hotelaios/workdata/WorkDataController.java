@@ -127,6 +127,15 @@ public class WorkDataController {
         return attachmentService.list(recordId);
     }
 
+    @PostMapping("/records/{recordId}/attachments/{attachmentId}/ai-review")
+    public Map<String, Object> reviewAttachmentAi(
+            @PathVariable UUID recordId,
+            @PathVariable UUID attachmentId,
+            @Valid @RequestBody WorkDataModels.ReviewAttachmentAi request
+    ) {
+        return attachmentService.reviewAiProcessing(recordId, attachmentId, request);
+    }
+
     @GetMapping("/attachments/{attachmentId}/content")
     public ResponseEntity<org.springframework.core.io.Resource> attachmentContent(@PathVariable UUID attachmentId) {
         AttachmentService.Download download = attachmentService.download(attachmentId);

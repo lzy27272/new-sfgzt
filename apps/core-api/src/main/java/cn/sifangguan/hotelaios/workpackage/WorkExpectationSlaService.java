@@ -231,6 +231,8 @@ public class WorkExpectationSlaService {
             } else {
                 addMoment(moments, policy, "preOpenMinutes", "PRE_OPEN",
                         source.availableAt(), true, source.executorAccountId(), source.assignmentId());
+                addMoment(moments, policy, "afterOpenMinutes", "AFTER_OPEN",
+                        source.availableAt(), false, source.executorAccountId(), source.assignmentId());
                 addMoment(moments, policy, "dueSoonMinutes", "DUE_SOON",
                         source.dueAt(), true, source.executorAccountId(), source.assignmentId());
                 addMoment(moments, policy, "overdueMinutes", "OVERDUE",
@@ -297,7 +299,6 @@ public class WorkExpectationSlaService {
                   on item.tenant_id = expectation.tenant_id and item.id = expectation.work_package_item_id
                 join employee_position_assignment assignment
                   on assignment.tenant_id = expectation.tenant_id
-                 and assignment.org_unit_id = expectation.target_org_unit_id
                  and assignment.status = 'ACTIVE'
                  and assignment.valid_from <= expectation.business_date
                  and (assignment.valid_to is null or assignment.valid_to >= expectation.business_date)
@@ -306,6 +307,13 @@ public class WorkExpectationSlaService {
                 join employee on employee.tenant_id = assignment.tenant_id
                              and employee.id = assignment.employee_id
                 where expectation.tenant_id = :tenantId and expectation.id = :expectationId
+                  and exists (
+                    select 1
+                    from org_unit_closure executor_scope
+                    where executor_scope.tenant_id = expectation.tenant_id
+                      and executor_scope.ancestor_id = expectation.target_org_unit_id
+                      and executor_scope.descendant_id = assignment.org_unit_id
+                  )
                   and employee.account_id is not null
                   and (assignment.id = expectation.position_assignment_id
                        or jsonb_exists(coalesce(item.execution_policy -> 'allowedPositionCodes', '[]'::jsonb), position.code))
@@ -327,16 +335,28 @@ public class WorkExpectationSlaService {
             UUID accountId,
             UUID assignmentId
     ) {
-        if (accountId == null || !policy.has(property) || !policy.path(property).canConvertToInt()) {
+        if (accountId == null) {
             return;
         }
+        OffsetDateTime scheduledAt = relativeReminderTime(policy, property, anchor, before);
+        if (scheduledAt == null) return;
+        moments.add(new ReminderMoment(stage, stage,
+                scheduledAt,
+                accountId, assignmentId));
+    }
+
+    static OffsetDateTime relativeReminderTime(
+            JsonNode policy,
+            String property,
+            OffsetDateTime anchor,
+            boolean before
+    ) {
+        if (!policy.has(property) || !policy.path(property).canConvertToInt()) return null;
         int minutes = policy.path(property).asInt();
         if (minutes < 0 || minutes > 7 * 24 * 60) {
             throw new IllegalArgumentException("提醒分钟数超出允许范围: " + property);
         }
-        moments.add(new ReminderMoment(stage, stage,
-                before ? anchor.minusMinutes(minutes) : anchor.plusMinutes(minutes),
-                accountId, assignmentId));
+        return before ? anchor.minusMinutes(minutes) : anchor.plusMinutes(minutes);
     }
 
     private static ZoneId reminderZone(ReminderSource source) {
@@ -352,6 +372,10 @@ public class WorkExpectationSlaService {
         }
         if ("DUE_SOON".equals(stage)) {
             return Set.of("PLANNED", "AVAILABLE", "IN_PROGRESS").contains(source.status())
+                    && processingTime.isBefore(source.dueAt());
+        }
+        if ("AFTER_OPEN".equals(stage)) {
+            return Set.of("AVAILABLE", "IN_PROGRESS").contains(source.status())
                     && processingTime.isBefore(source.dueAt());
         }
         if (Set.of("REMINDER", "PROGRESS").contains(stage)) {
