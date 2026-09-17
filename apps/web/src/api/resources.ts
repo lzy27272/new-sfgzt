@@ -1,5 +1,6 @@
 import { apiBlob, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
 import { dashboardApiPaths } from '../app/dashboardContract'
+import { materializeFileForUpload, readableUploadError } from '../app/uploadFiles'
 import type {
   AccessibleHotels,
   ApiSource,
@@ -536,19 +537,24 @@ export async function uploadWorkRecordAttachment(
   file: File,
   metadata: { captureSource?: 'CAMERA' | 'FILE_PICKER'; checkpointCode?: string; evidenceInstanceKey?: string; capturedAtClient?: string } = {},
 ) {
+  const uploadFile = await materializeFileForUpload(file)
   const form = new FormData()
-  form.append('file', file, file.name)
+  form.append('file', uploadFile, uploadFile.name)
   const query = new URLSearchParams()
   if (metadata.captureSource) query.set('captureSource', metadata.captureSource)
   if (metadata.checkpointCode) query.set('checkpointCode', metadata.checkpointCode)
   if (metadata.evidenceInstanceKey) query.set('evidenceInstanceKey', metadata.evidenceInstanceKey)
   if (metadata.capturedAtClient) query.set('capturedAtClient', metadata.capturedAtClient)
   const suffix = query.size ? `?${query.toString()}` : ''
-  return apiRequest(`/work-data/records/${recordId}/attachments/upload${suffix}`, identity, {
-    method: 'POST',
-    headers: { 'Idempotency-Key': crypto.randomUUID() },
-    body: form,
-  })
+  try {
+    return await apiRequest(`/work-data/records/${recordId}/attachments/upload${suffix}`, identity, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+      body: form,
+    })
+  } catch (reason) {
+    throw readableUploadError(reason, file.name)
+  }
 }
 
 export async function deleteWorkRecordAttachment(identity: ApiIdentity, recordId: string, attachmentId: string) {
@@ -763,11 +769,16 @@ export async function createManagementTask(identity: ApiIdentity, input: Record<
 }
 
 export async function uploadTaskEvidence(identity: ApiIdentity, taskId: string, assignmentId: string, file: File) {
+  const uploadFile = await materializeFileForUpload(file)
   const form = new FormData()
-  form.append('file', file, file.name)
-  return apiRequest(`/tasks/${taskId}/evidence/upload?submittedByAssignmentId=${encodeURIComponent(assignmentId)}`, identity, {
-    method: 'POST', body: form,
-  })
+  form.append('file', uploadFile, uploadFile.name)
+  try {
+    return await apiRequest(`/tasks/${taskId}/evidence/upload?submittedByAssignmentId=${encodeURIComponent(assignmentId)}`, identity, {
+      method: 'POST', body: form,
+    })
+  } catch (reason) {
+    throw readableUploadError(reason, file.name)
+  }
 }
 
 export async function deleteTaskEvidence(identity: ApiIdentity, taskId: string, evidenceId: string, assignmentId: string) {
