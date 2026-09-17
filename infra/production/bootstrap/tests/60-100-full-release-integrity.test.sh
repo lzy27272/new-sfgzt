@@ -112,6 +112,30 @@ ok 'final audit safely derives FULL identity from the root-owned sentinel'
 )
 ok 'FULL marker size accepts the 1024-byte boundary and rejects 1025 bytes'
 
+mkdir -p "${fixture_root}/backups/daily"
+printf '%s' legacy >"${fixture_root}/backups/hotel_ai_os-auto-20260916T010000+0800.dump.enc"
+printf '%s' retained >"${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
+touch -t 202609160100 "${fixture_root}/backups/hotel_ai_os-auto-20260916T010000+0800.dump.enc"
+touch -t 202609170100 "${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
+latest_backup="$({
+  trap - EXIT
+  # shellcheck source=../100-final-audit.sh
+  source "${final_audit}"
+  select_latest_local_backup "${fixture_root}/backups"
+})"
+test "${latest_backup}" = \
+  "${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
+rm "${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
+latest_backup="$({
+  trap - EXIT
+  # shellcheck source=../100-final-audit.sh
+  source "${final_audit}"
+  select_latest_local_backup "${fixture_root}/backups"
+})"
+test "${latest_backup}" = \
+  "${fixture_root}/backups/hotel_ai_os-auto-20260916T010000+0800.dump.enc"
+ok 'final audit selects the newest retained backup with legacy fallback'
+
 mkdir -p "${fixture_root}/web/assets"
 printf '%s' '<!doctype html>' >"${fixture_root}/web/index.html"
 printf '%s' 'console.log("ok")' >"${fixture_root}/web/assets/app.js"

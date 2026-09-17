@@ -250,6 +250,30 @@ verify_served_index_sha256() {
   }
 }
 
+select_latest_local_backup() {
+  local backup_root="${1:?Backup root is required}"
+  local latest_line
+
+  # Current hosts store retained backups in the daily tier. Keep the legacy
+  # root-level pattern during the transition so an older, otherwise healthy
+  # installation can still pass the complete-release audit.
+  latest_line="$({
+    if test -d "${backup_root}/daily"; then
+      find "${backup_root}/daily" \
+        -maxdepth 1 -type f -name 'hotel_ai_os-daily-*.dump.enc' \
+        -printf '%T@ %p\n'
+    fi
+    find "${backup_root}" \
+      -maxdepth 1 -type f -name 'hotel_ai_os-auto-*.dump.enc' \
+      -printf '%T@ %p\n'
+  } | sort -nr | sed -n '1p')"
+  test -n "${latest_line}" || {
+    fail "No encrypted PostgreSQL backup exists below ${backup_root}."
+    return 1
+  }
+  printf '%s\n' "${latest_line#* }"
+}
+
 verify_full_release_integrity() {
   local verified_commit="${1:?Verified source commit is required}"
   local verified_release_id="${2:?Verified release id is required}"
@@ -383,9 +407,7 @@ main() {
     hotel-ai-os-health-check.timer \
     --no-pager
 
-  latest_backup="$(find /var/backups/hotel-ai-os/postgres \
-    -maxdepth 1 -type f -name 'hotel_ai_os-auto-*.dump.enc' \
-    -printf '%T@ %p\n' | sort -nr | sed -n '1{s/^[^ ]* //;p;}')"
+  latest_backup="$(select_latest_local_backup /var/backups/hotel-ai-os/postgres)"
   sha256sum --check "${latest_backup}.sha256"
   stat -c '%U:%G:%a:%s:%n' "${latest_backup}" "${latest_backup}.sha256"
 
