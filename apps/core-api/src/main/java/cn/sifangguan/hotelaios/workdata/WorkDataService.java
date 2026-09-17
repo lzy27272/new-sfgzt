@@ -366,7 +366,7 @@ public class WorkDataService {
     public Map<String, Object> review(UUID recordId, WorkDataModels.ReviewRecord request) {
         TenantPrincipal principal = prepare();
         accessPolicy.requirePermission("work-record.review");
-        RecordAccess record = recordAccess(principal, recordId);
+        RecordAccess record = recordAccessForUpdate(principal, recordId);
         accessPolicy.requireOrgScope(record.targetOrgUnitId());
         if (!"SUBMITTED".equals(record.status())) {
             throw new IllegalArgumentException("只有已提交工作记录可以复核");
@@ -422,7 +422,7 @@ public class WorkDataService {
     public Map<String, Object> addAttachment(UUID workRecordId, WorkDataModels.AddAttachment request) {
         TenantPrincipal principal = prepare();
         accessPolicy.requirePermission("work-record.submit");
-        RecordAccess record = recordAccess(principal, workRecordId);
+        RecordAccess record = recordAccessForUpdate(principal, workRecordId);
         authorizeRecordMutation(principal, record);
         if (Set.of("APPROVED", "REJECTED").contains(record.status())) {
             throw new IllegalArgumentException("已完成复核的工作记录不能追加附件");
@@ -937,12 +937,20 @@ public class WorkDataService {
     }
 
     private RecordAccess recordAccess(TenantPrincipal principal, UUID recordId) {
+        return recordAccess(principal, recordId, false);
+    }
+
+    private RecordAccess recordAccessForUpdate(TenantPrincipal principal, UUID recordId) {
+        return recordAccess(principal, recordId, true);
+    }
+
+    private RecordAccess recordAccess(TenantPrincipal principal, UUID recordId, boolean forUpdate) {
         return jdbc.queryForObject("""
                 select status, target_org_unit_id, position_assignment_id, form_version_id,
                        work_package_item_id, work_expectation_id, submitted_by_account_id,
                        business_date, occurred_at, payload::text
                 from work_record where tenant_id = :tenantId and id = :recordId
-                """, base(principal).addValue("recordId", recordId),
+                """ + (forUpdate ? " for update" : ""), base(principal).addValue("recordId", recordId),
                 (rs, rowNum) -> new RecordAccess(
                         rs.getString("status"),
                         rs.getObject("target_org_unit_id", UUID.class),

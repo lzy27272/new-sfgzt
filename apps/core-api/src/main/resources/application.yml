@@ -69,6 +69,11 @@ app:
       account-id-claim: ${JWT_ACCOUNT_ID_CLAIM:account_id}
   database:
     rls-enabled: ${DB_RLS_ENABLED:true}
+  data-retention:
+    # Dual control: tenant policy is stored in PostgreSQL, while a future
+    # destructive worker must also be explicitly enabled at deployment time.
+    # No deletion worker is registered in this release.
+    cleanup-worker-enabled: ${DATA_RETENTION_CLEANUP_WORKER_ENABLED:false}
   work-expectation:
     sla:
       scheduler-enabled: ${WORK_EXPECTATION_SLA_SCHEDULER_ENABLED:false}

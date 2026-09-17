@@ -93,7 +93,7 @@ public class AttachmentService {
     ) {
         TenantPrincipal principal = prepare();
         accessPolicy.requirePermission("work-record.submit");
-        RecordTarget record = recordTarget(principal, workRecordId);
+        RecordTarget record = recordTargetForUpdate(principal, workRecordId);
         requireOwnerOrDelegatedSubmit(principal, record);
         if (Set.of("APPROVED", "REJECTED").contains(record.status())) {
             throw new IllegalArgumentException("已完成复核的工作记录不能追加附件");
@@ -377,7 +377,7 @@ public class AttachmentService {
     public void delete(UUID workRecordId, UUID attachmentId) {
         TenantPrincipal principal = prepare();
         accessPolicy.requirePermission("work-record.submit");
-        RecordTarget record = recordTarget(principal, workRecordId);
+        RecordTarget record = recordTargetForUpdate(principal, workRecordId);
         requireOwnerOrDelegatedSubmit(principal, record);
         if (Set.of("APPROVED", "REJECTED").contains(record.status())) {
             throw new IllegalArgumentException("已完成复核的工作记录不能删除附件");
@@ -610,6 +610,14 @@ public class AttachmentService {
     }
 
     private RecordTarget recordTarget(TenantPrincipal principal, UUID workRecordId) {
+        return recordTarget(principal, workRecordId, false);
+    }
+
+    private RecordTarget recordTargetForUpdate(TenantPrincipal principal, UUID workRecordId) {
+        return recordTarget(principal, workRecordId, true);
+    }
+
+    private RecordTarget recordTarget(TenantPrincipal principal, UUID workRecordId, boolean forUpdate) {
         return jdbc.queryForObject("""
                 select record.status, record.target_org_unit_id, record.position_assignment_id,
                        org.name as org_name, coalesce(item.name, '工作记录') as item_name
@@ -619,7 +627,8 @@ public class AttachmentService {
                 left join work_package_item item
                   on item.tenant_id = record.tenant_id and item.id = record.work_package_item_id
                 where record.tenant_id = :tenantId and record.id = :workRecordId
-                """, base(principal).addValue("workRecordId", workRecordId),
+                """ + (forUpdate ? " for update of record" : ""),
+                base(principal).addValue("workRecordId", workRecordId),
                 (rs, rowNum) -> new RecordTarget(rs.getString("status"),
                         rs.getObject("target_org_unit_id", UUID.class),
                         rs.getObject("position_assignment_id", UUID.class),
