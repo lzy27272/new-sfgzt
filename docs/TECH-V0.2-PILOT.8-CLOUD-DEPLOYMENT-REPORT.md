@@ -220,3 +220,15 @@ Browser插件不可用，且Playwright自带Chromium未安装；遵循前端测�
 - 部署后Core API、Caddy、PostgreSQL、fail2ban和ClamAV均为`active`；运行进程目录及Core/Web两个`current`软链接均指向新release，内网健康为`UP`。受保护的数据留存策略、清理预览和团队工作台接口未登录均返回401，新进程激活窗口Core API warning/error/exception与Caddy error均为0，根分区使用率14%（148GB可用）。
 - 当前绩效快照由工作台汇总查询触发并按内容哈希幂等、版本化写入，尚未增加独立的全租户定时快照任务；结构化工作记录仍持续保留。Codex内置Browser运行组件缺失，因此本轮不宣称登录后数据留存页面或真实岗位工作台的视觉交互验收，需由业务测试账号完成最终UAT。
 - 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
+
+## 21. 2026-09-17 服务端身份解析与岗位工作台路由修复
+
+- 发布提交为`5012c379410b2143e591be3b6b164ae702dfef7b`，已快进合并并推送至GitHub `lzy27272/AIzhongtai:main`。GitHub Actions运行`35178033307`全部通过：Core API、Web和OTA平台三项作业均为`success`；Web本地141项测试、TypeScript和Pilot生产构建再次通过。
+- 本次修复生产Web普通入口在服务端身份尚未解析或已失效时错误恢复浏览器缓存岗位的问题：真实会话必须先通过`/api/v1/iam/me`，401会清理Bearer与服务端Cookie会话，并通过会话代次避免旧请求清除新登录；Pilot发布和云端安装器均强制校验`X-Hotel-AI-Authorization`认证契约。
+- 云端不可变发布版本为`20260917-pilot8-5012c37`。后端无代码变化，复用已验证JAR，SHA-256为`96efb18987d27a21396e63e2451ecbba087802aa1e1c4d9187843c0c9abc679b`；服务器、本地构建与公网`index.html` SHA-256均为`4b9667b20e492266b8f003e9d388aeb3284e8b854c5dfff55600067dc201b686`，主JS为`fdbb3b0b15f7a17d3a2219f7b2ae561fcf9528e1debcf436a369812c207e51f5`，主CSS为`a7b23517a2fd3c4324f57ae01fd55f04c74c711a57d8a354995a80ae8fa8550d`。
+- 部署前生成并验证数据库加密备份`hotel_ai_os-daily-20260917T113414+0800.dump.enc`和运行配置加密备份`sifangguan-ota-runtime-daily-20260917T113414+0800.env.enc`，两者及校验文件均为`root:root:0600`；SHA-256分别为`f7e2ff2a16311020ebb9d2df08173ea78ad081f028d1bbd79eeab289a73395fd`和`b7d12a00eed336842d174b07dd376118b51e40c0c7d1b8e4064a92e21f51455f`。异地备份仍未配置，服务在本地备份成功后按预期停在`OFFSITE_BACKUP_CONFIG_REQUIRED`；本次继续沿用已批准的内部Pilot例外，不表示异地备份门禁已满足。
+- 第一次激活在切换前因备份目录仅root可读导致前置断言退出；当时新release目录尚未创建，两个软链接仍指向旧版且服务保持`active`。门禁改为使用最小`sudo test/stat/sha256sum`后重新执行，安装、迁移、重启及自动回滚保护全部通过，本次未触发回滚，旧版`20260917-pilot8-8b62f52`完整保留。
+- 部署后Core API、Caddy、PostgreSQL、fail2ban和ClamAV均为`active`，Core/Web软链接与Core进程目录均指向新release，内网健康为`UP`；Flyway JAR与数据库全量版本和校验和一致，最新V55、失败迁移0。Core API与PostgreSQL继续只监听`127.0.0.1`，根盘使用率14%、可用148GB。
+- 公网首页返回200，公网与内网未授权`/api/v1/iam/me`均返回401，格式正确但不存在的账号登录返回401；公开主资源确认`AUTH_MODE=bearer`并包含新认证请求头。激活窗口Core API warning/error/exception与Caddy error均为0，26个Web文件已完成服务器和公网关键资源哈希回读。
+- Codex内置Browser因本机已安装客户端与服务组件版本不一致而无法启动，本轮不宣称完成登录后的真实账号视觉点击验收；已由SSR渲染测试证明未登录显示登录页、服务端身份解析期间不显示缓存工作台。业务侧仍需使用至少一个普通员工账号和一个多岗位管理账号完成最终UAT。
+- 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
