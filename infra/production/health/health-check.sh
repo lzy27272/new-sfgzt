@@ -122,6 +122,20 @@ validate_flyway_database_state() {
   fi
 }
 
+select_latest_backup() {
+  local backup_directory="${1:?Backup directory is required}"
+  local latest_line
+
+  # Do not use `head` in this pipe: with `set -o pipefail`, a sufficiently
+  # large directory can make the upstream sorter receive SIGPIPE and turn a
+  # healthy deployment into a false rollback.
+  latest_line="$(find "${backup_directory}" \
+    -maxdepth 1 -type f -name 'hotel_ai_os-auto-*.dump.enc' \
+    -printf '%T@ %p\n' | sort -nr | sed -n '1p')"
+  test -n "${latest_line}"
+  printf '%s\n' "${latest_line#* }"
+}
+
 main() {
   local service_name
   local current_release
@@ -200,9 +214,7 @@ main() {
   test -n "${root_usage}"
   test "${root_usage}" -lt 85
 
-  latest_backup="$(find /var/backups/hotel-ai-os/postgres \
-    -maxdepth 1 -type f -name 'hotel_ai_os-auto-*.dump.enc' \
-    -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+  latest_backup="$(select_latest_backup /var/backups/hotel-ai-os/postgres)"
   test -n "${latest_backup}"
   find "${latest_backup}" -mmin -1560 -print -quit | grep -q .
   sha256sum --check "${latest_backup}.sha256" >/dev/null

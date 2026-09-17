@@ -49,4 +49,22 @@ expect_failure 'invalid packaged version name is rejected' resolve_packaged_flyw
 expect_failure 'JAR without versioned migrations is rejected' \
   resolve_packaged_flyway_version 'BOOT-INF/classes/db/migration/R__refresh_view.sql'
 
+backup_fixture="$(mktemp -d "${TMPDIR:-/tmp}/hotel-ai-health-test.XXXXXXXX")"
+cleanup_backup_fixture() {
+  local resolved_fixture
+  local resolved_temp
+  resolved_fixture="$(realpath -- "${backup_fixture}")"
+  resolved_temp="$(realpath -- "${TMPDIR:-/tmp}")"
+  case "${resolved_fixture}" in
+    "${resolved_temp}"/hotel-ai-health-test.*) rm -rf --one-file-system -- "${resolved_fixture}" ;;
+    *) printf 'Refusing to remove unexpected test path: %s\n' "${resolved_fixture}" >&2 ;;
+  esac
+}
+trap cleanup_backup_fixture EXIT
+touch -t 202609160101 "${backup_fixture}/hotel_ai_os-auto-older.dump.enc"
+touch -t 202609160102 "${backup_fixture}/hotel_ai_os-auto-newer.dump.enc"
+test "$(select_latest_backup "${backup_fixture}")" = \
+  "${backup_fixture}/hotel_ai_os-auto-newer.dump.enc"
+printf '%s\n' 'ok - latest backup selection is pipefail safe'
+
 printf '%s\n' 'HEALTH_CHECK_MIGRATION_GATE_TESTS_OK'

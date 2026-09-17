@@ -1,0 +1,668 @@
+name: Deploy immutable Pilot release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Full 40-character main-branch commit SHA to deploy
+        required: true
+        type: string
+      confirm_deploy:
+        description: Confirm that the reviewed commit should enter the Pilot approval gate
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: pilot-cloud-deployment
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    name: Resolve successful CI artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit_sha: ${{ steps.verify.outputs.commit_sha }}
+      ci_run_id: ${{ steps.find-run.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.find-run.outputs.ci_run_attempt }}
+      artifact_id: ${{ steps.find-run.outputs.artifact_id }}
+      artifact_digest: ${{ steps.find-run.outputs.artifact_digest }}
+      artifact_name: ${{ steps.find-run.outputs.artifact_name }}
+      lane: ${{ steps.verify.outputs.lane }}
+      requires_web: ${{ steps.verify.outputs.requires_web }}
+      requires_core: ${{ steps.verify.outputs.requires_core }}
+      release_id: ${{ steps.verify.outputs.release_id }}
+      policy_commit: ${{ steps.policy.outputs.policy_commit }}
+    steps:
+      - name: Require explicit dispatch confirmation
+        shell: bash
+        env:
+          CONFIRMED: ${{ inputs.confirm_deploy }}
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_EVENT_NAME" = 'workflow_dispatch' || {
+            echo 'Cloud deployment only accepts workflow_dispatch.' >&2
+            exit 2
+          }
+          test "$CONFIRMED" = 'true' || {
+            echo 'Deployment confirmation was not selected.' >&2
+            exit 2
+          }
+          test "$GITHUB_REF" = 'refs/heads/main' || {
+            echo 'The deployment workflow must be dispatched from main.' >&2
+            exit 2
+          }
+
+      - name: Check out the trusted deployment policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: trusted-policy
+
+      - name: Check out the requested source without executing its policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+          path: target-source
+
+      - name: Pin the current main policy
+        id: policy
+        shell: pwsh
+        env:
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policyCommit = (& git -C trusted-policy rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $policyCommit -cne $env:DISPATCH_SHA) {
+            throw 'TRUSTED_POLICY_COMMIT_MISMATCH'
+          }
+          & git -C trusted-policy fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) { throw 'TRUSTED_MAIN_FETCH_FAILED' }
+          $currentMain = (& git -C trusted-policy rev-parse origin/main).Trim().ToLowerInvariant()
+          if ($currentMain -cne $policyCommit) {
+            throw 'TRUSTED_POLICY_IS_NOT_CURRENT_MAIN; dispatch the deployment again.'
+          }
+          $classifierSha = (Get-FileHash -LiteralPath 'trusted-policy/tools/deployment/Get-PilotDeploymentPlan.ps1' -Algorithm SHA256).Hash.ToLowerInvariant()
+          "policy_commit=$policyCommit" | Add-Content -Path $env:GITHUB_OUTPUT
+          "classifier_sha=$classifierSha" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Validate that the immutable commit belongs to main
+        id: source
+        shell: pwsh
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requested = $env:REQUESTED_SHA.Trim().ToLowerInvariant()
+          if ($requested -notmatch '^[0-9a-f]{40}$') {
+            throw 'DEPLOYMENT_REQUIRES_FULL_COMMIT_SHA'
+          }
+          $resolved = (& git -C target-source rev-parse --verify "$requested`^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or $resolved -cne $requested) {
+            throw 'DEPLOYMENT_COMMIT_RESOLUTION_FAILED'
+          }
+          & git -C target-source fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) { throw 'MAIN_FETCH_FAILED' }
+          & git -C target-source merge-base --is-ancestor $requested origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'DEPLOYMENT_COMMIT_IS_NOT_ON_MAIN'
+          }
+          "commit_sha=$requested" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Locate the successful push CI run and exact artifact
+        id: find-run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $endpoint = "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&status=success&head_sha=$env:SOURCE_COMMIT&per_page=20"
+          $responseText = @(& gh api -H 'Accept: application/vnd.github+json' $endpoint) -join [Environment]::NewLine
+          if ($LASTEXITCODE -ne 0) { throw 'CI_RUN_LOOKUP_FAILED' }
+          $response = $responseText | ConvertFrom-Json
+          $run = @($response.workflow_runs |
+            Where-Object { $_.head_sha -ceq $env:SOURCE_COMMIT -and $_.conclusion -ceq 'success' } |
+            Sort-Object run_number -Descending |
+            Select-Object -First 1)
+          if ($run.Count -ne 1) {
+            throw 'NO_SUCCESSFUL_MAIN_PUSH_CI_RUN_FOR_COMMIT'
+          }
+
+          $runAttempt = [long]$run[0].run_attempt
+          if ($runAttempt -lt 1) { throw 'CI_RUN_ATTEMPT_INVALID' }
+          $artifactName = "pilot-release-$env:SOURCE_COMMIT-$($run[0].id)-$runAttempt"
+          $artifactsText = @(& gh api -H 'Accept: application/vnd.github+json' "repos/$env:GITHUB_REPOSITORY/actions/runs/$($run[0].id)/artifacts?per_page=100") -join [Environment]::NewLine
+          if ($LASTEXITCODE -ne 0) { throw 'CI_ARTIFACT_LOOKUP_FAILED' }
+          $artifacts = $artifactsText | ConvertFrom-Json
+          $artifact = @($artifacts.artifacts | Where-Object { $_.name -ceq $artifactName -and -not $_.expired })
+          if ($artifact.Count -ne 1) {
+            throw 'IMMUTABLE_CI_ARTIFACT_MISSING_OR_EXPIRED'
+          }
+          $artifactDigest = [string]$artifact[0].digest
+          if ($artifactDigest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            throw 'IMMUTABLE_CI_ARTIFACT_DIGEST_MISSING'
+          }
+
+          "ci_run_id=$($run[0].id)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "ci_run_attempt=$runAttempt" | Add-Content -Path $env:GITHUB_OUTPUT
+          "artifact_id=$($artifact[0].id)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "artifact_digest=$artifactDigest" | Add-Content -Path $env:GITHUB_OUTPUT
+          "artifact_name=$artifactName" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Download the artifact selected from that CI run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.find-run.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ steps.find-run.outputs.artifact_digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/resolved-release"
+          archive="$RUNNER_TEMP/resolved-release.zip"
+          gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$archive"
+          test "$(sha256sum "$archive" | awk '{print $1}')" = "${ARTIFACT_DIGEST#sha256:}"
+          unzip -q "$archive" -d "$RUNNER_TEMP/resolved-release"
+
+      - name: Reclassify and verify the complete artifact contract
+        id: verify
+        shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+          CI_RUN_ID: ${{ steps.find-run.outputs.ci_run_id }}
+          TRUSTED_CLASSIFIER_SHA: ${{ steps.policy.outputs.classifier_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'resolved-release'))
+          $planPath = Join-Path $root 'deployment-plan.json'
+          $manifestPath = Join-Path $root 'release-manifest.json'
+          if (-not (Test-Path -LiteralPath $planPath -PathType Leaf) -or -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw 'RELEASE_PLAN_OR_MANIFEST_MISSING'
+          }
+
+          $plan = Get-Content -LiteralPath $planPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($plan.schemaVersion -ne 1 -or $plan.policyVersion -ne 3 -or
+              $plan.classifierSha256 -cne $env:TRUSTED_CLASSIFIER_SHA -or
+              $plan.status -cne 'PASS' -or $plan.lane -cnotin @('WEB_ONLY', 'FULL')) {
+            throw 'RELEASE_PLAN_CONTRACT_INVALID'
+          }
+          if ($plan.baseRef -notmatch '^[0-9a-f]{40}$' -or $plan.headRef -cne $env:SOURCE_COMMIT) {
+            throw 'RELEASE_PLAN_SOURCE_RANGE_INVALID'
+          }
+          if ($manifest.schemaVersion -ne 1 -or $manifest.status -cne 'PASS' -or $manifest.sourceCommit -cne $env:SOURCE_COMMIT -or
+              $manifest.policy.version -ne 3 -or $manifest.policy.classifierSha256 -cne $env:TRUSTED_CLASSIFIER_SHA) {
+            throw 'RELEASE_MANIFEST_SOURCE_BINDING_INVALID'
+          }
+          if ($manifest.lane -cne $plan.lane) { throw 'RELEASE_MANIFEST_LANE_MISMATCH' }
+          $planSha = (Get-FileHash -LiteralPath $planPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.planSha256 -cne $planSha) { throw 'RELEASE_PLAN_HASH_MISMATCH' }
+          if (-not [bool]$manifest.safeguards.deployRequiresEnvironmentApproval -or
+              [bool]$manifest.safeguards.fullLaneAutoDeployAllowed -or
+              -not [bool]$manifest.safeguards.sourceCommitBound -or
+              -not [bool]$manifest.safeguards.hashesRequired) {
+            throw 'RELEASE_SAFEGUARD_CONTRACT_INVALID'
+          }
+
+          $allowedFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+          [void]$allowedFiles.Add('deployment-plan.json')
+          [void]$allowedFiles.Add('release-manifest.json')
+          foreach ($artifact in @($manifest.artifacts)) {
+            $file = [string]$artifact.file
+            if ($file -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or -not $allowedFiles.Add($file)) {
+              throw "RELEASE_ARTIFACT_NAME_INVALID: $file"
+            }
+            $path = Join-Path $root $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "RELEASE_ARTIFACT_MISSING: $file" }
+            $item = Get-Item -LiteralPath $path
+            $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($artifact.sha256 -cne $actualHash -or [long]$artifact.sizeBytes -ne $item.Length) {
+              throw "RELEASE_ARTIFACT_INTEGRITY_FAILED: $file"
+            }
+          }
+          $unexpected = @(Get-ChildItem -LiteralPath $root -File | Where-Object { -not $allowedFiles.Contains($_.Name) })
+          if ($unexpected.Count -gt 0) { throw "UNEXPECTED_RELEASE_FILES: $($unexpected.Name -join ',')" }
+
+          $pwshPath = (Get-Process -Id $PID).Path
+          $reclassifiedText = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File ./trusted-policy/tools/deployment/Get-PilotDeploymentPlan.ps1 -BaseRef $plan.baseRef -HeadRef $env:SOURCE_COMMIT) -join [Environment]::NewLine
+          if ($LASTEXITCODE -ne 0) { throw 'DEPLOYMENT_RECLASSIFICATION_BLOCKED' }
+          $reclassified = $reclassifiedText | ConvertFrom-Json
+          if ($reclassified.schemaVersion -ne 1 -or $reclassified.policyVersion -ne 3 -or
+              $reclassified.classifierSha256 -cne $env:TRUSTED_CLASSIFIER_SHA -or $reclassified.status -cne 'PASS' -or
+              $reclassified.baseRef -cne $plan.baseRef -or $reclassified.headRef -cne $plan.headRef) {
+            throw 'DEPLOYMENT_RECLASSIFICATION_CONTRACT_INVALID'
+          }
+          $fields = @('lane', 'requiresWeb', 'requiresCore', 'requiresDatabaseBackup', 'requiresMigrationGate', 'requiresFullRegression')
+          foreach ($field in $fields) {
+            if ($reclassified.$field -cne $plan.$field) {
+              throw "DEPLOYMENT_RECLASSIFICATION_MISMATCH: $field"
+            }
+          }
+          $originalPaths = @($plan.changedPaths | ForEach-Object { [string]$_ })
+          $reclassifiedPaths = @($reclassified.changedPaths | ForEach-Object { [string]$_ })
+          if (($originalPaths -join "`n") -cne ($reclassifiedPaths -join "`n")) {
+            throw 'DEPLOYMENT_RECLASSIFICATION_PATH_MISMATCH'
+          }
+
+          if ($plan.lane -ceq 'WEB_ONLY' -and (-not [bool]$plan.requiresWeb -or [bool]$plan.requiresCore)) {
+            throw 'WEB_ONLY_COMPONENT_CONTRACT_INVALID'
+          }
+          if ($plan.lane -ceq 'FULL' -and (-not [bool]$plan.requiresDatabaseBackup -or -not [bool]$plan.requiresMigrationGate)) {
+            throw 'FULL_RELEASE_GATE_CONTRACT_INVALID'
+          }
+
+          $releaseId = "pilot-$($env:SOURCE_COMMIT.Substring(0, 12))-ci$env:CI_RUN_ID-deploy$env:GITHUB_RUN_ID-a$env:GITHUB_RUN_ATTEMPT"
+          "commit_sha=$env:SOURCE_COMMIT" | Add-Content -Path $env:GITHUB_OUTPUT
+          "lane=$($plan.lane)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "requires_web=$($plan.requiresWeb.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          "requires_core=$($plan.requiresCore.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          "release_id=$releaseId" | Add-Content -Path $env:GITHUB_OUTPUT
+
+          @"
+          ### Pilot deployment preflight
+
+          - Commit: ``$env:SOURCE_COMMIT``
+          - CI run: ``$env:CI_RUN_ID``
+          - Lane: **$($plan.lane)**
+          - Release ID: ``$releaseId``
+          - Integrity: **verified**
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
+  full-release-required:
+    name: Report complete release gate requirement
+    needs: resolve-release
+    if: needs.resolve-release.outputs.lane != 'WEB_ONLY'
+    runs-on: ubuntu-latest
+    steps:
+      - name: FULL lane requires the existing complete release gate
+        shell: bash
+        run: |
+          {
+            echo '### Fast deployment deliberately blocked'
+            echo
+            echo '- Commit: `${{ needs.resolve-release.outputs.commit_sha }}`'
+            echo '- Lane: `FULL`'
+            echo '- Required next step: approved backup and restore verification, migration validation, full release installation, smoke tests, and final audit.'
+            echo '- No cloud credential was opened and no server change was made.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo 'FULL lane cannot be deployed by the fast-lane workflow.' >&2
+          exit 3
+
+  deploy-fast-lane:
+    name: Approve and deploy fast lane to Pilot
+    needs: resolve-release
+    if: needs.resolve-release.outputs.lane == 'WEB_ONLY'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: pilot
+    steps:
+      - name: Enforce configured environment protection
+        shell: bash
+        env:
+          PILOT_ENVIRONMENT_PROTECTED: ${{ vars.PILOT_ENVIRONMENT_PROTECTED }}
+        run: |
+          set -Eeuo pipefail
+          test "$PILOT_ENVIRONMENT_PROTECTED" = 'true' || {
+            echo 'The pilot environment is not marked as protected. Configure required reviewers before enabling deployment.' >&2
+            exit 2
+          }
+
+      - name: Check out the pinned trusted deployment policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-release.outputs.policy_commit }}
+          fetch-depth: 0
+          path: trusted-policy
+
+      - name: Require the approved policy to remain current main
+        shell: pwsh
+        env:
+          POLICY_COMMIT: ${{ needs.resolve-release.outputs.policy_commit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checkedOut = (& git -C trusted-policy rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($checkedOut -cne $env:POLICY_COMMIT) { throw 'APPROVED_POLICY_CHECKOUT_MISMATCH' }
+          & git -C trusted-policy fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) { throw 'APPROVED_POLICY_MAIN_FETCH_FAILED' }
+          $currentMain = (& git -C trusted-policy rev-parse origin/main).Trim().ToLowerInvariant()
+          if ($currentMain -cne $env:POLICY_COMMIT) {
+            throw 'DEPLOYMENT_POLICY_CHANGED_AFTER_APPROVAL; dispatch and approve again.'
+          }
+
+      - name: Download the same successful CI artifact after approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.resolve-release.outputs.ci_run_id }}
+          ARTIFACT_ID: ${{ needs.resolve-release.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.resolve-release.outputs.artifact_digest }}
+          ARTIFACT_NAME: ${{ needs.resolve-release.outputs.artifact_name }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          metadata="$(gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+            --jq '[.id, .name, .expired, .digest, .workflow_run.id] | @tsv')"
+          IFS=$'\t' read -r current_id current_name current_expired current_digest current_run_id <<< "$metadata"
+          test "$current_id" = "$ARTIFACT_ID" && test "$current_name" = "$ARTIFACT_NAME" &&
+            test "$current_expired" = 'false' && test "$current_digest" = "$ARTIFACT_DIGEST" &&
+            test "$current_run_id" = "$CI_RUN_ID" || {
+            echo 'The approved immutable artifact identity changed or expired.' >&2
+            exit 2
+          }
+          mkdir -p "$RUNNER_TEMP/approved-release"
+          archive="$RUNNER_TEMP/approved-release.zip"
+          gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$archive"
+          test "$(sha256sum "$archive" | awk '{print $1}')" = "${ARTIFACT_DIGEST#sha256:}"
+          unzip -q "$archive" -d "$RUNNER_TEMP/approved-release"
+
+      - name: Revalidate hashes and read installer arguments
+        id: release
+        shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+          EXPECTED_LANE: ${{ needs.resolve-release.outputs.lane }}
+          RELEASE_ID: ${{ needs.resolve-release.outputs.release_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'approved-release'
+          $planPath = Join-Path $root 'deployment-plan.json'
+          $manifestPath = Join-Path $root 'release-manifest.json'
+          $plan = Get-Content -LiteralPath $planPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          $trustedClassifierSha = (Get-FileHash -LiteralPath 'trusted-policy/tools/deployment/Get-PilotDeploymentPlan.ps1' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.sourceCommit -cne $env:SOURCE_COMMIT -or $manifest.lane -cne $env:EXPECTED_LANE -or $plan.lane -cne $env:EXPECTED_LANE) {
+            throw 'APPROVED_RELEASE_BINDING_MISMATCH'
+          }
+          if ($plan.policyVersion -ne 3 -or $plan.classifierSha256 -cne $trustedClassifierSha -or
+              $manifest.policy.version -ne 3 -or $manifest.policy.classifierSha256 -cne $trustedClassifierSha) {
+            throw 'APPROVED_RELEASE_POLICY_MISMATCH'
+          }
+          $planSha = (Get-FileHash -LiteralPath $planPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.planSha256 -cne $planSha) { throw 'APPROVED_RELEASE_PLAN_HASH_MISMATCH' }
+
+          foreach ($artifact in @($manifest.artifacts)) {
+            $file = [string]$artifact.file
+            if ($file -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "APPROVED_ARTIFACT_NAME_INVALID: $file" }
+            $path = Join-Path $root $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "APPROVED_ARTIFACT_MISSING: $file" }
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -cne $artifact.sha256 -or (Get-Item -LiteralPath $path).Length -ne [long]$artifact.sizeBytes) {
+              throw "APPROVED_ARTIFACT_INTEGRITY_FAILED: $file"
+            }
+          }
+
+          "release_id=$env:RELEASE_ID" | Add-Content -Path $env:GITHUB_OUTPUT
+          if ($env:EXPECTED_LANE -ceq 'WEB_ONLY') {
+            $webArtifact = @($manifest.artifacts | Where-Object { $_.name -ceq 'web' })
+            if ($manifest.web.bundleSha256 -notmatch '^[0-9a-f]{64}$' -or
+                $webArtifact.Count -ne 1 -or [long]$webArtifact[0].sizeBytes -lt 1 -or [long]$webArtifact[0].sizeBytes -gt 1073741824 -or
+                $manifest.web.indexSha256 -notmatch '^[0-9a-f]{64}$' -or
+                $manifest.web.treeSha256 -notmatch '^[0-9a-f]{64}$' -or
+                $manifest.web.treeFingerprintAlgorithm -cne 'sha256(sorted-path-colon-size-colon-content-sha256-v1)') {
+              throw 'WEB_RELEASE_DIGEST_INVALID'
+            }
+            "web_sha=$($manifest.web.bundleSha256)" | Add-Content -Path $env:GITHUB_OUTPUT
+            "web_size=$([long]$webArtifact[0].sizeBytes)" | Add-Content -Path $env:GITHUB_OUTPUT
+            "index_sha=$($manifest.web.indexSha256)" | Add-Content -Path $env:GITHUB_OUTPUT
+            "web_tree_sha=$($manifest.web.treeSha256)" | Add-Content -Path $env:GITHUB_OUTPUT
+          } else {
+            throw 'FAST_LANE_REQUIRES_WEB_ONLY'
+          }
+
+      - name: Configure the pinned Pilot SSH identity
+        shell: bash
+        env:
+          PILOT_SSH_HOST: ${{ secrets.PILOT_SSH_HOST }}
+          PILOT_SSH_USER: ${{ secrets.PILOT_SSH_USER }}
+          PILOT_SSH_PRIVATE_KEY: ${{ secrets.PILOT_SSH_PRIVATE_KEY }}
+          PILOT_SSH_KNOWN_HOSTS: ${{ secrets.PILOT_SSH_KNOWN_HOSTS }}
+          PILOT_FAST_STAGE_ROOT: ${{ vars.PILOT_FAST_STAGE_ROOT }}
+        run: |
+          set -Eeuo pipefail
+          for required in PILOT_SSH_HOST PILOT_SSH_USER PILOT_SSH_PRIVATE_KEY PILOT_SSH_KNOWN_HOSTS PILOT_FAST_STAGE_ROOT; do
+            test -n "${!required:-}" || { echo "Required Pilot setting is missing: $required" >&2; exit 2; }
+          done
+          [[ "$PILOT_SSH_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo 'Unsafe SSH host.' >&2; exit 2; }
+          test "$PILOT_SSH_USER" = 'hotel-ai-deploy' || {
+            echo 'PILOT_SSH_USER must be the dedicated hotel-ai-deploy account; broad ops/root identities are forbidden.' >&2
+            exit 2
+          }
+          test "$PILOT_FAST_STAGE_ROOT" = '/tmp/hotel-ai-os-fast-release' || {
+            echo 'PILOT_FAST_STAGE_ROOT must equal /tmp/hotel-ai-os-fast-release.' >&2
+            exit 2
+          }
+
+          key_file="$RUNNER_TEMP/pilot_ssh_key"
+          known_hosts_file="$RUNNER_TEMP/pilot_known_hosts"
+          install -m 0600 /dev/null "$key_file"
+          install -m 0600 /dev/null "$known_hosts_file"
+          printf '%s\n' "$PILOT_SSH_PRIVATE_KEY" | tr -d '\r' > "$key_file"
+          printf '%s\n' "$PILOT_SSH_KNOWN_HOSTS" | tr -d '\r' > "$known_hosts_file"
+
+      - name: Read and validate the cloud deployment baseline before upload
+        id: deployed
+        shell: bash
+        env:
+          PILOT_SSH_HOST: ${{ secrets.PILOT_SSH_HOST }}
+          PILOT_SSH_USER: ${{ secrets.PILOT_SSH_USER }}
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+        run: |
+          set -Eeuo pipefail
+          key_file="$RUNNER_TEMP/pilot_ssh_key"
+          known_hosts_file="$RUNNER_TEMP/pilot_known_hosts"
+          target="${PILOT_SSH_USER}@${PILOT_SSH_HOST}"
+          ssh_options=(-i "$key_file" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=15)
+          installer='/usr/local/sbin/hotel-ai-os-install-fast-lane-release'
+          trusted_installer="$GITHUB_WORKSPACE/trusted-policy/infra/production/bootstrap/61-install-fast-lane-release.sh"
+
+          expected_policy_version="$(sed -n "s/^readonly INSTALLER_POLICY_VERSION='\([^']*\)'$/\1/p" "$trusted_installer")"
+          [[ "$expected_policy_version" =~ ^[1-9][0-9]*$ ]] || {
+            echo 'Trusted fast-lane installer policy version is missing or invalid.' >&2
+            exit 2
+          }
+          expected_installer_sha="$(sha256sum "$trusted_installer" | awk '{print $1}')"
+          expected_remote_policy="FAST_LANE_POLICY version=${expected_policy_version} sha256=${expected_installer_sha}"
+
+          remote_policy="$(ssh "${ssh_options[@]}" "$target" \
+            "test \"\$(find '$installer' -maxdepth 0 -type f -user root -group root ! -perm /022 -perm /111 -print)\" = '$installer' && sudo '$installer' POLICY")"
+          remote_policy="$(printf '%s' "$remote_policy" | tr -d '\r\n')"
+          test "$remote_policy" = "$expected_remote_policy" || {
+            echo 'Cloud fast-lane installer policy differs from the trusted main policy; run the root bootstrap gate before deployment.' >&2
+            exit 2
+          }
+
+          remote_identity="$(ssh "${ssh_options[@]}" "$target" "sudo '$installer' STATUS")"
+          deployed_commit="$(printf '%s' "$remote_identity" | tr -d '\r\n')"
+          [[ "$deployed_commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'Cloud deployed-source-commit is missing or invalid; run the complete bootstrap gate first.' >&2
+            exit 2
+          }
+          git -C trusted-policy cat-file -e "$deployed_commit^{commit}" 2>/dev/null || {
+            echo 'Cloud baseline commit is not present in repository history.' >&2
+            exit 2
+          }
+          already_deployed=false
+          if test "$deployed_commit" = "$SOURCE_COMMIT"; then
+            already_deployed=true
+          else
+            git -C trusted-policy merge-base --is-ancestor "$deployed_commit" "$SOURCE_COMMIT" || {
+              echo 'Cloud baseline is not an ancestor of the requested commit; fast deployment is unsafe.' >&2
+              exit 2
+            }
+          fi
+          echo "deployed_commit=$deployed_commit" >> "$GITHUB_OUTPUT"
+          echo "already_deployed=$already_deployed" >> "$GITHUB_OUTPUT"
+
+      - name: Reclassify the entire cloud-to-target range
+        if: steps.deployed.outputs.already_deployed != 'true'
+        shell: pwsh
+        env:
+          DEPLOYED_COMMIT: ${{ steps.deployed.outputs.deployed_commit }}
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+          EXPECTED_LANE: ${{ needs.resolve-release.outputs.lane }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactPlan = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'approved-release/deployment-plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+          $pwshPath = (Get-Process -Id $PID).Path
+          $trustedClassifier = 'trusted-policy/tools/deployment/Get-PilotDeploymentPlan.ps1'
+          $trustedClassifierSha = (Get-FileHash -LiteralPath $trustedClassifier -Algorithm SHA256).Hash.ToLowerInvariant()
+          $output = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $trustedClassifier -BaseRef $env:DEPLOYED_COMMIT -HeadRef $env:SOURCE_COMMIT)
+          $classifierExitCode = $LASTEXITCODE
+          $text = ($output -join [Environment]::NewLine).Trim()
+          try { $cumulativePlan = $text | ConvertFrom-Json -ErrorAction Stop } catch { throw 'CUMULATIVE_PLAN_INVALID_JSON' }
+          if ($classifierExitCode -ne 0 -or $cumulativePlan.status -cne 'PASS' -or
+              $cumulativePlan.schemaVersion -ne 1 -or $cumulativePlan.policyVersion -ne 3 -or
+              $cumulativePlan.classifierSha256 -cne $trustedClassifierSha) {
+            throw 'CUMULATIVE_DEPLOYMENT_CLASSIFICATION_BLOCKED'
+          }
+          if ($cumulativePlan.baseRef -cne $env:DEPLOYED_COMMIT -or $cumulativePlan.headRef -cne $env:SOURCE_COMMIT) {
+            throw 'CUMULATIVE_DEPLOYMENT_RANGE_MISMATCH'
+          }
+
+          $fields = @('lane', 'requiresWeb', 'requiresCore', 'requiresDatabaseBackup', 'requiresMigrationGate', 'requiresFullRegression')
+          foreach ($field in $fields) {
+            if ($cumulativePlan.$field -cne $artifactPlan.$field) {
+              throw "CLOUD_BASELINE_REQUIRES_FULL_RELEASE: $field changed from $($artifactPlan.$field) to $($cumulativePlan.$field)"
+            }
+          }
+          if ($cumulativePlan.lane -cne $env:EXPECTED_LANE -or $cumulativePlan.lane -ceq 'FULL') {
+            throw "CLOUD_BASELINE_REQUIRES_FULL_RELEASE: lane=$($cumulativePlan.lane)"
+          }
+
+          @"
+          ### Cloud baseline gate
+
+          - Deployed commit: ``$env:DEPLOYED_COMMIT``
+          - Target commit: ``$env:SOURCE_COMMIT``
+          - Cumulative lane: **$($cumulativePlan.lane)**
+          - Cumulative range: **verified safe for the selected fast lane**
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
+      - name: Verify an already-deployed release instead of reinstalling it
+        if: steps.deployed.outputs.already_deployed == 'true'
+        shell: bash
+        env:
+          PILOT_SSH_HOST: ${{ secrets.PILOT_SSH_HOST }}
+          PILOT_SSH_USER: ${{ secrets.PILOT_SSH_USER }}
+          LANE: ${{ needs.resolve-release.outputs.lane }}
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+          INDEX_SHA: ${{ steps.release.outputs.index_sha }}
+          WEB_TREE_SHA: ${{ steps.release.outputs.web_tree_sha }}
+        run: |
+          set -Eeuo pipefail
+          key_file="$RUNNER_TEMP/pilot_ssh_key"
+          known_hosts_file="$RUNNER_TEMP/pilot_known_hosts"
+          target="${PILOT_SSH_USER}@${PILOT_SSH_HOST}"
+          installer='/usr/local/sbin/hotel-ai-os-install-fast-lane-release'
+          ssh_options=(-i "$key_file" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=15)
+
+          if test "$LANE" = 'WEB_ONLY'; then
+            ssh "${ssh_options[@]}" "$target" \
+              "sudo '$installer' VERIFY WEB_ONLY '$SOURCE_COMMIT' '$INDEX_SHA' '$WEB_TREE_SHA'"
+          else
+            echo 'Only WEB_ONLY may enter the idempotent fast-deployment verifier.' >&2
+            exit 3
+          fi
+
+          {
+            echo '### Pilot deployment already current'
+            echo
+            echo "- Commit: \`$SOURCE_COMMIT\`"
+            echo "- Lane: \`$LANE\`"
+            echo '- The fixed server installer verified the active artifact hash and health; no upload or switch was performed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload through pinned host identity and run the preinstalled audited installer
+        if: steps.deployed.outputs.already_deployed != 'true'
+        shell: bash
+        env:
+          PILOT_SSH_HOST: ${{ secrets.PILOT_SSH_HOST }}
+          PILOT_SSH_USER: ${{ secrets.PILOT_SSH_USER }}
+          PILOT_FAST_STAGE_ROOT: ${{ vars.PILOT_FAST_STAGE_ROOT }}
+          LANE: ${{ needs.resolve-release.outputs.lane }}
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+          EXPECTED_SOURCE_COMMIT: ${{ steps.deployed.outputs.deployed_commit }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          WEB_SHA: ${{ steps.release.outputs.web_sha }}
+          WEB_SIZE: ${{ steps.release.outputs.web_size }}
+          INDEX_SHA: ${{ steps.release.outputs.index_sha }}
+          WEB_TREE_SHA: ${{ steps.release.outputs.web_tree_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$PILOT_SSH_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo 'Unsafe SSH host.' >&2; exit 2; }
+          test "$PILOT_SSH_USER" = 'hotel-ai-deploy' || { echo 'Unsafe SSH user.' >&2; exit 2; }
+          test "$PILOT_FAST_STAGE_ROOT" = '/tmp/hotel-ai-os-fast-release' || {
+            echo 'Unsafe Pilot stage root.' >&2
+            exit 2
+          }
+          [[ "$RELEASE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo 'Unsafe release ID.' >&2; exit 2; }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'Unsafe source commit identity.' >&2
+            exit 2
+          }
+
+          key_file="$RUNNER_TEMP/pilot_ssh_key"
+          known_hosts_file="$RUNNER_TEMP/pilot_known_hosts"
+          target="${PILOT_SSH_USER}@${PILOT_SSH_HOST}"
+          remote_stage="${PILOT_FAST_STAGE_ROOT%/}/${RELEASE_ID}"
+          installer='/usr/local/sbin/hotel-ai-os-install-fast-lane-release'
+          ssh_options=(-i "$key_file" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=15)
+          stage_created=false
+
+          cleanup_remote_stage() {
+            local cleanup_status=0
+            if test "$stage_created" = true; then
+              ssh "${ssh_options[@]}" "$target" \
+                "if test -d '$remote_stage' && test ! -L '$remote_stage'; then rm -f -- '$remote_stage/deployment-plan.json' '$remote_stage/release-manifest.json' '$remote_stage/web.zip' '$remote_stage/core-api.jar' '$remote_stage/run-migration-once.sh'; rmdir -- '$remote_stage'; fi" || cleanup_status=$?
+              if test "$cleanup_status" -ne 0; then
+                echo '::warning::The exact untrusted staging directory could not be fully removed; administrator review is required.' >&2
+              fi
+            fi
+          }
+          preserve_exit_status_and_cleanup() {
+            local status=$?
+            trap - EXIT INT TERM
+            cleanup_remote_stage
+            exit "$status"
+          }
+          trap preserve_exit_status_and_cleanup EXIT
+          trap 'exit 130' INT TERM
+
+          ssh "${ssh_options[@]}" "$target" "test ! -e '$remote_stage' && install -d -m 0700 '$remote_stage'"
+          stage_created=true
+          scp "${ssh_options[@]}" "$RUNNER_TEMP/approved-release/deployment-plan.json" "$RUNNER_TEMP/approved-release/release-manifest.json" "$target:$remote_stage/"
+
+          if test "$LANE" = 'WEB_ONLY'; then
+            scp "${ssh_options[@]}" "$RUNNER_TEMP/approved-release/web.zip" "$target:$remote_stage/web.zip"
+            ssh "${ssh_options[@]}" "$target" \
+              "sudo '$installer' WEB_ONLY '$RELEASE_ID' '$remote_stage' '$EXPECTED_SOURCE_COMMIT' '$SOURCE_COMMIT' '$WEB_SHA' '$WEB_SIZE' '$INDEX_SHA' '$WEB_TREE_SHA'"
+          else
+            echo 'Only WEB_ONLY can use the fast deployment identity; refusing this lane.' >&2
+            exit 3
+          fi
+
+          # The root-owned installer atomically moves the untrusted stage into
+          # a private quarantine before reading it and removes bounded staging
+          # on both success and failure; diagnosis relies on the audit log.
+          ssh "${ssh_options[@]}" "$target" "test ! -e '$remote_stage'" ||
+            echo '::warning::Deployment succeeded, but the untrusted staging path still exists and needs administrator review.'
+          {
+            echo '### Pilot fast deployment complete'
+            echo
+            echo "- Commit: \`$SOURCE_COMMIT\`"
+            echo "- Lane: \`$LANE\`"
+            echo "- Release ID: \`$RELEASE_ID\`"
+            echo '- Artifact hashes were verified before upload and again by the server installer.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -4,61 +4,441 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Optional base ref used to classify a manual verification run
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Main/manual runs use their unique run ID, so every immutable commit can
+  # finish and retain its artifact. Pull requests share a PR-scoped group.
+  group: pilot-ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  # Keep every main build because a manually approved deployment may consume
+  # its immutable artifact. Superseded pull-request builds may be cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  JAVA_VERSION: '21'
+  NODE_VERSION: '22'
+  PNPM_VERSION: '11.19.0'
 
 jobs:
-  core-api:
+  classify:
+    name: Classify deployment lane
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    outputs:
+      lane: ${{ steps.plan.outputs.lane }}
+      head_sha: ${{ steps.refs.outputs.head_sha }}
+      base_sha: ${{ steps.refs.outputs.base_sha }}
+      requires_web: ${{ steps.plan.outputs.requires_web }}
+      requires_core: ${{ steps.plan.outputs.requires_core }}
+      requires_database_backup: ${{ steps.plan.outputs.requires_database_backup }}
+      requires_migration_gate: ${{ steps.plan.outputs.requires_migration_gate }}
+      requires_full_regression: ${{ steps.plan.outputs.requires_full_regression }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Check out the exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          distribution: temurin
-          java-version: '21'
-          cache: maven
-      - name: Test Core API against isolated PostgreSQL
-        run: mvn --batch-mode --no-transfer-progress --file apps/core-api/pom.xml test
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
-  ota-platform:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Resolve immutable comparison refs
+        id: refs
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          MANUAL_BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $head = (& git rev-parse --verify "$env:EVENT_HEAD_SHA`^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40}$') {
+            throw 'HEAD_REF_RESOLUTION_FAILED'
+          }
+
+          if ($env:EVENT_NAME -eq 'workflow_dispatch' -and -not [string]::IsNullOrWhiteSpace($env:MANUAL_BASE_REF)) {
+            $baseCandidate = $env:MANUAL_BASE_REF.Trim()
+          } elseif (-not [string]::IsNullOrWhiteSpace($env:EVENT_BASE_SHA) -and $env:EVENT_BASE_SHA -notmatch '^0{40}$') {
+            $baseCandidate = $env:EVENT_BASE_SHA.Trim()
+          } else {
+            $baseCandidate = "$head^"
+          }
+
+          $base = (& git rev-parse --verify "$baseCandidate`^{commit}" 2>$null).Trim()
+          if ($LASTEXITCODE -ne 0 -or $base -notmatch '^[0-9a-f]{40}$') {
+            throw 'BASE_REF_RESOLUTION_FAILED: classification refuses an unknown range.'
+          }
+
+          "head_sha=$head" | Add-Content -Path $env:GITHUB_OUTPUT
+          "base_sha=$base" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Run the fail-closed deployment classifier
+        id: plan
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ steps.refs.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pwshPath = (Get-Process -Id $PID).Path
+          $planOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File ./tools/deployment/Get-PilotDeploymentPlan.ps1 -BaseRef $env:BASE_SHA -HeadRef $env:HEAD_SHA)
+          $classifierExitCode = $LASTEXITCODE
+          $planText = ($planOutput -join [Environment]::NewLine).Trim()
+
+          try {
+            $plan = $planText | ConvertFrom-Json -ErrorAction Stop
+          } catch {
+            throw 'DEPLOYMENT_PLAN_INVALID_JSON'
+          }
+
+          $requiredProperties = @(
+            'schemaVersion', 'policyVersion', 'classifierSha256', 'status', 'lane', 'baseRef', 'headRef', 'changedPaths', 'reasons',
+            'requiresWeb', 'requiresCore', 'requiresDatabaseBackup', 'requiresMigrationGate',
+            'requiresFullRegression'
+          )
+          $missing = @($requiredProperties | Where-Object { $null -eq $plan.PSObject.Properties[$_] })
+          $classifierSha = (Get-FileHash -LiteralPath './tools/deployment/Get-PilotDeploymentPlan.ps1' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($classifierExitCode -ne 0 -or $missing.Count -gt 0 -or $plan.schemaVersion -ne 1 -or
+              $plan.policyVersion -ne 3 -or $plan.classifierSha256 -cne $classifierSha -or $plan.status -cne 'PASS') {
+            throw "DEPLOYMENT_CLASSIFICATION_BLOCKED: exit=$classifierExitCode status=$($plan.status) missing=$($missing -join ',')"
+          }
+          if ($plan.lane -cnotin @('WEB_ONLY', 'FULL')) {
+            throw "DEPLOYMENT_LANE_UNKNOWN: $($plan.lane)"
+          }
+          if ($plan.baseRef -cne $env:BASE_SHA -or $plan.headRef -cne $env:HEAD_SHA) {
+            throw 'DEPLOYMENT_PLAN_REF_MISMATCH'
+          }
+
+          $booleanProperties = @(
+            'requiresWeb', 'requiresCore', 'requiresDatabaseBackup', 'requiresMigrationGate',
+            'requiresFullRegression'
+          )
+          foreach ($property in $booleanProperties) {
+            if ($plan.$property -isnot [bool]) {
+              throw "DEPLOYMENT_PLAN_BOOLEAN_INVALID: $property"
+            }
+          }
+
+          $planText | Set-Content -LiteralPath "$env:RUNNER_TEMP/pilot-deployment-plan.json" -Encoding utf8NoBOM
+          "lane=$($plan.lane)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "requires_web=$($plan.requiresWeb.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          "requires_core=$($plan.requiresCore.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          "requires_database_backup=$($plan.requiresDatabaseBackup.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          "requires_migration_gate=$($plan.requiresMigrationGate.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+          "requires_full_regression=$($plan.requiresFullRegression.ToString().ToLowerInvariant())" | Add-Content -Path $env:GITHUB_OUTPUT
+
+          @"
+          ### Deployment classification
+
+          - Commit: ``$env:HEAD_SHA``
+          - Lane: **$($plan.lane)**
+          - Changed paths: $(@($plan.changedPaths).Count)
+          - Full regression: $($plan.requiresFullRegression)
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload immutable deployment plan
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          distribution: temurin
-          java-version: '21'
-          cache: maven
-      - name: Test OTA platform modules
-        run: mvn --batch-mode --no-transfer-progress --file ota-platform-pom.xml test
+          name: pilot-plan-${{ steps.refs.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pilot-deployment-plan.json
+          if-no-files-found: error
+          retention-days: 30
+
+  workflow-contract:
+    name: Verify CI and deployment policy contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Enforce manual-only cloud deployment contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $deploymentWorkflow = Get-Content -LiteralPath '.github/workflows/pilot-deploy.yml' -Raw
+          $requiredFragments = @(
+            'workflow_dispatch:',
+            'environment:',
+            'name: pilot',
+            'PILOT_ENVIRONMENT_PROTECTED',
+            'Get-PilotDeploymentPlan.ps1',
+            'sudo ''$installer'' STATUS',
+            'sudo ''$installer'' POLICY',
+            'FAST_LANE_POLICY',
+            '/usr/local/sbin/hotel-ai-os-install-fast-lane-release',
+            'EXPECTED_SOURCE_COMMIT',
+            'VERIFY WEB_ONLY',
+            'WEB_TREE_SHA',
+            'hotel-ai-deploy',
+            'trusted-policy',
+            'GITHUB_RUN_ATTEMPT',
+            'artifact_id',
+            'artifact_digest',
+            '/actions/artifacts/$ARTIFACT_ID/zip',
+            'cleanup_remote_stage',
+            'rmdir --',
+            'FULL lane requires the existing complete release gate'
+          )
+          foreach ($fragment in $requiredFragments) {
+            if (-not $deploymentWorkflow.Contains($fragment, [StringComparison]::Ordinal)) {
+              throw "DEPLOYMENT_WORKFLOW_CONTRACT_MISSING: $fragment"
+            }
+          }
+          if ($deploymentWorkflow -match '(?m)^\s{2}(push|pull_request|schedule):') {
+            throw 'PRODUCTION_DEPLOYMENT_MUST_NOT_HAVE_AN_AUTOMATIC_TRIGGER'
+          }
+          if ($deploymentWorkflow -match '(?i)(BEGIN [A-Z ]*PRIVATE KEY|password\s*[:=]\s*[^$\s])') {
+            throw 'DEPLOYMENT_WORKFLOW_MAY_CONTAIN_EMBEDDED_SECRET_MATERIAL'
+          }
+          if ($deploymentWorkflow -match '(?im)^.*scp.*61-install-fast-lane-release') {
+            throw 'DEPLOYMENT_MUST_USE_THE_PREINSTALLED_ROOT_OWNED_INSTALLER'
+          }
+          if ($deploymentWorkflow -match '(?im)^.*sudo\s+env\s+') {
+            throw 'DEPLOYMENT_MUST_NOT_GRANT_SUDO_TO_ENV'
+          }
+          if ($deploymentWorkflow -match '(?im)^.*rm\s+-rf\s+') {
+            throw 'DEPLOYMENT_MUST_NOT_RECURSIVELY_DELETE_REMOTE_STAGING'
+          }
+          $ciWorkflow = Get-Content -LiteralPath '.github/workflows/ci.yml' -Raw
+          $expressionOpen = '$' + '{{'
+          foreach ($fragment in @("$expressionOpen github.run_id }}", "$expressionOpen github.run_attempt }}")) {
+            if (-not $ciWorkflow.Contains($fragment, [StringComparison]::Ordinal)) {
+              throw "CI_ARTIFACT_IDENTITY_CONTRACT_MISSING: $fragment"
+            }
+          }
+          $mutableActionPattern = '(?m)^\s*(?:-\s*)?uses:\s*[^@\s]+@(?![0-9a-f]{40}(?:\s+#.*)?\s*$).*$'
+          foreach ($entry in @(
+            @{ Name = 'ci.yml'; Text = $ciWorkflow },
+            @{ Name = 'pilot-deploy.yml'; Text = $deploymentWorkflow }
+          )) {
+            $mutable = [regex]::Matches($entry.Text, $mutableActionPattern) | ForEach-Object { $_.Value.Trim() }
+            if ($mutable.Count -gt 0) {
+              throw "WORKFLOW_ACTION_MUST_BE_PINNED_TO_FULL_COMMIT: $($entry.Name): $($mutable -join '; ')"
+            }
+          }
+      - name: Test classifier and release-manifest contracts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($test in @(
+            'tools/deployment/tests/Test-PilotDeploymentPlan.ps1',
+            'tools/deployment/tests/Test-PilotReleaseManifest.ps1'
+          )) {
+            & pwsh -NoLogo -NoProfile -NonInteractive -File $test
+            if ($LASTEXITCODE -ne 0) { throw "DEPLOYMENT_CONTRACT_TEST_FAILED: $test" }
+          }
+      - name: Test server fast-lane and health-check contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n infra/production/bootstrap/60-install-release.sh
+          bash -n infra/production/bootstrap/61-install-fast-lane-release.sh
+          bash -n infra/production/bootstrap/62-configure-fast-lane-deployer.sh
+          bash -n infra/production/bootstrap/100-final-audit.sh
+          bash -n infra/production/bootstrap/tests/60-100-full-release-integrity.test.sh
+          bash -n infra/production/bootstrap/tests/61-install-fast-lane-release.test.sh
+          bash -n infra/production/health/health-check.sh
+          bash -n infra/production/health/health-check.test.sh
+          bash infra/production/bootstrap/tests/60-100-full-release-integrity.test.sh
+          bash infra/production/bootstrap/tests/61-install-fast-lane-release.test.sh
+          bash infra/production/health/health-check.test.sh
 
   web:
+    # Keep the historic check name so existing main protection remains valid.
+    name: web
+    needs: classify
+    if: needs.classify.outputs.requires_web == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: 11.19.0
-      - uses: actions/setup-node@v4
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
         with:
-          node-version: '22'
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: apps/web/pnpm-lock.yaml
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
       - name: Run frontend regression tests
         run: pnpm test
-      - name: Type-check and build production bundle
-        run: pnpm build
+      - name: Type-check and build the Pilot bundle once
+        run: pnpm build:pilot
+      - name: Package the already tested web build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f dist/index.html
+          mkdir -p "$RUNNER_TEMP/pilot-web"
+          (cd dist && zip -q -r "$RUNNER_TEMP/pilot-web/web.zip" .)
+          sha256sum "$RUNNER_TEMP/pilot-web/web.zip" > "$RUNNER_TEMP/pilot-web/web.zip.sha256"
+          sha256sum dist/index.html > "$RUNNER_TEMP/pilot-web/index.html.sha256"
+      - name: Upload commit-bound web component
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pilot-web-component-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pilot-web
+          if-no-files-found: error
+          retention-days: 2
+
+  core-api:
+    # Keep the historic check name so existing main protection remains valid.
+    name: core-api
+    needs: classify
+    if: needs.classify.outputs.requires_core == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: apps/core-api/pom.xml
+      - name: Test and package Core API once against isolated PostgreSQL
+        run: >-
+          mvn --batch-mode --no-transfer-progress
+          --file apps/core-api/pom.xml
+          -Dproject.build.outputTimestamp=2026-01-01T00:00:00Z
+          clean package
+      - name: Select the executable JAR and deployment helper
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mapfile -t jars < <(find apps/core-api/target -maxdepth 1 -type f -name 'hotel-ai-os-core-api-*.jar' ! -name '*.original' | sort)
+          test "${#jars[@]}" -eq 1
+          mkdir -p "$RUNNER_TEMP/pilot-core"
+          cp "${jars[0]}" "$RUNNER_TEMP/pilot-core/core-api.jar"
+          cp infra/production/bootstrap/run-migration-once.sh "$RUNNER_TEMP/pilot-core/run-migration-once.sh"
+          sha256sum "$RUNNER_TEMP/pilot-core/core-api.jar" > "$RUNNER_TEMP/pilot-core/core-api.jar.sha256"
+      - name: Upload commit-bound Core API component
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pilot-core-component-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pilot-core
+          if-no-files-found: error
+          retention-days: 2
+
+  ota-platform:
+    # Keep the historic check name so existing main protection remains valid.
+    name: ota-platform
+    needs: classify
+    if: needs.classify.outputs.requires_core == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: |
+            ota-platform-pom.xml
+            apps/ota-browser-session-helper/pom.xml
+            apps/ota-connector-worker/pom.xml
+            apps/ota-standalone-api/pom.xml
+            packages/ota-contracts/pom.xml
+      - name: Test OTA platform modules
+        run: mvn --batch-mode --no-transfer-progress --file ota-platform-pom.xml test
+
+  assemble-release:
+    name: Assemble immutable Pilot release artifact
+    needs: [classify, workflow-contract, web, core-api, ota-platform]
+    if: >-
+      always() &&
+      needs.classify.result == 'success' &&
+      needs.workflow-contract.result == 'success' &&
+      (needs.web.result == 'success' || needs.web.result == 'skipped') &&
+      (needs.core-api.result == 'success' || needs.core-api.result == 'skipped') &&
+      (needs.ota-platform.result == 'success' || needs.ota-platform.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - name: Download the classified deployment plan
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: pilot-plan-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-input/plan
+      - name: Download the web component
+        if: needs.classify.outputs.requires_web == 'true'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: pilot-web-component-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-input/web
+      - name: Download the Core API component
+        if: needs.classify.outputs.requires_core == 'true'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: pilot-core-component-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-input/core
+      - name: Assemble the lane-specific payload
+        shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ needs.classify.outputs.head_sha }}
+          LANE: ${{ needs.classify.outputs.lane }}
+          REQUIRES_WEB: ${{ needs.classify.outputs.requires_web }}
+          REQUIRES_CORE: ${{ needs.classify.outputs.requires_core }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inputRoot = Join-Path $env:RUNNER_TEMP 'release-input'
+          $bundleRoot = Join-Path $env:RUNNER_TEMP 'pilot-release'
+          New-Item -ItemType Directory -Path $bundleRoot -Force | Out-Null
+
+          Copy-Item -LiteralPath (Join-Path $inputRoot 'plan/pilot-deployment-plan.json') -Destination (Join-Path $bundleRoot 'deployment-plan.json')
+          if ($env:REQUIRES_WEB -ceq 'true') {
+            Copy-Item -LiteralPath (Join-Path $inputRoot 'web/web.zip') -Destination (Join-Path $bundleRoot 'web.zip')
+          }
+          if ($env:REQUIRES_CORE -ceq 'true') {
+            Copy-Item -LiteralPath (Join-Path $inputRoot 'core/core-api.jar') -Destination (Join-Path $bundleRoot 'core-api.jar')
+            Copy-Item -LiteralPath (Join-Path $inputRoot 'core/run-migration-once.sh') -Destination (Join-Path $bundleRoot 'run-migration-once.sh')
+          }
+          & ./tools/deployment/New-PilotReleaseManifest.ps1 `
+            -PlanPath (Join-Path $bundleRoot 'deployment-plan.json') `
+            -SourceCommit $env:SOURCE_COMMIT `
+            -ArtifactRoot $bundleRoot `
+            -OutputPath (Join-Path $bundleRoot 'release-manifest.json')
+
+      - name: Upload the deployable commit artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pilot-release-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pilot-release
+          if-no-files-found: error
+          retention-days: 30
+      - name: Record release artifact identity
+        shell: bash
+        run: |
+          {
+            echo '### Immutable Pilot artifact'
+            echo
+            echo '- Artifact: `pilot-release-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}`'
+            echo '- Lane: `${{ needs.classify.outputs.lane }}`'
+            echo '- Source commit: `${{ needs.classify.outputs.head_sha }}`'
+            echo '- Production deployment: **not automatic**'
+          } >> "$GITHUB_STEP_SUMMARY"
