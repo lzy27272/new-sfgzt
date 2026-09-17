@@ -15,6 +15,7 @@ apt-get -y install \
   curl \
   fail2ban \
   fonts-noto-cjk \
+  fonts-wqy-zenhei \
   gnupg \
   jq \
   logrotate \

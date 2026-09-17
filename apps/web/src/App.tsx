@@ -1,7 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, demoFallbackEnabled, establishFederatedSession, hasAccessToken, login, logout } from './api/client'
 import { consumeLogoutEntry } from './app/logoutEntry'
-import { bootstrapAssignmentId, bootstrapAssignments, canLoadSecondaryResources } from './app/authBootstrap'
+import {
+  bootstrapAssignmentId,
+  bootstrapAssignments,
+  canLoadSecondaryResources,
+  canRenderAuthenticatedShell,
+  canUseStoredAcceptanceRole,
+} from './app/authBootstrap'
 import { validateLandscapeEvidence } from './app/imageEvidence'
 import {
   addWorkRecordSupplement,
@@ -75,6 +81,7 @@ import {
 import { resolveNotificationNavigation } from './app/notificationNavigation'
 import { useHashRoute } from './app/useHashRoute'
 import { loadExecutiveTasks } from './features/executiveTasks/api'
+import { hasDataRetentionAdministrationRole } from './features/dataRetention/policy'
 import { PageAccessBoundary } from './shared/PageAccessBoundary'
 import { AttachmentPreviewDialog, resolveAttachmentMediaType, type AttachmentPreview } from './shared/AttachmentPreviewDialog'
 import { WecomTaskEntryPage } from './features/wecom/WecomTaskEntry'
@@ -108,10 +115,11 @@ const TaskCreateDialog = lazy(() => import('./Pilot6Pages').then((module) => ({ 
 const WecomStoreWebhookConfiguration = lazy(() => import('./features/wecom/WecomStoreWebhookConfiguration').then((module) => ({ default: module.WecomStoreWebhookConfiguration })))
 const WecomUserBindingAdministration = lazy(() => import('./features/wecom/WecomUserBindingAdministration').then((module) => ({ default: module.WecomUserBindingAdministration })))
 const WecomDirectoryOnboardingAdministration = lazy(() => import('./features/wecom/WecomDirectoryOnboardingAdministration').then((module) => ({ default: module.WecomDirectoryOnboardingAdministration })))
+const DataRetentionAdministration = lazy(() => import('./features/dataRetention/DataRetentionAdministration').then((module) => ({ default: module.DataRetentionAdministration })))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
 
-const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; icon: string; group?: string; permissions?: string[] }> = [
+const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; icon: string; group?: string; permissions?: string[]; administratorOnly?: boolean }> = [
   { id: 'workbench', label: '角色工作台', icon: '⌂' },
   { id: 'hotel-dashboard', label: '门店工作台', icon: '▤', permissions: ['dashboard.hotel'] },
   { id: 'operations-dashboard', label: '多门店工作台', icon: '▥', permissions: ['dashboard.operations'] },
@@ -129,6 +137,7 @@ const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; ico
   { id: 'templates', label: '集团模板配置', icon: '▧', group: '系统配置', permissions: ['template.manage'] },
   { id: 'daily-report-templates', label: '日报模板中心', icon: '▤', permissions: [permissionCodes.dailyReportTemplate.read, permissionCodes.dailyReportTemplate.edit, permissionCodes.dailyReportTemplate.publish] },
   { id: 'organization', label: '组织与权限', icon: '⚙', group: '系统配置', permissions: ['org.manage', 'position-profile.read'] },
+  { id: 'data-retention', label: '数据留存策略', icon: '◷', group: '系统配置', administratorOnly: true },
   { id: 'wecom-webhooks', label: '企业微信 Webhook', icon: '◉', group: '系统配置', permissions: ['org.manage'] },
   { id: 'wecom-onboarding', label: '企业微信入职审核', icon: '人', group: '系统配置', permissions: [permissionCodes.wecomBinding.read] },
   { id: 'wecom-bindings', label: '企微绑定与异常', icon: '◎', permissions: [permissionCodes.wecomBinding.read] },
@@ -1006,6 +1015,33 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
   </main>
 }
 
+function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
+  error?: string
+  onRetry: () => void
+  onReturnToLogin?: () => void
+}) {
+  return <main className="login-auth-screen">
+    <div className="login-auth-layout">
+      <section className="login-auth-brand" aria-label={product.name}>
+        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
+        <div className="login-auth-intro"><h1>{product.name}</h1><p>系统正在根据登录账号解析组织、任职与功能权限。</p></div>
+        <small className="login-auth-version">{product.version}</small>
+      </section>
+      <section className="login-auth-panel">
+        <div className="login-auth-card" role="status" aria-live="polite">
+          <header><h2>{error ? '无法读取账号权限' : '正在验证登录状态'}</h2><p>{error ?? '验证完成后将自动进入当前账号对应的岗位工作台。'}</p></header>
+          {!error && <div className="state-card"><div className="spinner" /><strong>正在读取身份与权限</strong></div>}
+          {error && <>
+            <button type="button" className="primary login-auth-submit" onClick={onRetry}>重新验证</button>
+            {onReturnToLogin && <button type="button" className="secondary" onClick={onReturnToLogin}>返回账号登录</button>}
+          </>}
+        </div>
+        {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
+      </section>
+    </div>
+  </main>
+}
+
 function ChangePasswordDialog({ identity, onClose, onChanged }: { identity: RoleContext; onClose: () => void; onChanged: () => void }) {
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -1058,7 +1094,9 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const [route, navigate] = useHashRoute()
   const { view, params: routeParams, sectionId } = route
   let storedRole: string | null = null
-  try { storedRole = localStorage.getItem(roleStorageKey) } catch { /* private mode may disable storage */ }
+  if (canUseStoredAcceptanceRole(authMode)) {
+    try { storedRole = localStorage.getItem(roleStorageKey) } catch { /* private mode may disable storage */ }
+  }
   const [identity, setIdentity] = useState<RoleContext>(() => roleContexts.find((role) => role.key === storedRole) ?? roleContexts.find((role) => role.key === 'front-desk') ?? roleContexts[0])
   const fallbackIdentity: IdentitySnapshot = useMemo(() => ({
     accountId: identity.actorId,
@@ -1096,6 +1134,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const platformRoleCode = fullAccountRoleCode === 'PLATFORM_ADMIN' ? fullAccountRoleCode : undefined
   const ceoRoleCode = fullAccountRoleCode === 'CEO' ? fullAccountRoleCode : undefined
   const isPlatformAdmin = Boolean(platformRoleCode)
+  const isDataRetentionAdministrator = hasDataRetentionAdministrationRole(me.data.roleCodes)
   const isCeo = Boolean(ceoRoleCode)
   const isFullAccountLevel = isPlatformAdmin || isCeo
   const accountPresentationRoleCode = platformRoleCode ?? ceoRoleCode ?? me.data.primaryRoleCode
@@ -1156,6 +1195,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const isChairmanContext = presentationRoleCode === 'GROUP_CHAIRMAN'
   const executiveTasksEnabled = me.data.capabilities.groupManagement.executiveTasksEnabled
   const permissionVisibleNavigation = useMemo(() => navigation.filter((item) => {
+    if (item.administratorOnly && !isDataRetentionAdministrator) return false
     if (['hotel-dashboard', 'operations-dashboard', 'tasks', 'notifications'].includes(item.id)) return false
     if (['rules', 'work-packages'].includes(item.id) && !isPlatformAdmin) return false
     if (item.id === 'my-work' && !activeIdentity.businessActorAssignmentId) return false
@@ -1167,8 +1207,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       (demoFallbackEnabled && me.source === 'demo' && !isDailyFeatureRoute(item.id) && !isInvestmentFeatureRoute(item.id)) ||
       activePermissions.includes('*') ||
       item.permissions.some((permission) => activePermissions.includes(permission))
-  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isChairmanContext, isPlatformAdmin, me.source])
-  const visibleNavigation = useMemo(
+  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.source])
+  const publishedModuleNavigation = useMemo(
     () => applyPublishedModuleVisibility(
       permissionVisibleNavigation,
       activePermissions,
@@ -1176,6 +1216,13 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     ),
     [activePermissions, permissionVisibleNavigation, presentationRoleCode],
   )
+  const visibleNavigation = useMemo(() => {
+    if (!isDataRetentionAdministrator || publishedModuleNavigation.some((item) => item.id === 'data-retention')) {
+      return publishedModuleNavigation
+    }
+    const visibleIds = new Set(publishedModuleNavigation.map((item) => item.id))
+    return navigation.filter((item) => visibleIds.has(item.id) || item.id === 'data-retention')
+  }, [isDataRetentionAdministrator, publishedModuleNavigation])
   const navigationTarget = (id: AppRouteId): AppRouteId => {
     if (id !== 'daily-reports-my') return id
     const canUseTeamReport = activePermissions.includes('*')
@@ -1196,11 +1243,12 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     const target = presentationPolicy.mobileTabs[0]?.target ?? 'workbench'
     if (target !== 'workbench' && visibleNavigation.some((item) => item.id === target)) navigate(navigationTarget(target))
   }, [me.error, me.loading, navigate, presentationPolicy, route.explicit, view, visibleNavigation])
-  const routePresentationAllowed = (view === 'account-self-service' && isChairmanContext)
+  const routePresentationAllowed = (view === 'data-retention' && isDataRetentionAdministrator)
+    || (view === 'account-self-service' && isChairmanContext)
     || !useRoleDefaultsFallback
     || isRouteAllowedByRoleDefaults(presentationRoleCode, view, true)
   const page = useMemo(() => {
-    if (authMode === 'bearer' && (me.loading || me.error)) {
+    if (!canRenderAuthenticatedShell(authMode, me.loading, me.error)) {
       return <section className="page-section"><div className="empty-state"><strong>{me.error ? '身份与权限读取失败' : '正在读取身份与权限'}</strong><span>{me.error ?? '系统将在权限解析完成后加载业务页面，避免使用错误的岗位或组织范围。'}</span></div></section>
     }
     if (isInvestmentFeatureRoute(view)) {
@@ -1241,10 +1289,10 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
         orgName={activeIdentity.orgName}
         go={navigate}
         resolveTarget={navigationTarget}
-        onChangePassword={authMode === 'bearer' ? () => setChangingPassword(true) : undefined}
-        onLogout={authMode === 'bearer' ? onLogout : undefined}
+        onChangePassword={authMode !== 'dev-header' ? () => setChangingPassword(true) : undefined}
+        onLogout={authMode !== 'dev-header' ? onLogout : undefined}
       />; break
-      case 'account-self-service': legacyPage = <AccountSelfService roleLabel={activeIdentity.label} orgName={activeIdentity.orgName} onChangePassword={authMode === 'bearer' ? () => setChangingPassword(true) : undefined} onLogout={authMode === 'bearer' ? onLogout : undefined} />; break
+      case 'account-self-service': legacyPage = <AccountSelfService roleLabel={activeIdentity.label} orgName={activeIdentity.orgName} onChangePassword={authMode !== 'dev-header' ? () => setChangingPassword(true) : undefined} onLogout={authMode !== 'dev-header' ? onLogout : undefined} />; break
       case 'hotel-dashboard': legacyPage = <HotelDashboardPage identity={activeIdentity} routeParams={routeParams} go={navigate} />; break
       case 'operations-dashboard': legacyPage = <OperationsDashboardPage identity={activeIdentity} />; break
       case 'work-packages': legacyPage = <WorkPackageCenter identity={activeIdentity} permissions={activePermissions} />; break
@@ -1258,6 +1306,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       case 'notifications': legacyPage = <Notifications identity={activeIdentity} permissions={activePermissions} routeParams={routeParams} go={navigate} />; break
       case 'templates': legacyPage = <EnterpriseTemplateCenter identity={activeIdentity} permissions={activePermissions} />; break
       case 'organization': legacyPage = <OrganizationCenter identity={activeIdentity} permissions={activePermissions} routeParams={routeParams} />; break
+      case 'data-retention': legacyPage = <DataRetentionAdministration identity={activeIdentity} />; break
       case 'wecom-webhooks': legacyPage = <WecomStoreWebhookConfiguration identity={activeIdentity} permissions={activePermissions} />; break
       case 'wecom-bindings': legacyPage = <WecomUserBindingAdministration identity={activeIdentity} requestId={routeParams.requestId} onClearRequest={() => navigate('wecom-bindings')} />; break
       case 'wecom-onboarding': legacyPage = <WecomDirectoryOnboardingAdministration
@@ -1275,7 +1324,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     const chairmanTaskAllowed = view !== 'tasks' || !isChairmanContext || (executiveTasksEnabled && Boolean(activeIdentity.businessActorAssignmentId))
     const accountSelfServiceAllowed = view !== 'account-self-service' || isChairmanContext
     const administratorRouteAllowed = !['rules', 'work-packages'].includes(view) || isPlatformAdmin
-    const contextAllowed = (view !== 'my-work' || Boolean(activeIdentity.businessActorAssignmentId)) && chairmanTaskAllowed && accountSelfServiceAllowed && administratorRouteAllowed && routePresentationAllowed
+    const dataRetentionRouteAllowed = view !== 'data-retention' || isDataRetentionAdministrator
+    const contextAllowed = (view !== 'my-work' || Boolean(activeIdentity.businessActorAssignmentId)) && chairmanTaskAllowed && accountSelfServiceAllowed && administratorRouteAllowed && dataRetentionRouteAllowed && routePresentationAllowed
     const boundaryPermissions = demoFallbackEnabled && me.source === 'demo' ? ['*'] : activePermissions
     return <PageAccessBoundary
       permissions={boundaryPermissions}
@@ -1284,7 +1334,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     >
       <Suspense fallback={<div className="state-card"><div className="spinner" /><strong>正在加载当前岗位功能</strong></div>}>{legacyPage}</Suspense>
     </PageAccessBoundary>
-  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation])
+  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation])
   const mobileNavigationItems = useMemo(() => {
     const visibleIds = new Set(visibleNavigation.map((item) => item.id))
     const resolveMobileTarget = (tab: MobilePresentationTab): AppRouteId | undefined => {
@@ -1316,6 +1366,10 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     navigate('workbench')
   }
 
+  if (!canRenderAuthenticatedShell(authMode, me.loading, me.error)) {
+    return <SessionBootstrapPage error={me.error} onRetry={me.reload} onReturnToLogin={onLogout} />
+  }
+
   return <div className="shell">
     <aside className="sidebar"><div className="brand-mark"><div>四</div><span><strong>{product.name}</strong><small>{product.edition} · {product.editionLabel}</small></span></div>
       <nav>{visibleNavigation.map((item, index) => <div key={item.id}>{item.group && <span className="nav-group">{item.group}</span>}<button className={sectionId === (item.sectionId ?? item.id) ? 'active' : ''} onClick={() => navigate(navigationTarget(item.id))}><i>{item.icon}</i><span>{item.id === 'workbench' ? `${activeIdentity.label}工作台` : item.label}</span>{item.id === 'notifications' && unreadCount > 0 && <b>{unreadCount}</b>}</button>{index === 0 && <div className="nav-separator" />}</div>)}</nav>
@@ -1327,8 +1381,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       {isFullAccountLevel && <span className="mobile-current-context">{activeIdentity.label}</span>}
       {canReadSidebarNotifications && <button className="bell" onClick={() => navigate('notifications')} aria-label={unreadCount > 0 ? `消息，${unreadCount}条未读` : '消息'}>消息{unreadCount > 0 && <b>{unreadCount}</b>}</button>}
       <div className="user"><span>{activeIdentity.userName.slice(-1)}</span><div><strong>{activeIdentity.userName}</strong><small>{activeIdentity.label}</small></div></div>
-      {authMode === 'bearer' && <button className="logout-button" onClick={() => setChangingPassword(true)}>修改密码</button>}
-      {authMode === 'bearer' && <button className="logout-button" onClick={onLogout}>退出</button>}
+      {authMode !== 'dev-header' && <button className="logout-button" onClick={() => setChangingPassword(true)}>修改密码</button>}
+      {authMode !== 'dev-header' && <button className="logout-button" onClick={onLogout}>退出</button>}
     </header>
       {demoFallbackEnabled && <div className="demo-warning">已显式启用演示回退：仅当真实 API 请求失败时展示演示数据；API 返回空结果时仍显示空状态。</div>}
       <div className="canvas">{page}</div>
@@ -1345,7 +1399,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(() => {
-    if (authMode === 'bearer' && consumeLogoutEntry(clearAccessToken)) return false
+    if (authMode !== 'dev-header' && consumeLogoutEntry(clearAccessToken)) return false
     return authMode !== 'bearer' || initialWecomSessionBootstrap || hasAccessToken()
   })
   const [wecomTaskEntry, setWecomTaskEntry] = useState(initialWecomTaskEntry)

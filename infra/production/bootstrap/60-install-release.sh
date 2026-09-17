@@ -275,6 +275,10 @@ main() {
   test "${staged_web_tree_sha}" = "${expected_web_tree_sha}" ||
     fail "staged Web tree SHA-256 mismatch: expected=${expected_web_tree_sha} actual=${staged_web_tree_sha}"
 
+  if ! grep -R --include='*.js' -Fq 'X-Hotel-AI-Authorization' "${STAGE_ROOT}/web/assets"; then
+    fail 'Refusing to install a Web bundle without the Pilot bearer-login contract. Build with pnpm build:pilot.'
+  fi
+
   if test -e /opt/hotel-ai-os/current && test ! -L /opt/hotel-ai-os/current; then
     fail '/opt/hotel-ai-os/current is not a symlink.'
   fi

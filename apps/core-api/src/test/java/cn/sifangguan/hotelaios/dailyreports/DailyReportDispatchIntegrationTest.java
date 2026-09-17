@@ -35,6 +35,8 @@ class DailyReportDispatchIntegrationTest {
             UUID.fromString("19200000-0000-0000-0000-000000000001");
     private static final UUID FRONT_DESK_ASSIGNMENT =
             UUID.fromString("19200000-0000-0000-0000-000000000002");
+    private static final UUID SECONDARY_FRONT_DESK_ASSIGNMENT =
+            UUID.fromString("19200000-0000-0000-0000-000000000005");
     private static final UUID GENERAL_MANAGER_TEMPLATE_VERSION =
             UUID.fromString("43100000-0000-0000-0000-000000000004");
 
@@ -65,6 +67,15 @@ class DailyReportDispatchIntegrationTest {
     void materializesFiveHotelRolesOnceAndUsesFrozenPolicyForEligibleDraftReports() {
         // This test isolates the current-business-day lifecycle. Production keeps
         // the seeded one-day backfill policy, which is covered by the dispatcher itself.
+        // The secondary front-desk demo assignment is intentionally future-dated in the
+        // seed. Make it eligible for this test's dynamic business date so the assertion
+        // does not depend on the wall-clock date of the CI runner.
+        assertThat(jdbc.update("""
+                update employee_position_assignment
+                set valid_from = ?, valid_to = null, status = 'ACTIVE'
+                where tenant_id = ? and id = ?
+                """, BUSINESS_DATE.minusDays(1), TENANT, SECONDARY_FRONT_DESK_ASSIGNMENT))
+                .isEqualTo(1);
         jdbc.update("""
                 update daily_report_delivery_policy
                 set backfill_days = 0

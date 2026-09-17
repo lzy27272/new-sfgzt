@@ -65,6 +65,7 @@ const legacyViews: readonly ViewId[] = [
   'notifications',
   'templates',
   'organization',
+  'data-retention',
   'wecom-webhooks',
   'wecom-bindings',
   'wecom-onboarding',

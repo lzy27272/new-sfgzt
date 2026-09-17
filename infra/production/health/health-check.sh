@@ -124,16 +124,38 @@ validate_flyway_database_state() {
 
 select_latest_backup() {
   local backup_directory="${1:?Backup directory is required}"
+  local backup_pattern="${2:?Backup filename pattern is required}"
   local latest_line
 
   # Do not use `head` in this pipe: with `set -o pipefail`, a sufficiently
   # large directory can make the upstream sorter receive SIGPIPE and turn a
   # healthy deployment into a false rollback.
   latest_line="$(find "${backup_directory}" \
-    -maxdepth 1 -type f -name 'hotel_ai_os-auto-*.dump.enc' \
+    -maxdepth 1 -type f -name "${backup_pattern}" \
     -printf '%T@ %p\n' | sort -nr | sed -n '1p')"
   test -n "${latest_line}"
   printf '%s\n' "${latest_line#* }"
+}
+
+validate_running_release() {
+  local current_release="${1:?Current release path is required}"
+  local main_pid="${2:?Core API MainPID is required}"
+  local running_release="${3:?Running release path is required}"
+
+  if [[ "${current_release}" != /opt/hotel-ai-os/releases/* ]]; then
+    printf 'Current Core API target is not an immutable release: %s\n' \
+      "${current_release}" >&2
+    return 1
+  fi
+  if [[ ! "${main_pid}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Invalid Core API MainPID: %s\n' "${main_pid}" >&2
+    return 1
+  fi
+  if test "${running_release}" != "${current_release}"; then
+    printf 'Core API process release mismatch: current=%s running=%s pid=%s\n' \
+      "${current_release}" "${running_release}" "${main_pid}" >&2
+    return 1
+  fi
 }
 
 main() {
@@ -165,9 +187,8 @@ main() {
   packaged_flyway_version="${packaged_flyway_version%%:*}"
 
   main_pid="$(systemctl show hotel-ai-os-core-api.service --property MainPID --value)"
-  [[ "${main_pid}" =~ ^[1-9][0-9]*$ ]]
   running_release="$(readlink -f "/proc/${main_pid}/cwd")"
-  test "${running_release}" = "${current_release}"
+  validate_running_release "${current_release}" "${main_pid}" "${running_release}"
 
   flyway_state="$(sudo -u postgres psql \
     --dbname hotel_ai_os \
@@ -214,10 +235,38 @@ main() {
   test -n "${root_usage}"
   test "${root_usage}" -lt 85
 
-  latest_backup="$(select_latest_backup /var/backups/hotel-ai-os/postgres)"
+  latest_backup="$(select_latest_backup \
+    /var/backups/hotel-ai-os/postgres/daily \
+    'hotel_ai_os-daily-*.dump.enc')"
   test -n "${latest_backup}"
   find "${latest_backup}" -mmin -1560 -print -quit | grep -q .
-  sha256sum --check "${latest_backup}.sha256" >/dev/null
+  (cd "$(dirname "${latest_backup}")" && \
+    sha256sum --check "$(basename "${latest_backup}.sha256")" >/dev/null)
+
+  test -r /etc/hotel-ai-os/backup-offsite.env
+  test "$(stat -c '%U:%a' /etc/hotel-ai-os/backup-offsite.env)" = 'root:600'
+  # shellcheck disable=SC1091
+  . /etc/hotel-ai-os/backup-offsite.env
+  test -n "${HOTEL_AI_OS_BACKUP_OFFSITE_DIR:-}"
+  offsite_fstype="$(findmnt -n -o FSTYPE --target "${HOTEL_AI_OS_BACKUP_OFFSITE_DIR}")"
+  case "${offsite_fstype}" in
+    nfs|nfs4|cifs|fuse.rclone|fuse.sshfs) ;;
+    *) exit 1 ;;
+  esac
+  offsite_latest="${HOTEL_AI_OS_BACKUP_OFFSITE_DIR}/postgres/daily/$(basename "${latest_backup}")"
+  test -f "${offsite_latest}"
+  (cd "$(dirname "${offsite_latest}")" && \
+    sha256sum --check "$(basename "${offsite_latest}.sha256")" >/dev/null)
+  if [[ -r /etc/sifangguan-ota/runtime.env ]]; then
+    latest_runtime_backup="$(select_latest_backup \
+      /var/backups/hotel-ai-os/postgres/daily \
+      'sifangguan-ota-runtime-daily-*.env.enc')"
+    test -n "${latest_runtime_backup}"
+    offsite_runtime="${HOTEL_AI_OS_BACKUP_OFFSITE_DIR}/postgres/daily/$(basename "${latest_runtime_backup}")"
+    test -f "${offsite_runtime}"
+    (cd "$(dirname "${offsite_runtime}")" && \
+      sha256sum --check "$(basename "${offsite_runtime}.sha256")" >/dev/null)
+  fi
 
   printf 'HOTEL_AI_OS_HEALTH_OK flyway_jar=%s flyway_db=%s failed_migrations=0 root_usage=%s%% backup=%s\n' \
     "${packaged_flyway_version}" "${database_flyway_version}" "${root_usage}" "$(basename "${latest_backup}")"

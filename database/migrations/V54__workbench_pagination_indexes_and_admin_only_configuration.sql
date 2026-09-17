@@ -7,6 +7,28 @@ CREATE INDEX IF NOT EXISTS ix_work_expectation_workbench_scope
 CREATE INDEX IF NOT EXISTS ix_org_unit_closure_descendant_lookup
     ON org_unit_closure (tenant_id, descendant_id, depth, ancestor_id);
 
+-- V47 publishes the active store-manager daily-report template during
+-- migration. On a fresh install its UTC publication day can begin after the
+-- Shanghai business-day cutoff instant, leaving the current business date
+-- without a resolvable template. This is a narrowly scoped seed correction:
+-- existing installations are older than one day and are not updated. The
+-- immutable-version trigger is disabled only around that conditional update;
+-- Flyway's transaction restores it automatically if any statement fails.
+ALTER TABLE daily_report_template_version
+    DISABLE TRIGGER trg_daily_report_template_version_immutable;
+
+UPDATE daily_report_template_version
+SET effective_from = now() - interval '1 day',
+    updated_at = now(),
+    row_version = row_version + 1
+WHERE tenant_id = '10000000-0000-0000-0000-000000000001'
+  AND id = '47100000-0000-0000-0000-000000000001'
+  AND lifecycle_status = 'PUBLISHED'
+  AND effective_from > now() - interval '1 day';
+
+ALTER TABLE daily_report_template_version
+    ENABLE TRIGGER trg_daily_report_template_version_immutable;
+
 -- Product governance: enterprise rules and work-package configuration are
 -- platform-administration functions. Runtime work execution continues through
 -- work-record permissions and does not require access to either configuration

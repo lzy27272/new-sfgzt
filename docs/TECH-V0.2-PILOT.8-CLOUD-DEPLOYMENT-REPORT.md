@@ -194,3 +194,41 @@ Browser插件不可用，且Playwright自带Chromium未安装；遵循前端测�
 - 部署后Core API、Caddy和PostgreSQL均为`active`，运行进程目录及两个`current`软链接均指向本次release，健康状态为`UP`；Flyway保持V53且失败迁移0，Core API与PostgreSQL继续只监听`127.0.0.1`。公网首页返回200，未授权`/api/v1/iam/me`及`/api/v1/executive-tasks`均返回401，启动窗口未发现warning/error/exception。
 - 验证：Web全量118项、聚焦20项、TypeScript及Pilot生产构建通过；高管任务后端集成测试6项通过。Codex内置Browser运行组件缺失，未伪造生产用户会话，因此董事长专用按钮和普通管理岗任务表单的登录后点击仍需由业务测试账号完成最终复验。
 - 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
+
+## 19. 2026-09-17 当日工作自动汇总、审核督办与评估建议
+
+- 功能提交为`d97cc2ea648a09c97640e37ae962202645e73f3a`，已快进推送至GitHub `lzy27272/AIzhongtai:main`。门店当日已提交工作会自动投影到当日日报草稿：待审核记录保持`已提交待审核`，审核通过后才转为完成或异常，驳回时移除失效投影；日报重复聚合保持幂等，并为草稿执行自愈同步。
+- 截止时间后仍存在待审工作或待审日报时，系统按最新审核状态向直属主管的个人企业微信发送督办；已处理记录不会被旧队列重复提醒，待审数量变化时可生成新提醒。工作审核与日报审核提醒仅发个人企微，未放宽到群聊渠道。
+- 日报评估层基于已提交工作中明确的异常、问题、后续动作及表单问题字段生成可追溯的风险摘要、改进建议和事实链；“无异常/正常”等否定信息会被过滤。当前为内部确定性规则引擎，未接入外部大模型，也没有对外传输酒店工作数据。
+- 云端不可变发布版本为`20260917-pilot8-d97cc2e`。后端JAR SHA-256为`5f6e75a460fd9c1f157aa6f6f59fbada2a303425dca53b2c2b9febc9e5ad925b`；Web ZIP SHA-256为`1e2b0787ef8a6f3eb124ba3d4c867ebd530f28379f4d2bda4aadd7bd1c2ed38e`；服务器与公网`index.html` SHA-256均为`116d30a87b84720ffc861cffccc4bf184a0d108c63a0a1ac3967925c4a351144`。
+- 部署前生成并独立校验数据库加密备份`hotel_ai_os-daily-20260917T083802+0800.dump.enc`和运行配置加密备份`sifangguan-ota-runtime-daily-20260917T083802+0800.env.enc`，两者及校验文件均为`root:root:0600`，SHA-256分别为`c61024edfcc0cb5918ffb21006a0a53a505fe1bcd6b8e82bb63709c82effd8f2`和`15c2d8ac4fb5ed093fe025afcd094f0f44183d117b0cc65f3618af243e307828`；备份脚本已完成解密比对及`pg_restore --list`恢复性检查。异地备份仍未配置，服务在本地备份完成后按预期以`OFFSITE_BACKUP_CONFIG_REQUIRED`退出；本次继续沿用已批准的内部Pilot例外，不表示异地备份门禁已满足。
+- 本次无新增数据库迁移。激活前后均通过候选JAR与数库全量Flyway版本及校验和一致性校验，最终JAR/数据库均为V53，失败迁移0。部署使用旧版软链接自动回滚保护，本次未触发回滚，上一版`20260916-pilot8-bbb4592`仍保留为回滚目标。
+- 验证：Web全量120项、TypeScript及Pilot生产构建通过；后端日报聚合、督办发送专项7项通过。远端全量Maven验证的唯一错误是临时构建包未包含`docs/openapi.yaml`，实际代码测试无断言失败；该契约文件本轮未修改。5个发布输入扫描63个归档、23,744个条目，敏感信息0命中、0错误。
+- 部署后Core API、Caddy、PostgreSQL、fail2ban和ClamAV均为`active`，运行进程目录及两个`current`软链接均指向新release，健康状态为`UP`；Core API与PostgreSQL继续只监听`127.0.0.1`。公网首页返回200，未授权`/api/v1/iam/me`及`/api/v1/executive-tasks`均返回401，激活窗口warning/error/exception为0。
+- 生产进程已确认管理自动化Worker、企微发送Worker及Pilot租户白名单均已启用；现有7条启用的日报投递策略，开始时间为18:55、20:00和22:00。上线后Worker已回填前一营业日7份日报草稿，生成2条系统预填的待审项与7条可用规则评估。已生成1条日报待复核督办，但该条当前直属审核人账号未有有效企微绑定，因此可在中台通知中查看，暂不会发送个人企微；行政人事补齐该主管绑定后，后续新督办才能经个人企微送达。
+- Codex内置Browser运行组件缺失，本轮无法进行登录后真实业务账号视觉验收，也未改用未经授权的浏览器替代；业务侧仍需在晚间汇总时段复验真实门店日报、主管个人企微提醒及评估事实链展示。
+- 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
+
+## 20. 2026-09-17 V54/V55 稳定性、数据留存与绩效快照增量发布
+
+- 发布提交为`8b62f52364021d145e76c8e6a2574b577adf5d7b`，已推送至GitHub `lzy27272/AIzhongtai:main`。GitHub Actions运行`35172735966`三项门禁全部通过：Core API 280项（0失败、0错误、3跳过）、Web 133项（全部通过）并完成TypeScript/Vite生产构建、OTA平台113项（0失败、0错误、1跳过）。
+- 云端不可变发布版本为`20260917-pilot8-8b62f52`。后端JAR SHA-256为`96efb18987d27a21396e63e2451ecbba087802aa1e1c4d9187843c0c9abc679b`；服务器、本地构建与公网`index.html` SHA-256均为`c98a9ba761c2fd56f63fcf874ec22f55271589fd39fca5c6bd23bc58e14dd05c`。公网逐一回读26个Web文件并与服务器文件比对，26/26一致。
+- 部署前生成并验证数据库加密备份`hotel_ai_os-daily-20260917T100815+0800.dump.enc`和运行配置加密备份`sifangguan-ota-runtime-daily-20260917T100815+0800.env.enc`，两者及校验文件均为`root:root:0600`；SHA-256分别为`a6ca8e9808a91336a4752afc1c1922b2d4fc1571049f705b908c3f76869e34b6`和`34845b28cf91677e66182223f4f441d0b57c035218f5b5be72d5ae288a2df737`。备份脚本已完成解密后的`pg_restore --list`验证；异地备份仍未配置，服务在本地备份成功后按预期以`OFFSITE_BACKUP_CONFIG_REQUIRED`退出，本次继续沿用已批准的内部Pilot例外。
+- Flyway由V53迁移至V55，V54/V55均成功且失败迁移为0；新动态健康脚本已安装，候选JAR与数据库V1至V55的全部迁移版本和校验和一致。全局健康检查的应用、迁移、私有端口、磁盘和本地备份门禁均通过，最终只停在尚未配置的异地备份门禁。
+- V55建立租户级数据留存策略和不可覆盖的员工日/月绩效快照。当前策略为图片5天、文档30天、员工/PMS/OTA/KPI汇总36个月、原始载荷90天；图片清理开关为`false`，清理Worker使用默认关闭配置。上线前后附件`DELETED/deleted_at`数量均为0，本次迁移和部署没有删除任何历史图片或文件。
+- 集团管理员被纳入账户级系统管理员身份解析，但实际可见组织范围仍由`role_assignment`控制；修复了其无员工任职时数据留存接口被误判403的问题。Linux CI与生产初始化脚本统一安装PDF所需文泉驿TrueType字体，两个投资PDF渲染测试均已恢复通过，现有云机字体文件也已核验存在。
+- 部署后Core API、Caddy、PostgreSQL、fail2ban和ClamAV均为`active`；运行进程目录及Core/Web两个`current`软链接均指向新release，内网健康为`UP`。受保护的数据留存策略、清理预览和团队工作台接口未登录均返回401，新进程激活窗口Core API warning/error/exception与Caddy error均为0，根分区使用率14%（148GB可用）。
+- 当前绩效快照由工作台汇总查询触发并按内容哈希幂等、版本化写入，尚未增加独立的全租户定时快照任务；结构化工作记录仍持续保留。Codex内置Browser运行组件缺失，因此本轮不宣称登录后数据留存页面或真实岗位工作台的视觉交互验收，需由业务测试账号完成最终UAT。
+- 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。
+
+## 21. 2026-09-17 服务端身份解析与岗位工作台路由修复
+
+- 发布提交为`5012c379410b2143e591be3b6b164ae702dfef7b`，已快进合并并推送至GitHub `lzy27272/AIzhongtai:main`。GitHub Actions运行`35178033307`全部通过：Core API、Web和OTA平台三项作业均为`success`；Web本地141项测试、TypeScript和Pilot生产构建再次通过。
+- 本次修复生产Web普通入口在服务端身份尚未解析或已失效时错误恢复浏览器缓存岗位的问题：真实会话必须先通过`/api/v1/iam/me`，401会清理Bearer与服务端Cookie会话，并通过会话代次避免旧请求清除新登录；Pilot发布和云端安装器均强制校验`X-Hotel-AI-Authorization`认证契约。
+- 云端不可变发布版本为`20260917-pilot8-5012c37`。后端无代码变化，复用已验证JAR，SHA-256为`96efb18987d27a21396e63e2451ecbba087802aa1e1c4d9187843c0c9abc679b`；服务器、本地构建与公网`index.html` SHA-256均为`4b9667b20e492266b8f003e9d388aeb3284e8b854c5dfff55600067dc201b686`，主JS为`fdbb3b0b15f7a17d3a2219f7b2ae561fcf9528e1debcf436a369812c207e51f5`，主CSS为`a7b23517a2fd3c4324f57ae01fd55f04c74c711a57d8a354995a80ae8fa8550d`。
+- 部署前生成并验证数据库加密备份`hotel_ai_os-daily-20260917T113414+0800.dump.enc`和运行配置加密备份`sifangguan-ota-runtime-daily-20260917T113414+0800.env.enc`，两者及校验文件均为`root:root:0600`；SHA-256分别为`f7e2ff2a16311020ebb9d2df08173ea78ad081f028d1bbd79eeab289a73395fd`和`b7d12a00eed336842d174b07dd376118b51e40c0c7d1b8e4064a92e21f51455f`。异地备份仍未配置，服务在本地备份成功后按预期停在`OFFSITE_BACKUP_CONFIG_REQUIRED`；本次继续沿用已批准的内部Pilot例外，不表示异地备份门禁已满足。
+- 第一次激活在切换前因备份目录仅root可读导致前置断言退出；当时新release目录尚未创建，两个软链接仍指向旧版且服务保持`active`。门禁改为使用最小`sudo test/stat/sha256sum`后重新执行，安装、迁移、重启及自动回滚保护全部通过，本次未触发回滚，旧版`20260917-pilot8-8b62f52`完整保留。
+- 部署后Core API、Caddy、PostgreSQL、fail2ban和ClamAV均为`active`，Core/Web软链接与Core进程目录均指向新release，内网健康为`UP`；Flyway JAR与数据库全量版本和校验和一致，最新V55、失败迁移0。Core API与PostgreSQL继续只监听`127.0.0.1`，根盘使用率14%、可用148GB。
+- 公网首页返回200，公网与内网未授权`/api/v1/iam/me`均返回401，格式正确但不存在的账号登录返回401；公开主资源确认`AUTH_MODE=bearer`并包含新认证请求头。激活窗口Core API warning/error/exception与Caddy error均为0，26个Web文件已完成服务器和公网关键资源哈希回读。
+- Codex内置Browser因本机已安装客户端与服务组件版本不一致而无法启动，本轮不宣称完成登录后的真实账号视觉点击验收；已由SSR渲染测试证明未登录显示登录页、服务端身份解析期间不显示缓存工作台。业务侧仍需使用至少一个普通员工账号和一个多岗位管理账号完成最终UAT。
+- 本次仍为内部Pilot增量部署，不改变TECH-V0.2正式版本的`Unreleased / NO-GO`状态。

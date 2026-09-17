@@ -19,6 +19,15 @@ expect_failure() {
   printf 'ok - %s\n' "${name}"
 }
 
+expect_script_fragment() {
+  local name="$1"
+  local fragment="$2"
+  if ! grep -Fq -- "${fragment}" "${script_dir}/health-check.sh"; then
+    fail "${name}"
+  fi
+  printf 'ok - %s\n' "${name}"
+}
+
 valid_listing=$'META-INF/MANIFEST.MF\nBOOT-INF/classes/db/migration/V1__foundation.sql\nBOOT-INF/classes/db/migration/V9__notifications.sql\nBOOT-INF/classes/db/migration/V37__navigation.sql\nBOOT-INF/classes/db/migration/R__refresh_view.sql'
 test "$(resolve_packaged_flyway_version "${valid_listing}")" = '37'
 printf '%s\n' 'ok - highest packaged numeric migration is selected'
@@ -61,10 +70,60 @@ cleanup_backup_fixture() {
   esac
 }
 trap cleanup_backup_fixture EXIT
-touch -t 202609160101 "${backup_fixture}/hotel_ai_os-auto-older.dump.enc"
-touch -t 202609160102 "${backup_fixture}/hotel_ai_os-auto-newer.dump.enc"
-test "$(select_latest_backup "${backup_fixture}")" = \
-  "${backup_fixture}/hotel_ai_os-auto-newer.dump.enc"
+touch -t 202609160101 "${backup_fixture}/hotel_ai_os-daily-older.dump.enc"
+touch -t 202609160102 "${backup_fixture}/hotel_ai_os-daily-newer.dump.enc"
+test "$(select_latest_backup \
+  "${backup_fixture}" \
+  'hotel_ai_os-daily-*.dump.enc')" = \
+  "${backup_fixture}/hotel_ai_os-daily-newer.dump.enc"
 printf '%s\n' 'ok - latest backup selection is pipefail safe'
+
+validate_running_release \
+  '/opt/hotel-ai-os/releases/20260917-pilot8-example' \
+  '1234' \
+  '/opt/hotel-ai-os/releases/20260917-pilot8-example'
+printf '%s\n' 'ok - running process from current immutable release is accepted'
+expect_failure 'running process from stale release is rejected' \
+  validate_running_release \
+    '/opt/hotel-ai-os/releases/20260917-pilot8-current' \
+    '1234' \
+    '/opt/hotel-ai-os/releases/20260917-pilot8-stale'
+expect_failure 'non-release current path is rejected' \
+  validate_running_release '/opt/hotel-ai-os/current' '1234' '/opt/hotel-ai-os/current'
+expect_failure 'invalid Core API PID is rejected' \
+  validate_running_release \
+    '/opt/hotel-ai-os/releases/20260917-pilot8-example' \
+    '0' \
+    '/opt/hotel-ai-os/releases/20260917-pilot8-example'
+
+# These assertions deliberately protect the production gates that must not be
+# weakened while replacing the former hard-coded Flyway version assertion.
+expect_script_fragment 'required services gate is preserved' \
+  'for service_name in ssh postgresql fail2ban clamav-freshclam hotel-ai-os-core-api; do'
+expect_script_fragment 'Core API health endpoint gate is preserved' \
+  'http://127.0.0.1:18080/actuator/health'
+expect_script_fragment 'private PostgreSQL and API port gate is preserved' \
+  "grep -E '(^0[.]0[.]0[.]0:5432"
+expect_script_fragment 'root filesystem threshold gate is preserved' \
+  'test "${root_usage}" -lt 85'
+expect_script_fragment 'daily encrypted database backup gate is preserved' \
+  '/var/backups/hotel-ai-os/postgres/daily'
+expect_script_fragment 'daily database backup checksum gate is preserved' \
+  "sha256sum --check \"\$(basename \"\${latest_backup}.sha256\")\""
+expect_script_fragment 'offsite config ownership and mode gate is preserved' \
+  "test \"\$(stat -c '%U:%a' /etc/hotel-ai-os/backup-offsite.env)\" = 'root:600'"
+expect_script_fragment 'offsite remote filesystem allowlist is preserved' \
+  'nfs|nfs4|cifs|fuse.rclone|fuse.sshfs) ;;'
+expect_script_fragment 'offsite database backup gate is preserved' \
+  'offsite_latest="${HOTEL_AI_OS_BACKUP_OFFSITE_DIR}/postgres/daily/'
+expect_script_fragment 'OTA runtime config backup gate is preserved' \
+  "if [[ -r /etc/sifangguan-ota/runtime.env ]]; then"
+expect_script_fragment 'OTA runtime offsite integrity gate is preserved' \
+  'sha256sum --check "$(basename "${offsite_runtime}.sha256")"'
+
+if grep -Fq -- "test \"\${flyway_state}\" = '22|true'" "${script_dir}/health-check.sh"; then
+  fail 'hard-coded Flyway V22 assertion is removed'
+fi
+printf '%s\n' 'ok - hard-coded Flyway V22 assertion is removed'
 
 printf '%s\n' 'HEALTH_CHECK_MIGRATION_GATE_TESTS_OK'

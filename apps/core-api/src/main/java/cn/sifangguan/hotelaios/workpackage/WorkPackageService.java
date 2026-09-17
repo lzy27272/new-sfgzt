@@ -1,5 +1,6 @@
 package cn.sifangguan.hotelaios.workpackage;
 
+import cn.sifangguan.hotelaios.dataretention.EmployeePerformanceSnapshotService;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
@@ -31,19 +32,22 @@ public class WorkPackageService {
     private final AccessPolicy accessPolicy;
     private final AuditWriter auditWriter;
     private final ObjectMapper objectMapper;
+    private final EmployeePerformanceSnapshotService employeePerformanceSnapshotService;
 
     public WorkPackageService(
             NamedParameterJdbcTemplate jdbc,
             TenantDatabaseContext databaseContext,
             AccessPolicy accessPolicy,
             AuditWriter auditWriter,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            EmployeePerformanceSnapshotService employeePerformanceSnapshotService
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
         this.auditWriter = auditWriter;
         this.objectMapper = objectMapper;
+        this.employeePerformanceSnapshotService = employeePerformanceSnapshotService;
     }
 
     @Transactional(readOnly = true)
@@ -604,7 +608,7 @@ public class WorkPackageService {
                 fromBusinessDate, toBusinessDate, false, page, size);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public Map<String, Object> teamWorkbenchSummary(LocalDate businessDate) {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission("work-record.review", "work-record.team-read");
@@ -707,6 +711,12 @@ public class WorkPackageService {
                 .sorted(Comparator.comparing(HotelWorkbenchMetric::name, Comparator.nullsLast(String::compareTo)))
                 .map(HotelWorkbenchMetric::toResponse)
                 .toList();
+        employeePerformanceSnapshotService.captureWorkbench(
+                principal,
+                asOfDate,
+                cutoff,
+                rows.stream().map(WorkbenchMetricRow::assignmentId).distinct().toList()
+        );
         return response(
                 "asOfDate", asOfDate,
                 "monthStart", monthStart,
