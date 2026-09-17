@@ -274,6 +274,26 @@ select_latest_local_backup() {
   printf '%s\n' "${latest_line#* }"
 }
 
+verify_local_backup_checksum() {
+  local backup_file="${1:?Backup file is required}"
+  local backup_directory
+  local checksum_file="${backup_file}.sha256"
+
+  test -f "${backup_file}" && test ! -L "${backup_file}" || {
+    fail "Encrypted PostgreSQL backup is missing or unsafe: ${backup_file}"
+    return 1
+  }
+  test -f "${checksum_file}" && test ! -L "${checksum_file}" || {
+    fail "PostgreSQL backup checksum is missing or unsafe: ${checksum_file}"
+    return 1
+  }
+  backup_directory="$(dirname -- "${backup_file}")"
+  (
+    cd "${backup_directory}"
+    sha256sum --check "$(basename -- "${checksum_file}")"
+  )
+}
+
 verify_full_release_integrity() {
   local verified_commit="${1:?Verified source commit is required}"
   local verified_release_id="${2:?Verified release id is required}"
@@ -408,7 +428,7 @@ main() {
     --no-pager
 
   latest_backup="$(select_latest_local_backup /var/backups/hotel-ai-os/postgres)"
-  sha256sum --check "${latest_backup}.sha256"
+  verify_local_backup_checksum "${latest_backup}"
   stat -c '%U:%G:%a:%s:%n' "${latest_backup}" "${latest_backup}.sha256"
 
   printf '%s\n' 'RESOURCES'

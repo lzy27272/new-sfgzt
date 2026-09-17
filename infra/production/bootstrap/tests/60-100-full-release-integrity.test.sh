@@ -115,6 +115,9 @@ ok 'FULL marker size accepts the 1024-byte boundary and rejects 1025 bytes'
 mkdir -p "${fixture_root}/backups/daily"
 printf '%s' legacy >"${fixture_root}/backups/hotel_ai_os-auto-20260916T010000+0800.dump.enc"
 printf '%s' retained >"${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
+(cd "${fixture_root}/backups/daily" && \
+  sha256sum hotel_ai_os-daily-20260917T010000+0800.dump.enc \
+    >hotel_ai_os-daily-20260917T010000+0800.dump.enc.sha256)
 touch -t 202609160100 "${fixture_root}/backups/hotel_ai_os-auto-20260916T010000+0800.dump.enc"
 touch -t 202609170100 "${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
 latest_backup="$({
@@ -125,6 +128,13 @@ latest_backup="$({
 })"
 test "${latest_backup}" = \
   "${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
+(
+  trap - EXIT
+  cd "${fixture_root}"
+  # shellcheck source=../100-final-audit.sh
+  source "${final_audit}"
+  verify_local_backup_checksum "${latest_backup}"
+)
 rm "${fixture_root}/backups/daily/hotel_ai_os-daily-20260917T010000+0800.dump.enc"
 latest_backup="$({
   trap - EXIT
