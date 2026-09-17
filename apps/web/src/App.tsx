@@ -75,6 +75,7 @@ import {
 import { resolveNotificationNavigation } from './app/notificationNavigation'
 import { useHashRoute } from './app/useHashRoute'
 import { loadExecutiveTasks } from './features/executiveTasks/api'
+import { hasDataRetentionAdministrationRole } from './features/dataRetention/policy'
 import { PageAccessBoundary } from './shared/PageAccessBoundary'
 import { AttachmentPreviewDialog, resolveAttachmentMediaType, type AttachmentPreview } from './shared/AttachmentPreviewDialog'
 import { WecomTaskEntryPage } from './features/wecom/WecomTaskEntry'
@@ -108,10 +109,11 @@ const TaskCreateDialog = lazy(() => import('./Pilot6Pages').then((module) => ({ 
 const WecomStoreWebhookConfiguration = lazy(() => import('./features/wecom/WecomStoreWebhookConfiguration').then((module) => ({ default: module.WecomStoreWebhookConfiguration })))
 const WecomUserBindingAdministration = lazy(() => import('./features/wecom/WecomUserBindingAdministration').then((module) => ({ default: module.WecomUserBindingAdministration })))
 const WecomDirectoryOnboardingAdministration = lazy(() => import('./features/wecom/WecomDirectoryOnboardingAdministration').then((module) => ({ default: module.WecomDirectoryOnboardingAdministration })))
+const DataRetentionAdministration = lazy(() => import('./features/dataRetention/DataRetentionAdministration').then((module) => ({ default: module.DataRetentionAdministration })))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
 
-const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; icon: string; group?: string; permissions?: string[] }> = [
+const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; icon: string; group?: string; permissions?: string[]; administratorOnly?: boolean }> = [
   { id: 'workbench', label: '角色工作台', icon: '⌂' },
   { id: 'hotel-dashboard', label: '门店工作台', icon: '▤', permissions: ['dashboard.hotel'] },
   { id: 'operations-dashboard', label: '多门店工作台', icon: '▥', permissions: ['dashboard.operations'] },
@@ -129,6 +131,7 @@ const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; ico
   { id: 'templates', label: '集团模板配置', icon: '▧', group: '系统配置', permissions: ['template.manage'] },
   { id: 'daily-report-templates', label: '日报模板中心', icon: '▤', permissions: [permissionCodes.dailyReportTemplate.read, permissionCodes.dailyReportTemplate.edit, permissionCodes.dailyReportTemplate.publish] },
   { id: 'organization', label: '组织与权限', icon: '⚙', group: '系统配置', permissions: ['org.manage', 'position-profile.read'] },
+  { id: 'data-retention', label: '数据留存策略', icon: '◷', group: '系统配置', administratorOnly: true },
   { id: 'wecom-webhooks', label: '企业微信 Webhook', icon: '◉', group: '系统配置', permissions: ['org.manage'] },
   { id: 'wecom-onboarding', label: '企业微信入职审核', icon: '人', group: '系统配置', permissions: [permissionCodes.wecomBinding.read] },
   { id: 'wecom-bindings', label: '企微绑定与异常', icon: '◎', permissions: [permissionCodes.wecomBinding.read] },
@@ -1096,6 +1099,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const platformRoleCode = fullAccountRoleCode === 'PLATFORM_ADMIN' ? fullAccountRoleCode : undefined
   const ceoRoleCode = fullAccountRoleCode === 'CEO' ? fullAccountRoleCode : undefined
   const isPlatformAdmin = Boolean(platformRoleCode)
+  const isDataRetentionAdministrator = hasDataRetentionAdministrationRole(me.data.roleCodes)
   const isCeo = Boolean(ceoRoleCode)
   const isFullAccountLevel = isPlatformAdmin || isCeo
   const accountPresentationRoleCode = platformRoleCode ?? ceoRoleCode ?? me.data.primaryRoleCode
@@ -1156,6 +1160,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const isChairmanContext = presentationRoleCode === 'GROUP_CHAIRMAN'
   const executiveTasksEnabled = me.data.capabilities.groupManagement.executiveTasksEnabled
   const permissionVisibleNavigation = useMemo(() => navigation.filter((item) => {
+    if (item.administratorOnly && !isDataRetentionAdministrator) return false
     if (['hotel-dashboard', 'operations-dashboard', 'tasks', 'notifications'].includes(item.id)) return false
     if (['rules', 'work-packages'].includes(item.id) && !isPlatformAdmin) return false
     if (item.id === 'my-work' && !activeIdentity.businessActorAssignmentId) return false
@@ -1167,8 +1172,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       (demoFallbackEnabled && me.source === 'demo' && !isDailyFeatureRoute(item.id) && !isInvestmentFeatureRoute(item.id)) ||
       activePermissions.includes('*') ||
       item.permissions.some((permission) => activePermissions.includes(permission))
-  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isChairmanContext, isPlatformAdmin, me.source])
-  const visibleNavigation = useMemo(
+  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.source])
+  const publishedModuleNavigation = useMemo(
     () => applyPublishedModuleVisibility(
       permissionVisibleNavigation,
       activePermissions,
@@ -1176,6 +1181,13 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     ),
     [activePermissions, permissionVisibleNavigation, presentationRoleCode],
   )
+  const visibleNavigation = useMemo(() => {
+    if (!isDataRetentionAdministrator || publishedModuleNavigation.some((item) => item.id === 'data-retention')) {
+      return publishedModuleNavigation
+    }
+    const visibleIds = new Set(publishedModuleNavigation.map((item) => item.id))
+    return navigation.filter((item) => visibleIds.has(item.id) || item.id === 'data-retention')
+  }, [isDataRetentionAdministrator, publishedModuleNavigation])
   const navigationTarget = (id: AppRouteId): AppRouteId => {
     if (id !== 'daily-reports-my') return id
     const canUseTeamReport = activePermissions.includes('*')
@@ -1196,7 +1208,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     const target = presentationPolicy.mobileTabs[0]?.target ?? 'workbench'
     if (target !== 'workbench' && visibleNavigation.some((item) => item.id === target)) navigate(navigationTarget(target))
   }, [me.error, me.loading, navigate, presentationPolicy, route.explicit, view, visibleNavigation])
-  const routePresentationAllowed = (view === 'account-self-service' && isChairmanContext)
+  const routePresentationAllowed = (view === 'data-retention' && isDataRetentionAdministrator)
+    || (view === 'account-self-service' && isChairmanContext)
     || !useRoleDefaultsFallback
     || isRouteAllowedByRoleDefaults(presentationRoleCode, view, true)
   const page = useMemo(() => {
@@ -1258,6 +1271,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       case 'notifications': legacyPage = <Notifications identity={activeIdentity} permissions={activePermissions} routeParams={routeParams} go={navigate} />; break
       case 'templates': legacyPage = <EnterpriseTemplateCenter identity={activeIdentity} permissions={activePermissions} />; break
       case 'organization': legacyPage = <OrganizationCenter identity={activeIdentity} permissions={activePermissions} routeParams={routeParams} />; break
+      case 'data-retention': legacyPage = <DataRetentionAdministration identity={activeIdentity} />; break
       case 'wecom-webhooks': legacyPage = <WecomStoreWebhookConfiguration identity={activeIdentity} permissions={activePermissions} />; break
       case 'wecom-bindings': legacyPage = <WecomUserBindingAdministration identity={activeIdentity} requestId={routeParams.requestId} onClearRequest={() => navigate('wecom-bindings')} />; break
       case 'wecom-onboarding': legacyPage = <WecomDirectoryOnboardingAdministration
@@ -1275,7 +1289,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     const chairmanTaskAllowed = view !== 'tasks' || !isChairmanContext || (executiveTasksEnabled && Boolean(activeIdentity.businessActorAssignmentId))
     const accountSelfServiceAllowed = view !== 'account-self-service' || isChairmanContext
     const administratorRouteAllowed = !['rules', 'work-packages'].includes(view) || isPlatformAdmin
-    const contextAllowed = (view !== 'my-work' || Boolean(activeIdentity.businessActorAssignmentId)) && chairmanTaskAllowed && accountSelfServiceAllowed && administratorRouteAllowed && routePresentationAllowed
+    const dataRetentionRouteAllowed = view !== 'data-retention' || isDataRetentionAdministrator
+    const contextAllowed = (view !== 'my-work' || Boolean(activeIdentity.businessActorAssignmentId)) && chairmanTaskAllowed && accountSelfServiceAllowed && administratorRouteAllowed && dataRetentionRouteAllowed && routePresentationAllowed
     const boundaryPermissions = demoFallbackEnabled && me.source === 'demo' ? ['*'] : activePermissions
     return <PageAccessBoundary
       permissions={boundaryPermissions}
@@ -1284,7 +1299,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     >
       <Suspense fallback={<div className="state-card"><div className="spinner" /><strong>正在加载当前岗位功能</strong></div>}>{legacyPage}</Suspense>
     </PageAccessBoundary>
-  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation])
+  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation])
   const mobileNavigationItems = useMemo(() => {
     const visibleIds = new Set(visibleNavigation.map((item) => item.id))
     const resolveMobileTarget = (tab: MobilePresentationTab): AppRouteId | undefined => {
