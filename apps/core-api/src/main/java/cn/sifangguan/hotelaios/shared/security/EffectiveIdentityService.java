@@ -24,7 +24,8 @@ public class EffectiveIdentityService {
             "FRONT_OFFICE_SUPERVISOR", "HOUSEKEEPING_SUPERVISOR",
             "OTA_OPERATION_ASSISTANT", "FRONT_DESK"
     );
-    private static final Set<String> FULL_ACCOUNT_LEVEL_ROLES = Set.of("PLATFORM_ADMIN", "CEO");
+    private static final Set<String> FULL_ACCOUNT_LEVEL_ROLES = Set.of(
+            "PLATFORM_ADMIN", "GROUP_ADMIN", "CEO");
     private static final Set<String> SUPPLEMENTAL_ACCOUNT_ROLES = Set.of("HR_KPI_ADMIN");
     private static final Set<String> RESERVED_SYSTEM_ROLE_CODES = Set.of(
             "PLATFORM_ADMIN", "GROUP_ADMIN", "CEO", "GROUP_VICE_PRESIDENT",
