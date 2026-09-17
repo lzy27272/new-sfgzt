@@ -122,6 +122,21 @@ validate_flyway_database_state() {
   fi
 }
 
+select_latest_backup() {
+  local backup_directory="${1:?Backup directory is required}"
+  local backup_pattern="${2:?Backup filename pattern is required}"
+  local latest_line
+
+  # Do not use `head` in this pipe: with `set -o pipefail`, a sufficiently
+  # large directory can make the upstream sorter receive SIGPIPE and turn a
+  # healthy deployment into a false rollback.
+  latest_line="$(find "${backup_directory}" \
+    -maxdepth 1 -type f -name "${backup_pattern}" \
+    -printf '%T@ %p\n' | sort -nr | sed -n '1p')"
+  test -n "${latest_line}"
+  printf '%s\n' "${latest_line#* }"
+}
+
 validate_running_release() {
   local current_release="${1:?Current release path is required}"
   local main_pid="${2:?Core API MainPID is required}"
@@ -220,9 +235,9 @@ main() {
   test -n "${root_usage}"
   test "${root_usage}" -lt 85
 
-  latest_backup="$(find /var/backups/hotel-ai-os/postgres/daily \
-    -maxdepth 1 -type f -name 'hotel_ai_os-daily-*.dump.enc' \
-    -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+  latest_backup="$(select_latest_backup \
+    /var/backups/hotel-ai-os/postgres/daily \
+    'hotel_ai_os-daily-*.dump.enc')"
   test -n "${latest_backup}"
   find "${latest_backup}" -mmin -1560 -print -quit | grep -q .
   (cd "$(dirname "${latest_backup}")" && \
@@ -243,9 +258,9 @@ main() {
   (cd "$(dirname "${offsite_latest}")" && \
     sha256sum --check "$(basename "${offsite_latest}.sha256")" >/dev/null)
   if [[ -r /etc/sifangguan-ota/runtime.env ]]; then
-    latest_runtime_backup="$(find /var/backups/hotel-ai-os/postgres/daily \
-      -maxdepth 1 -type f -name 'sifangguan-ota-runtime-daily-*.env.enc' \
-      -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+    latest_runtime_backup="$(select_latest_backup \
+      /var/backups/hotel-ai-os/postgres/daily \
+      'sifangguan-ota-runtime-daily-*.env.enc')"
     test -n "${latest_runtime_backup}"
     offsite_runtime="${HOTEL_AI_OS_BACKUP_OFFSITE_DIR}/postgres/daily/$(basename "${latest_runtime_backup}")"
     test -f "${offsite_runtime}"
