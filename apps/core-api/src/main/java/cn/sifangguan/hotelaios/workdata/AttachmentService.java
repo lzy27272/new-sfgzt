@@ -124,7 +124,8 @@ public class AttachmentService {
                 .put("trustedTimestampSource", "SERVER_RECEIVED_AT")
                 .put("watermarked", "CAMERA".equals(captureSource));
         if (upload.isImage()) {
-            evidenceMetadata.put("orientationPolicy", "LANDSCAPE")
+            evidenceMetadata.put("orientationPolicy", "ADAPTIVE")
+                    .put("displayOrientation", imageOrientation(upload.normalizedWidth(), upload.normalizedHeight()))
                     .put("sourceWidth", upload.sourceWidth())
                     .put("sourceHeight", upload.sourceHeight())
                     .put("normalizedWidth", upload.normalizedWidth())
@@ -341,6 +342,9 @@ public class AttachmentService {
                 select id, work_record_id, object_key, original_name, media_type, size_bytes,
                        sha256, scan_status, capture_source, checkpoint_code, captured_at_client,
                        received_at, source_sha256, evidence_metadata,
+                       evidence_metadata ->> 'displayOrientation' as display_orientation,
+                       nullif(evidence_metadata ->> 'normalizedWidth', '')::integer as normalized_width,
+                       nullif(evidence_metadata ->> 'normalizedHeight', '')::integer as normalized_height,
                        evidence_metadata ->> 'evidenceInstanceKey' as evidence_instance_key,
                        created_at
                 from attachment
@@ -431,9 +435,6 @@ public class AttachmentService {
             int exifOrientation = MediaType.IMAGE_JPEG_VALUE.equals(mediaType)
                     ? jpegExifOrientation(content) : 1;
             BufferedImage image = normalizeImageOrientation(sourceImage, exifOrientation, mediaType);
-            if (image.getWidth() <= image.getHeight()) {
-                throw new IllegalArgumentException("照片必须横向拍摄（宽度需大于高度），请重新拍摄或选择");
-            }
             String format = MediaType.IMAGE_PNG_VALUE.equals(mediaType) ? "png" : "jpeg";
             ByteArrayOutputStream sanitized = new ByteArrayOutputStream(content.length);
             if (!ImageIO.write(image, format, sanitized)) {
@@ -478,6 +479,12 @@ public class AttachmentService {
             graphics.dispose();
         }
         return normalized;
+    }
+
+    private static String imageOrientation(int width, int height) {
+        if (width > height) return "LANDSCAPE";
+        if (height > width) return "PORTRAIT";
+        return "SQUARE";
     }
 
     private int jpegExifOrientation(byte[] content) {
@@ -745,21 +752,36 @@ public class AttachmentService {
             try {
                 graphics.drawImage(original, 0, 0, null);
                 graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-                int fontSize = Math.max(12, Math.min(28, original.getWidth() / 36));
-                graphics.setFont(new Font(Font.SANS_SERIF, Font.BOLD, fontSize));
-                String lineOne = "SFG | " + record.orgName() + " | SERVER "
-                        + receivedAt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss XXX"));
-                String lineTwo = record.itemName() + " | EVIDENCE "
-                        + attachmentId.toString().substring(0, 8).toUpperCase(Locale.ROOT);
+                List<String> rawLines = List.of(
+                        "SFG | " + record.orgName(),
+                        "SERVER " + receivedAt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss XXX")),
+                        record.itemName(),
+                        "EVIDENCE " + attachmentId.toString().substring(0, 8).toUpperCase(Locale.ROOT)
+                );
+                int fontSize = Math.max(11, Math.min(28,
+                        Math.min(original.getWidth() / 28, original.getHeight() / 18)));
                 int padding = Math.max(8, fontSize / 2);
+                int availableWidth = Math.max(1, original.getWidth() - padding * 2);
+                while (fontSize > 10) {
+                    graphics.setFont(new Font(Font.SANS_SERIF, Font.BOLD, fontSize));
+                    boolean fits = rawLines.stream()
+                            .allMatch(line -> graphics.getFontMetrics().stringWidth(line) <= availableWidth);
+                    if (fits) break;
+                    fontSize--;
+                }
+                graphics.setFont(new Font(Font.SANS_SERIF, Font.BOLD, fontSize));
+                List<String> lines = rawLines.stream()
+                        .map(line -> fitWatermarkText(graphics, line, availableWidth)).toList();
                 int lineHeight = graphics.getFontMetrics().getHeight();
-                int boxHeight = lineHeight * 2 + padding * 2;
+                int boxHeight = lineHeight * lines.size() + padding * 2;
                 int y = Math.max(0, original.getHeight() - boxHeight);
                 graphics.setColor(new Color(0, 0, 0, 175));
                 graphics.fillRect(0, y, original.getWidth(), boxHeight);
                 graphics.setColor(Color.WHITE);
-                graphics.drawString(lineOne, padding, y + padding + graphics.getFontMetrics().getAscent());
-                graphics.drawString(lineTwo, padding, y + padding + lineHeight + graphics.getFontMetrics().getAscent());
+                for (int index = 0; index < lines.size(); index++) {
+                    graphics.drawString(lines.get(index), padding,
+                            y + padding + index * lineHeight + graphics.getFontMetrics().getAscent());
+                }
             } finally {
                 graphics.dispose();
             }
@@ -777,6 +799,16 @@ public class AttachmentService {
         } catch (Exception exception) {
             throw new IllegalArgumentException("现场照片水印写入失败", exception);
         }
+    }
+
+    private static String fitWatermarkText(Graphics2D graphics, String value, int availableWidth) {
+        if (graphics.getFontMetrics().stringWidth(value) <= availableWidth) return value;
+        String suffix = "…";
+        int end = value.length();
+        while (end > 0 && graphics.getFontMetrics().stringWidth(value.substring(0, end) + suffix) > availableWidth) {
+            end--;
+        }
+        return end == 0 ? suffix : value.substring(0, end) + suffix;
     }
 
     private String normalizeCaptureSource(String value) {

@@ -198,6 +198,9 @@ public class WorkDataService {
                 select id, object_key, original_name, media_type, size_bytes, sha256, scan_status,
                        capture_source, checkpoint_code, captured_at_client, received_at,
                        source_sha256, evidence_metadata,
+                       evidence_metadata ->> 'displayOrientation' as display_orientation,
+                       nullif(evidence_metadata ->> 'normalizedWidth', '')::integer as normalized_width,
+                       nullif(evidence_metadata ->> 'normalizedHeight', '')::integer as normalized_height,
                        evidence_metadata ->> 'evidenceInstanceKey' as evidence_instance_key,
                        created_at
                 from attachment where tenant_id = :tenantId and work_record_id = :recordId

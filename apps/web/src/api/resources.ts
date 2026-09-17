@@ -379,6 +379,12 @@ export async function loadWorkbenchSummary(identity: ApiIdentity, date?: string)
 }
 
 function normalizeAttachment(item: JsonObject): WorkRecordAttachment {
+  const rawOrientation = text(item, ['displayOrientation', 'display_orientation'], '')
+  const displayOrientation = ['LANDSCAPE', 'PORTRAIT', 'SQUARE'].includes(rawOrientation)
+    ? rawOrientation as WorkRecordAttachment['displayOrientation']
+    : undefined
+  const normalizedWidth = number(item, ['normalizedWidth', 'normalized_width'])
+  const normalizedHeight = number(item, ['normalizedHeight', 'normalized_height'])
   return {
     id: text(item, ['id']),
     objectKey: text(item, ['objectKey', 'object_key'], '') || undefined,
@@ -393,6 +399,9 @@ function normalizeAttachment(item: JsonObject): WorkRecordAttachment {
     capturedAtClient: text(item, ['capturedAtClient', 'captured_at_client'], '') || undefined,
     receivedAt: text(item, ['receivedAt', 'received_at'], '') || undefined,
     sourceSha256: text(item, ['sourceSha256', 'source_sha256'], '') || undefined,
+    displayOrientation,
+    normalizedWidth: normalizedWidth > 0 ? normalizedWidth : undefined,
+    normalizedHeight: normalizedHeight > 0 ? normalizedHeight : undefined,
     createdAt: text(item, ['createdAt', 'created_at'], '') || undefined,
   }
 }

@@ -3,14 +3,17 @@ const SUPPORTED_IMAGE_NAME = /\.(?:jpe?g|png)$/i
 const IMAGE_NAME = /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|tiff?|webp)$/i
 
 export type ImageDimensions = { width: number; height: number }
+export type ImageOrientation = 'LANDSCAPE' | 'PORTRAIT' | 'SQUARE'
 
-export type LandscapeEvidenceValidation<T> = {
+export type ImageEvidenceValidation<T> = {
   accepted: T[]
   rejected: Array<{ entry: T; reason: string }>
 }
 
-export function isLandscapeDimensions({ width, height }: ImageDimensions) {
-  return width > height
+export function imageOrientation({ width, height }: ImageDimensions): ImageOrientation {
+  if (width > height) return 'LANDSCAPE'
+  if (height > width) return 'PORTRAIT'
+  return 'SQUARE'
 }
 
 function looksLikeImage(file: Pick<File, 'name' | 'type'>) {
@@ -47,7 +50,7 @@ async function browserImageDimensions(file: File): Promise<ImageDimensions> {
   })
 }
 
-export async function validateLandscapeEvidence<T extends { file: File }>(entries: T[]): Promise<LandscapeEvidenceValidation<T>> {
+export async function validateImageEvidence<T extends { file: File }>(entries: T[]): Promise<ImageEvidenceValidation<T>> {
   const results = await Promise.all(entries.map(async (entry) => {
     const { file } = entry
     if (!looksLikeImage(file)) return { entry, accepted: true, reason: '' }
@@ -55,10 +58,8 @@ export async function validateLandscapeEvidence<T extends { file: File }>(entrie
       return { entry, accepted: false, reason: '照片仅支持 JPG 或 PNG 格式' }
     }
     try {
-      const dimensions = await browserImageDimensions(file)
-      return isLandscapeDimensions(dimensions)
-        ? { entry, accepted: true, reason: '' }
-        : { entry, accepted: false, reason: '照片必须横向拍摄（宽度需大于高度），请重新拍摄或选择' }
+      await browserImageDimensions(file)
+      return { entry, accepted: true, reason: '' }
     } catch {
       return { entry, accepted: false, reason: '无法读取图片，请重新拍摄或选择 JPG、PNG 照片' }
     }

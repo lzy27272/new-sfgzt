@@ -254,6 +254,64 @@ function evidenceContext(item: WorkRecordAttachment, expectation: WorkExpectatio
   return { area, instance }
 }
 
+type EvidenceImageOrientation = 'LANDSCAPE' | 'PORTRAIT' | 'SQUARE'
+type EvidenceImageDimensions = { width: number; height: number }
+
+function dimensionsOrientation({ width, height }: EvidenceImageDimensions): EvidenceImageOrientation {
+  if (width > height) return 'LANDSCAPE'
+  if (height > width) return 'PORTRAIT'
+  return 'SQUARE'
+}
+
+function attachmentDimensions(item: WorkRecordAttachment): EvidenceImageDimensions | undefined {
+  return item.normalizedWidth && item.normalizedHeight
+    ? { width: item.normalizedWidth, height: item.normalizedHeight }
+    : undefined
+}
+
+function EvidenceGalleryCard({ item, expectation, url, error, onPreview }: {
+  item: WorkRecordAttachment
+  expectation: WorkExpectation
+  url?: string
+  error?: string
+  onPreview: (item: WorkRecordAttachment) => void
+}) {
+  const context = evidenceContext(item, expectation)
+  const [dimensions, setDimensions] = useState<EvidenceImageDimensions | undefined>(() => attachmentDimensions(item))
+  const orientation = dimensions ? dimensionsOrientation(dimensions) : item.displayOrientation
+  const orientationClass = orientation ? ` evidence-orientation-${orientation.toLowerCase()}` : ''
+  const orientationLabel = orientation === 'PORTRAIT' ? '竖图' : orientation === 'LANDSCAPE' ? '横图' : orientation === 'SQUARE' ? '方图' : '图片'
+
+  return <article className={orientationClass.trim()}>
+    <button
+      type="button"
+      className={`evidence-gallery-image${orientationClass}`}
+      style={dimensions ? { aspectRatio: `${dimensions.width} / ${dimensions.height}` } : undefined}
+      disabled={!url}
+      onClick={() => onPreview(item)}
+      aria-label={`放大查看：${context.area}${context.instance ? `，${context.instance}` : ''}`}
+    >
+      {url ? <img
+        src={url}
+        alt={`${context.area}${context.instance ? `，${context.instance}` : ''}`}
+        loading="lazy"
+        onLoad={(event) => {
+          const next = { width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight }
+          if (next.width > 0 && next.height > 0) {
+            setDimensions((current) => current?.width === next.width && current.height === next.height ? current : next)
+          }
+        }}
+      /> : <span>{error ? '图片读取失败' : '图片加载中…'}</span>}
+    </button>
+    <div className="evidence-gallery-caption">
+      <strong>{context.area}</strong>
+      <span>{context.instance && <b>{context.instance}</b>}<em>{item.captureSource === 'CAMERA' ? '现场拍摄' : '相册上传'} · {orientationLabel}</em></span>
+      <small>{formatDate(item.capturedAtClient ?? item.receivedAt ?? item.createdAt)} · {formatSize(item.sizeBytes)} · {label(item.scanStatus)}</small>
+      {error && <small className="evidence-gallery-error">{error}</small>}
+    </div>
+  </article>
+}
+
 function EvidenceGallery({ items, expectation, urls, errors, onPreview }: {
   items: WorkRecordAttachment[]
   expectation: WorkExpectation
@@ -262,22 +320,14 @@ function EvidenceGallery({ items, expectation, urls, errors, onPreview }: {
   onPreview: (item: WorkRecordAttachment) => void
 }) {
   if (!items.length) return null
-  return <div className="evidence-gallery">{items.map((item) => {
-    const context = evidenceContext(item, expectation)
-    const url = urls[item.id]
-    const error = errors[item.id]
-    return <article key={item.id}>
-      <button type="button" className="evidence-gallery-image" disabled={!url} onClick={() => onPreview(item)} aria-label={`放大查看：${context.area}${context.instance ? `，${context.instance}` : ''}`}>
-        {url ? <img src={url} alt={`${context.area}${context.instance ? `，${context.instance}` : ''}`} loading="lazy" /> : <span>{error ? '图片读取失败' : '图片加载中…'}</span>}
-      </button>
-      <div className="evidence-gallery-caption">
-        <strong>{context.area}</strong>
-        <span>{context.instance && <b>{context.instance}</b>}<em>{item.captureSource === 'CAMERA' ? '现场拍摄' : '相册上传'}</em></span>
-        <small>{formatDate(item.capturedAtClient ?? item.receivedAt ?? item.createdAt)} · {formatSize(item.sizeBytes)} · {label(item.scanStatus)}</small>
-        {error && <small className="evidence-gallery-error">{error}</small>}
-      </div>
-    </article>
-  })}</div>
+  return <div className="evidence-gallery">{items.map((item) => <EvidenceGalleryCard
+    key={item.id}
+    item={item}
+    expectation={expectation}
+    url={urls[item.id]}
+    error={errors[item.id]}
+    onPreview={onPreview}
+  />)}</div>
 }
 
 type DrawerNextAction =
@@ -314,6 +364,7 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
   const [busy, setBusy] = useState<string>()
   const [message, setMessage] = useState<DrawerMessage>()
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview>()
+  const [lightboxMeasurement, setLightboxMeasurement] = useState<{ url: string; orientation: 'landscape' | 'portrait' | 'square' }>()
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({})
   const [attachmentLoadErrors, setAttachmentLoadErrors] = useState<Record<string, string>>({})
   const standards = expectation.standards ?? []
@@ -441,6 +492,10 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
     if (next && attachmentUrls[next.id]) void preview(next)
   }
 
+  const lightboxOrientation = lightboxMeasurement && lightboxMeasurement.url === attachmentPreview?.url
+    ? lightboxMeasurement.orientation
+    : undefined
+
   const evaluate = () => {
     if (!record || !selectedStandard) { setMessage({ tone: 'error', text: '必须选择工作包绑定的已发布标准版本。' }); return }
     void mutation('evaluation', () => createWorkRecordEvaluation(identity, { record, standardVersionId: selectedStandard }), (result) => {
@@ -465,7 +520,7 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
           <section className="detail-section"><h3>记录事实</h3><dl><div><dt>提交员工</dt><dd>{record.employeeName}</dd></div><div><dt>执行岗位</dt><dd>{record.positionName}</dd></div><div><dt>记录状态</dt><dd>{label(record.status)}</dd></div><div><dt>提交时间</dt><dd>{formatDate(record.submittedAt)}</dd></div></dl>{payloadFields.length ? <div className="payload-grid">{payloadFields.map((field) => <span key={field.key}><small>{field.label}</small><strong>{field.value}</strong></span>)}</div> : <p className="muted">本次提交没有额外的表单记录。</p>}{record.reviewReason && <div className="inline-warning">上次复核意见：{record.reviewReason}</div>}</section>
 
           <section className="detail-section"><h3>现场图片与附件</h3>
-            <p className="muted">图片按检查区域直接展示；历史竖图会完整适配在横向画框中。新上传照片必须横向，附件补充和删除仍由记录所属员工完成。</p>
+            <p className="muted">图片按检查区域直接展示；竖拍照片以竖向画框陈列，横拍照片以横向画框陈列。附件补充和删除仍由记录所属员工完成。</p>
             {!record.attachments.length && <p className="muted">尚未上传现场图片或附件。</p>}
             <EvidenceGallery items={imageAttachments} expectation={expectation} urls={attachmentUrls} errors={attachmentLoadErrors} onPreview={preview} />
             {!!documentAttachments.length && <><h4 className="evidence-document-title">文档附件</h4><AttachmentList items={documentAttachments} disabled={!!busy || isDemo} loadingId={busy?.startsWith('preview-') ? busy.slice('preview-'.length) : undefined} onPreview={preview} /></>}
@@ -480,7 +535,7 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
         {isDemo && <div className="inline-warning">当前为演示回退：所有P0操作入口可见，但写操作被保护性禁用。</div>}
       </>}
     </div>
-    {attachmentPreview && <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={`查看附件：${attachmentPreview.name}`}><div><header><span><strong>{attachmentPreview.context ?? attachmentPreview.name}</strong><small>{attachmentPreview.context ? `${attachmentPreview.name} · 现场证据预览` : '现场证据预览'}</small></span><button type="button" className="close" onClick={() => setAttachmentPreview(undefined)} aria-label="关闭附件预览">×</button></header>{attachmentPreview.mediaType.startsWith('image/') ? <div className="attachment-lightbox-image">{imageAttachments.length > 1 && <button type="button" className="lightbox-nav previous" onClick={() => movePreview(-1)} aria-label="上一张图片">‹</button>}<img src={attachmentPreview.url} alt={attachmentPreview.context ?? attachmentPreview.name} />{imageAttachments.length > 1 && <button type="button" className="lightbox-nav next" onClick={() => movePreview(1)} aria-label="下一张图片">›</button>}</div> : attachmentPreview.mediaType === 'application/pdf' ? <iframe src={attachmentPreview.url} title={attachmentPreview.name} /> : <div className="attachment-download"><p>该格式不能在浏览器内直接预览。</p><a className="primary" href={attachmentPreview.url} download={attachmentPreview.name}>下载附件</a></div>}</div></div>}
+    {attachmentPreview && <div className={`attachment-lightbox${lightboxOrientation ? ` attachment-lightbox-${lightboxOrientation}` : ''}`} role="dialog" aria-modal="true" aria-label={`查看附件：${attachmentPreview.name}`}><div><header><span><strong>{attachmentPreview.context ?? attachmentPreview.name}</strong><small>{attachmentPreview.context ? `${attachmentPreview.name} · 现场证据预览` : '现场证据预览'}</small></span><button type="button" className="close" onClick={() => setAttachmentPreview(undefined)} aria-label="关闭附件预览">×</button></header>{attachmentPreview.mediaType.startsWith('image/') ? <div className="attachment-lightbox-image">{imageAttachments.length > 1 && <button type="button" className="lightbox-nav previous" onClick={() => movePreview(-1)} aria-label="上一张图片">‹</button>}<img src={attachmentPreview.url} alt={attachmentPreview.context ?? attachmentPreview.name} onLoad={(event) => { const { naturalWidth: width, naturalHeight: height } = event.currentTarget; setLightboxMeasurement({ url: attachmentPreview.url, orientation: width > height ? 'landscape' : height > width ? 'portrait' : 'square' }) }} />{imageAttachments.length > 1 && <button type="button" className="lightbox-nav next" onClick={() => movePreview(1)} aria-label="下一张图片">›</button>}</div> : attachmentPreview.mediaType === 'application/pdf' ? <iframe src={attachmentPreview.url} title={attachmentPreview.name} /> : <div className="attachment-download"><p>该格式不能在浏览器内直接预览。</p><a className="primary" href={attachmentPreview.url} download={attachmentPreview.name}>下载附件</a></div>}</div></div>}
   </aside></div>
 }
 

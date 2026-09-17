@@ -14,13 +14,19 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.mock.web.MockMultipartFile;
 
+import javax.imageio.ImageIO;
 import javax.sql.DataSource;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.sql.Connection;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -102,6 +108,39 @@ class Pilot7TaskDeliveryIntegrationTest {
         assertThat(containsId(json(getJson("/api/v1/tasks?view=mine", FRONT_DESK)), taskId)).isTrue();
         assertThat(hasNotification(json(getJson("/api/v1/notifications", FRONT_DESK)), taskId, "TASK_ASSIGNED"))
                 .isTrue();
+    }
+
+    @Test
+    void taskEvidenceAcceptsPortraitPhotoAndKeepsItsNormalizedOrientation() throws Exception {
+        String taskId = json(postTask(CEO, """
+                {
+                  "orgUnitId":"%s",
+                  "assigneeAssignmentId":"%s",
+                  "reviewerAssignmentId":"%s",
+                  "title":"Portrait evidence",
+                  "dispatchNow":true
+                }
+                """.formatted(HANGZHOU_HOTEL, FRONT_DESK_ASSIGNMENT, FRONT_OFFICE_ASSIGNMENT)))
+                .path("id").asText();
+        postCommandExpecting(taskId, "acknowledge", FRONT_DESK, FRONT_DESK_ASSIGNMENT, 1, 200);
+
+        MvcResult uploaded = mockMvc.perform(multipart("/api/v1/tasks/{taskId}/evidence/upload", taskId)
+                        .file(new MockMultipartFile("file", "portrait.png", "image/png", photo(600, 800)))
+                        .param("submittedByAssignmentId", FRONT_DESK_ASSIGNMENT)
+                        .header("X-Tenant-Id", TENANT)
+                        .header("X-Actor-Id", FRONT_DESK))
+                .andExpect(status().isCreated())
+                .andReturn();
+        String evidenceId = json(uploaded).path("id").asText();
+
+        byte[] content = mockMvc.perform(get("/api/v1/tasks/{taskId}/evidence/{evidenceId}/content", taskId, evidenceId)
+                        .header("X-Tenant-Id", TENANT)
+                        .header("X-Actor-Id", FRONT_DESK))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray();
+        BufferedImage image = ImageIO.read(new ByteArrayInputStream(content));
+        assertThat(image.getWidth()).isEqualTo(600);
+        assertThat(image.getHeight()).isEqualTo(800);
     }
 
     @Test
@@ -387,6 +426,13 @@ class Pilot7TaskDeliveryIntegrationTest {
                         .content(body))
                 .andExpect(status().isCreated())
                 .andReturn();
+    }
+
+    private static byte[] photo(int width, int height) throws Exception {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ImageIO.write(image, "png", output);
+        return output.toByteArray();
     }
 
     private String createSubmittedTask(String title, boolean withStandard) throws Exception {

@@ -248,6 +248,9 @@ export type WorkRecordAttachment = {
   capturedAtClient?: string
   receivedAt?: string
   sourceSha256?: string
+  displayOrientation?: 'LANDSCAPE' | 'PORTRAIT' | 'SQUARE'
+  normalizedWidth?: number
+  normalizedHeight?: number
   createdAt?: string
 }
 

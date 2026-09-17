@@ -299,21 +299,49 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("不支持的证据采集方式")));
 
-        mockMvc.perform(identity(multipart(
+        JsonNode portrait = response(identity(multipart(
                         "/api/v1/work-data/records/{recordId}/attachments/upload", recordId)
                         .file(new MockMultipartFile("file", "portrait.png", "image/png", photo(600, 800, "png")))
                         .param("captureSource", "FILE_PICKER"),
-                GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("照片必须横向拍摄")));
+                GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT), 201);
+        byte[] portraitContent = mockMvc.perform(identity(get(
+                        "/api/v1/work-data/attachments/{attachmentId}/content", portrait.path("id").asText()),
+                        GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        BufferedImage portraitImage = ImageIO.read(new ByteArrayInputStream(portraitContent));
+        assertThat(portraitImage.getWidth()).isEqualTo(600);
+        assertThat(portraitImage.getHeight()).isEqualTo(800);
+        assertThat(jdbc.queryForObject("""
+                select evidence_metadata ->> 'displayOrientation'
+                from attachment where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, portrait.path("id").asText())).isEqualTo("PORTRAIT");
+        mockMvc.perform(identity(delete(
+                        "/api/v1/work-data/records/{recordId}/attachments/{attachmentId}",
+                        recordId, portrait.path("id").asText()),
+                        GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT))
+                .andExpect(status().isNoContent());
 
-        mockMvc.perform(identity(multipart(
+        JsonNode square = response(identity(multipart(
                         "/api/v1/work-data/records/{recordId}/attachments/upload", recordId)
                         .file(new MockMultipartFile("file", "square.png", "image/png", photo(600, 600, "png")))
                         .param("captureSource", "CAMERA"),
-                GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("照片必须横向拍摄")));
+                GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT), 201);
+        byte[] squareContent = mockMvc.perform(identity(get(
+                        "/api/v1/work-data/attachments/{attachmentId}/content", square.path("id").asText()),
+                        GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        BufferedImage squareImage = ImageIO.read(new ByteArrayInputStream(squareContent));
+        assertThat(squareImage.getWidth()).isEqualTo(600);
+        assertThat(squareImage.getHeight()).isEqualTo(600);
+        assertThat(jdbc.queryForObject("""
+                select evidence_metadata ->> 'displayOrientation'
+                from attachment where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, square.path("id").asText())).isEqualTo("SQUARE");
+        mockMvc.perform(identity(delete(
+                        "/api/v1/work-data/records/{recordId}/attachments/{attachmentId}",
+                        recordId, square.path("id").asText()),
+                        GENERAL_MANAGER, GENERAL_MANAGER_ASSIGNMENT))
+                .andExpect(status().isNoContent());
 
         JsonNode exifNormalized = response(identity(multipart(
                         "/api/v1/work-data/records/{recordId}/attachments/upload", recordId)
@@ -356,6 +384,10 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 """, String.class, TENANT, uploaded.path("id").asText())).isEqualTo("SERVER_RECEIVED_AT");
         assertThat(jdbc.queryForObject("""
                 select evidence_metadata ->> 'orientationPolicy'
+                from attachment where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, uploaded.path("id").asText())).isEqualTo("ADAPTIVE");
+        assertThat(jdbc.queryForObject("""
+                select evidence_metadata ->> 'displayOrientation'
                 from attachment where tenant_id = ?::uuid and id = ?::uuid
                 """, String.class, TENANT, uploaded.path("id").asText())).isEqualTo("LANDSCAPE");
 
