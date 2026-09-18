@@ -1,4 +1,5 @@
 import type { RoleContext } from '../../domain'
+import { apiBlob } from '../../api/client'
 import { featureApiMutation, featureApiRequest } from '../shared/featureApi'
 import {
   parseFixedAsset,
@@ -12,6 +13,8 @@ import {
   parseStoreResourceHotels,
   parseStoreResourceItem,
   parseStoreResourceItems,
+  parseStoreResourceImportHistory,
+  parseStoreResourceImportJob,
   type FixedAssetInput,
   type InventoryAdjustmentInput,
   type StoreResourceHandoverInput,
@@ -62,6 +65,45 @@ export async function createInventoryMovement(identity: RoleContext, hotelId: st
 
 export async function loadFixedAssets(identity: RoleContext, hotelId: string, signal?: AbortSignal) {
   return parseFixedAssets(await featureApiRequest<unknown>(`${hotelPath(hotelId)}/assets?includeRetired=true`, identity, { signal }))
+}
+
+export async function loadStoreResourceImportHistory(identity: RoleContext, hotelId: string, signal?: AbortSignal) {
+  return parseStoreResourceImportHistory(await featureApiRequest<unknown>(`${hotelPath(hotelId)}/imports`, identity, { signal }))
+}
+
+export async function previewStoreResourceImport(identity: RoleContext, hotelId: string, file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  return parseStoreResourceImportJob(await featureApiRequest<unknown>(`${hotelPath(hotelId)}/imports/preview`, identity, {
+    method: 'POST', body: form,
+  }))
+}
+
+export async function applyStoreResourceImport(identity: RoleContext, hotelId: string, jobId: string, idempotencyKey: string) {
+  return parseStoreResourceImportJob(await featureApiMutation<unknown>(`${hotelPath(hotelId)}/imports/${encodeURIComponent(jobId)}/actions/apply`, identity, {
+    method: 'POST', body: {}, idempotencyKey,
+  }))
+}
+
+async function downloadStoreResourceImportFile(identity: RoleContext, path: string, fileName: string) {
+  const blob = await apiBlob(path, identity, {
+    headers: { Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream' },
+  })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(link.href), 0)
+}
+
+export async function downloadStoreResourceImportTemplate(identity: RoleContext, hotelId: string) {
+  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template`, '新店库存与固定资产导入模板_V1.xlsx')
+}
+
+export async function downloadStoreResourceImportErrors(identity: RoleContext, hotelId: string, jobId: string) {
+  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/${encodeURIComponent(jobId)}/errors`, `导入错误_${jobId}.xlsx`)
 }
 
 export async function createFixedAsset(identity: RoleContext, hotelId: string, input: FixedAssetInput, idempotencyKey: string) {

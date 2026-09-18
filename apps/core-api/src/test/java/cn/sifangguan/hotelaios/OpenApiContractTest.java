@@ -65,6 +65,11 @@ class OpenApiContractTest {
                 "/api/v1/store-resources/hotels/{hotelId}/movements",
                 "/api/v1/store-resources/hotels/{hotelId}/assets",
                 "/api/v1/store-resources/hotels/{hotelId}/assignment-options",
+                "/api/v1/store-resources/hotels/{hotelId}/imports/template",
+                "/api/v1/store-resources/hotels/{hotelId}/imports",
+                "/api/v1/store-resources/hotels/{hotelId}/imports/preview",
+                "/api/v1/store-resources/hotels/{hotelId}/imports/{importJobId}/errors",
+                "/api/v1/store-resources/hotels/{hotelId}/imports/{importJobId}/actions/apply",
                 "/api/v1/store-resources/hotels/{hotelId}/handovers",
                 "/api/v1/store-resources/handovers/{handoverId}",
                 "/api/v1/store-resources/handovers/{handoverId}/actions/dispute-decision",
@@ -81,6 +86,16 @@ class OpenApiContractTest {
                 .contains("#/components/parameters/HotelId", "#/components/parameters/IdempotencyKey");
         assertThat(requestSchemaRef(movementPost))
                 .isEqualTo("#/components/schemas/CreateStoreInventoryMovement");
+
+        Map<String, Object> applyImport = map(map(paths.get(
+                "/api/v1/store-resources/hotels/{hotelId}/imports/{importJobId}/actions/apply")).get("post"));
+        assertThat(list(applyImport.get("parameters")))
+                .extracting(parameter -> String.valueOf(map(parameter).get("$ref")))
+                .containsExactly(
+                        "#/components/parameters/HotelId",
+                        "#/components/parameters/StoreResourceImportJobId",
+                        "#/components/parameters/IdempotencyKey"
+                );
 
         Map<String, Object> createHandover = map(map(paths.get(
                 "/api/v1/store-resources/hotels/{hotelId}/handovers")).get("post"));

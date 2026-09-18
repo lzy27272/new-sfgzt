@@ -1705,6 +1705,80 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/ListResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/imports/template:
+    get:
+      tags: [Store Resource]
+      operationId: downloadStoreResourceImportTemplate
+      summary: Download the controlled new-store inventory and fixed-asset XLSX template
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200':
+          description: XLSX import template
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/imports:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreResourceImportJobs
+      summary: List recent import validation and application results for a hotel
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/imports/preview:
+    post:
+      tags: [Store Resource]
+      operationId: previewStoreResourceImport
+      summary: Scan, parse and validate a workbook without writing business records
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '201': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/imports/{importJobId}/errors:
+    get:
+      tags: [Store Resource]
+      operationId: downloadStoreResourceImportErrors
+      summary: Download row-level validation errors as XLSX
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreResourceImportJobId'
+      responses:
+        '200':
+          description: XLSX validation error workbook
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/imports/{importJobId}/actions/apply:
+    post:
+      tags: [Store Resource]
+      operationId: applyStoreResourceImport
+      summary: Atomically apply a validated import exactly once
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreResourceImportJobId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/store-resources/hotels/{hotelId}/handovers:
     get:
       tags: [Store Resource]
@@ -1862,6 +1936,7 @@ components:
     StoreResourceItemId: { name: itemId, in: path, required: true, schema: { type: string, format: uuid } }
     StoreFixedAssetId: { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
     StoreResourceHandoverId: { name: handoverId, in: path, required: true, schema: { type: string, format: uuid } }
+    StoreResourceImportJobId: { name: importJobId, in: path, required: true, schema: { type: string, format: uuid } }
     IdempotencyKey:
       name: Idempotency-Key
       in: header

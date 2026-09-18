@@ -110,6 +110,8 @@ export const permissions = Object.freeze({
     itemManage: 'store-resource.item-manage',
     movementCreate: 'store-resource.movement-create',
     assetManage: 'store-resource.asset-manage',
+    importPreview: 'store-resource.import-preview',
+    importApply: 'store-resource.import-apply',
     handoverCreate: 'store-resource.handover-create',
     handoverConfirm: 'store-resource.handover-confirm',
     handoverApprove: 'store-resource.handover-approve',
