@@ -22,6 +22,7 @@ public class WeComDirectoryProperties {
     private final String encryptionKey;
     private final URI oauthCallbackUrl;
     private final Duration invitationTtl;
+    private final Duration sharedInvitationTtl;
     private final Duration exchangeTtl;
     private final Duration sessionTtl;
     private final Duration callbackClockSkew;
@@ -35,6 +36,7 @@ public class WeComDirectoryProperties {
             @Value("${app.wecom.directory.encryption-key:}") String encryptionKey,
             @Value("${app.wecom.directory.oauth-callback-url:}") String oauthCallbackUrl,
             @Value("${app.wecom.directory.invitation-ttl-minutes:120}") long invitationTtlMinutes,
+            @Value("${app.wecom.directory.shared-invitation-ttl-days:7}") long sharedInvitationTtlDays,
             @Value("${app.wecom.directory.exchange-ttl-minutes:2}") long exchangeTtlMinutes,
             @Value("${app.wecom.directory.session-ttl-minutes:30}") long sessionTtlMinutes,
             @Value("${app.wecom.directory.callback-clock-skew-seconds:600}") long callbackClockSkewSeconds
@@ -51,6 +53,8 @@ public class WeComDirectoryProperties {
                 oauthCallbackUrl, "WECOM_DIRECTORY_OAUTH_CALLBACK_URL"));
         this.invitationTtl = Duration.ofMinutes(bounded(
                 invitationTtlMinutes, 5, 120, "directory invitation TTL"));
+        this.sharedInvitationTtl = Duration.ofDays(bounded(
+                sharedInvitationTtlDays, 1, 7, "directory shared invitation TTL"));
         this.exchangeTtl = Duration.ofMinutes(bounded(
                 exchangeTtlMinutes, 1, 10, "directory exchange TTL"));
         this.sessionTtl = Duration.ofMinutes(bounded(
@@ -93,6 +97,7 @@ public class WeComDirectoryProperties {
     public String encryptionKey() { return encryptionKey; }
     public URI oauthCallbackUrl() { return oauthCallbackUrl; }
     public Duration invitationTtl() { return invitationTtl; }
+    public Duration sharedInvitationTtl() { return sharedInvitationTtl; }
     public Duration exchangeTtl() { return exchangeTtl; }
     public Duration sessionTtl() { return sessionTtl; }
     public Duration callbackClockSkew() { return callbackClockSkew; }

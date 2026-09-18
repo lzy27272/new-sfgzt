@@ -267,7 +267,7 @@ public class WeComDirectoryOnboardingAdministrationService {
         UUID invitationId = UUID.randomUUID();
         String token = employeeService.newInvitationToken();
         OffsetDateTime issuedAt = OffsetDateTime.now();
-        OffsetDateTime expiresAt = issuedAt.plus(properties.invitationTtl());
+        OffsetDateTime expiresAt = issuedAt.plus(properties.sharedInvitationTtl());
         jdbc.update("""
                 insert into wecom_open_onboarding_invitation
                     (id, tenant_id, corp_id, token_hash, issued_at, expires_at, created_by)
@@ -1396,7 +1396,8 @@ public class WeComDirectoryOnboardingAdministrationService {
             String status, String failureCode, boolean expiringSoon, String invitationSource
     ) {
         if ("EXPIRED".equals(status) && "MANUAL_LINK".equals(invitationSource)) {
-            return "原链接已失效，请重新点击一键邀请生成新链接";
+            return "本次填写会话已过期。如共享二维码仍在有效期，可重新扫码；"
+                    + "否则请点击一键邀请生成新码";
         }
         if ("EXPIRED".equals(status)) return "管理员重新生成邀请；原链接不可恢复";
         if (failureCode != null && TECHNICAL_RETRY_FAILURES.contains(failureCode)) {

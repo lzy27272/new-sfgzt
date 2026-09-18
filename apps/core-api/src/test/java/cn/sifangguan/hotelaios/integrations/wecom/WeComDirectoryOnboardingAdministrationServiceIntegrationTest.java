@@ -114,6 +114,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 "https://www.sfgzt.cn/api/v1/integrations/wecom/directory-onboarding/oauth/callback"));
         when(properties.agentId()).thenReturn(1000002L);
         when(properties.invitationTtl()).thenReturn(Duration.ofMinutes(120));
+        when(properties.sharedInvitationTtl()).thenReturn(Duration.ofDays(7));
         when(properties.exchangeTtl()).thenReturn(Duration.ofMinutes(2));
         codec = new WeComDirectorySecretCodec(properties);
         employeeService = mock(WeComDirectoryOnboardingService.class);
@@ -161,6 +162,93 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 where open_invitation_id = ?
                 """, Integer.class, response.candidateId())).isZero();
         assertThat(identityCounts()).isEqualTo(before);
+    }
+
+    @Test
+    void sharedInvitationLastsSevenDaysButEachEmployeeCredentialStaysShortLived() {
+        OpenInvitationResponse invitation = inTransaction(service::createOpenInvitation);
+        assertThat(jdbc.queryForObject("""
+                select expires_at - issued_at = interval '7 days'
+                from wecom_open_onboarding_invitation where id = ?
+                """, Boolean.class, invitation.candidateId())).isTrue();
+        // A QR code forwarded the previous evening must still work the next day.
+        jdbc.update("""
+                update wecom_open_onboarding_invitation
+                set issued_at = now() - interval '1 day',
+                    expires_at = now() + interval '6 days'
+                where id = ?
+                """, invitation.candidateId());
+        UUID candidateId = startReusableCandidate(invitation, lifecycleService());
+        assertThat(jdbc.queryForObject("""
+                select invitation_expires_at - invitation_issued_at = interval '120 minutes'
+                from wecom_person_onboarding where id = ?
+                """, Boolean.class, candidateId)).isTrue();
+    }
+
+    @Test
+    void employeeCredentialCannotOutliveSharedInvitation() {
+        OpenInvitationResponse invitation = inTransaction(service::createOpenInvitation);
+        jdbc.update("""
+                update wecom_open_onboarding_invitation
+                set issued_at = now() - interval '6 days',
+                    expires_at = now() + interval '3 minutes'
+                where id = ?
+                """, invitation.candidateId());
+        WeComDirectoryOnboardingService lifecycle = lifecycleService();
+        var start = inTransaction(() -> lifecycle.start(openInvitationToken(invitation)));
+        assertThat(start.maxAgeSeconds()).isBetween(1L, 180L);
+        assertThat(jdbc.queryForObject("""
+                select p.invitation_expires_at = i.expires_at
+                from wecom_person_onboarding p
+                join wecom_open_onboarding_invitation i on i.id = p.open_invitation_id
+                where i.id = ?
+                """, Boolean.class, invitation.candidateId())).isTrue();
+    }
+
+    @Test
+    void regeneratingCreatesANewLinkWithoutRevivingExpiredQrCodes() {
+        OpenInvitationResponse expired = inTransaction(service::createOpenInvitation);
+        jdbc.update("""
+                update wecom_open_onboarding_invitation
+                set issued_at = now() - interval '8 days',
+                    expires_at = now() - interval '1 day'
+                where id = ?
+                """, expired.candidateId());
+        OpenInvitationResponse replacement = inTransaction(service::createOpenInvitation);
+        WeComDirectoryOnboardingService lifecycle = lifecycleService();
+        assertThat(replacement.enrollmentUrl()).isNotEqualTo(expired.enrollmentUrl());
+        assertThatThrownBy(() -> inTransaction(() -> lifecycle.start(openInvitationToken(expired))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("重新生成二维码");
+        startReusableCandidate(replacement, lifecycle);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from wecom_person_onboarding where open_invitation_id = ?
+                """, Integer.class, expired.candidateId())).isZero();
+    }
+
+    @Test
+    void sharedQrRemainsUsableAfterAnIndividualScanSessionExpires() {
+        OpenInvitationResponse invitation = inTransaction(service::createOpenInvitation);
+        WeComDirectoryOnboardingService lifecycle = lifecycleService();
+        UUID firstCandidate = startReusableCandidate(invitation, lifecycle);
+        jdbc.update("""
+                update wecom_person_onboarding
+                set invitation_issued_at = now() - interval '3 hours',
+                    invitation_expires_at = now() - interval '1 hour'
+                where id = ?
+                """, firstCandidate);
+        inTransaction(() -> { lifecycle.expireDueInvitations(); return null; });
+        assertThat(jdbc.queryForObject("select status from wecom_person_onboarding where id = ?",
+                String.class, firstCandidate)).isEqualTo("EXPIRED");
+        assertThat(jdbc.queryForList("""
+                select content from notification
+                where source_id = ? and notification_type = 'WECOM_ONBOARDING_INVITATION_EXPIRED'
+                """, String.class, firstCandidate))
+                .isNotEmpty()
+                .allSatisfy(content -> assertThat(content)
+                        .contains("共享二维码仍在有效期")
+                        .doesNotContain("原链接已失效"));
+        assertThat(startReusableCandidate(invitation, lifecycle)).isNotEqualTo(firstCandidate);
     }
 
     @Test

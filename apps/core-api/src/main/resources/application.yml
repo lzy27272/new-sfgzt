@@ -101,6 +101,8 @@ app:
       encryption-key: ${WECOM_DIRECTORY_ENCRYPTION_KEY:}
       oauth-callback-url: ${WECOM_DIRECTORY_OAUTH_CALLBACK_URL:}
       invitation-ttl-minutes: ${WECOM_DIRECTORY_INVITATION_TTL_MINUTES:120}
+      # Shared QR entry only; per-employee invitations and OAuth sessions stay short-lived.
+      shared-invitation-ttl-days: ${WECOM_DIRECTORY_SHARED_INVITATION_TTL_DAYS:7}
       exchange-ttl-minutes: ${WECOM_DIRECTORY_EXCHANGE_TTL_MINUTES:2}
       session-ttl-minutes: ${WECOM_DIRECTORY_SESSION_TTL_MINUTES:30}
       callback-clock-skew-seconds: ${WECOM_DIRECTORY_CALLBACK_CLOCK_SKEW_SECONDS:600}

@@ -178,13 +178,17 @@ public class WeComDirectoryOnboardingService {
                     row_version = candidate.row_version + 1
                 from due
                 where candidate.tenant_id = :tenantId and candidate.id = due.id
-                returning candidate.id, candidate.user_id_fingerprint
+                returning candidate.id, candidate.user_id_fingerprint, candidate.open_invitation_id
                 """, params(), (rs, rowNum) -> new ExpiredCandidate(
-                rs.getObject("id", UUID.class), rs.getString("user_id_fingerprint")));
+                rs.getObject("id", UUID.class), rs.getString("user_id_fingerprint"),
+                rs.getObject("open_invitation_id", UUID.class) != null));
         for (ExpiredCandidate candidate : expired) {
             notifyGovernance(candidate.id(), "WECOM_ONBOARDING_INVITATION_EXPIRED",
-                    "企业微信入职邀请已过期",
-                    "员工未在120分钟内完成申请，原链接已失效；如需继续，请重新生成邀请。",
+                    candidate.sharedEntry() ? "企业微信入职填写会话已过期" : "企业微信入职邀请已过期",
+                    candidate.sharedEntry()
+                            ? "员工未在本次验证时限内完成申请。如共享二维码仍在有效期，可重新扫码验证；"
+                              + "共享码已过期时，请管理员通过一键邀请生成新码。"
+                            : "员工未在邀请时限内完成申请，原链接已失效；如需继续，请重新生成邀请。",
                     "invitation-expired");
             systemAudit("WECOM_ONBOARDING_INVITATION_EXPIRED", "wecom_person_onboarding",
                     candidate.id(), UUID.randomUUID(), Map.of(
@@ -265,6 +269,11 @@ public class WeComDirectoryOnboardingService {
             ReusableInvitation invitation = reusable.getFirst();
             UUID candidateId = UUID.randomUUID();
             OffsetDateTime startedAt = OffsetDateTime.now();
+            // A week-long shared entry must not create week-long employee credentials.
+            OffsetDateTime candidateExpiresAt = startedAt.plus(properties.invitationTtl());
+            if (invitation.expiresAt().isBefore(candidateExpiresAt)) {
+                candidateExpiresAt = invitation.expiresAt();
+            }
             String placeholderFingerprint = sha256(
                     "open-invitation:" + invitation.id() + ":" + candidateId);
             jdbc.update("""
@@ -286,13 +295,13 @@ public class WeComDirectoryOnboardingService {
                     .addValue("fingerprint", placeholderFingerprint)
                     .addValue("candidateTokenHash", sha256(randomSecret()))
                     .addValue("startedAt", startedAt)
-                    .addValue("expiresAt", invitation.expiresAt())
+                    .addValue("expiresAt", candidateExpiresAt)
                     .addValue("stateHash", sha256(state))
                     .addValue("verifierHash", sha256(verifier))
                     .addValue("sourceHash", sha256("open-invitation-candidate:" + candidateId))
                     .addValue("createdBy", invitation.createdBy())
                     .addValue("openInvitationId", invitation.id()));
-            candidate = new StartCandidate(candidateId, invitation.expiresAt());
+            candidate = new StartCandidate(candidateId, candidateExpiresAt);
         } else {
             List<StartCandidate> rows = jdbc.query("""
                     select id, invitation_expires_at from wecom_person_onboarding
@@ -303,7 +312,8 @@ public class WeComDirectoryOnboardingService {
                     for update
                     """, params().addValue("tokenHash", tokenHash), (rs, rowNum) -> new StartCandidate(
                     rs.getObject("id", UUID.class), rs.getObject("invitation_expires_at", OffsetDateTime.class)));
-            if (rows.size() != 1) throw new IllegalArgumentException("入职邀请不存在、已过期或不可继续");
+            if (rows.size() != 1) throw new IllegalArgumentException(
+                    "入职邀请已过期或不可用。请联系管理员在“企微绑定与异常 → 一键邀请”重新生成二维码，再使用新码扫码。");
             candidate = rows.getFirst();
             jdbc.update("""
                     update wecom_person_onboarding
@@ -1561,7 +1571,7 @@ public class WeComDirectoryOnboardingService {
     private record OAuthCandidate(
             UUID id, String fingerprint, UUID sourceAccountId, String invitationSource
     ) { }
-    private record ExpiredCandidate(UUID id, String fingerprint) { }
+    private record ExpiredCandidate(UUID id, String fingerprint, boolean sharedEntry) { }
     private record OptionRow(
             UUID hotelId, String hotelName, String organizationType,
             UUID departmentId, String departmentName,
