@@ -436,7 +436,22 @@ class WorkPackageFlowIntegrationTest {
                         {"positionAssignmentId":"%s","targetOrgUnitId":"%s",
                          "businessDate":"%s","periodType":"DAY","dutyPeriodId":null}
                                  """.formatted(FRONT_ASSIGNMENT, FRONT_DEPARTMENT, businessDate)), 201);
-        String expectationId = generation.path("createdIds").get(0).asText();
+        String expectationId = jdbc.queryForObject("""
+                select expectation.id::text
+                from work_expectation expectation
+                join work_package_item item
+                  on item.tenant_id = expectation.tenant_id
+                 and item.id = expectation.work_package_item_id
+                where expectation.tenant_id = ?::uuid
+                  and expectation.position_assignment_id = ?::uuid
+                  and expectation.target_org_unit_id = ?::uuid
+                  and expectation.business_date = ?
+                  and item.work_package_version_id = ?::uuid
+                  and item.item_code = 'REPEATABLE_GUEST_EVENT'
+                """, String.class, TENANT, FRONT_ASSIGNMENT, FRONT_DEPARTMENT,
+                businessDate, versionId);
+        assertThat(generation.path("createdCount").asInt() + generation.path("existingCount").asInt())
+                .isGreaterThanOrEqualTo(1);
         String itemId = jdbc.queryForObject("""
                 select work_package_item_id::text from work_expectation
                 where tenant_id = ?::uuid and id = ?::uuid
