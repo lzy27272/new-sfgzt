@@ -799,6 +799,12 @@ dd { margin: 5px 0 0; color: #334f64; font-size: 10px; }
 .room-photo-button:has(input:disabled) { opacity: .48; cursor: not-allowed; }
 .room-photo-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .pending-evidence-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.task-dispatch-reference { padding: 12px; display: grid; gap: 9px; border: 1px solid #d6e5ee; border-radius: 10px; background: #f7fbfd; color: #35576c; }
+.task-dispatch-reference > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.task-dispatch-reference > small { color: #7890a0; font-size: 8px; line-height: 1.55; }
+.task-file-button { position: relative; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.task-file-button:has(input:disabled) { opacity: .48; cursor: not-allowed; }
+.task-file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .work-save-progress { padding: 11px 12px; display: grid; gap: 7px; border: 1px solid #b8d8ee; border-radius: 10px; color: #24536f; background: #eef8ff; }
 .work-save-progress strong { font-size: 10px; line-height: 1.5; }
 .work-save-progress small { color: #668397; font-size: 8px; line-height: 1.5; }

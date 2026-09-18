@@ -25,6 +25,6 @@ test('work record cannot be closed while save or upload is active', () => {
 })
 
 test('work and task uploads materialize restored draft files before FormData streaming', () => {
-  assert.equal((resources.match(/await materializeFileForUpload\(file\)/g) ?? []).length, 2)
-  assert.equal((resources.match(/throw readableUploadError\(reason, file\.name\)/g) ?? []).length, 2)
+  assert.equal((resources.match(/await materializeFileForUpload\(file\)/g) ?? []).length, 3)
+  assert.equal((resources.match(/throw readableUploadError\(reason, file\.name\)/g) ?? []).length, 3)
 })

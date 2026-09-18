@@ -144,6 +144,52 @@ class Pilot7TaskDeliveryIntegrationTest {
     }
 
     @Test
+    void creatorCanAttachOptionalDispatchPhotoWithoutSatisfyingAssigneeEvidencePolicy() throws Exception {
+        JsonNode created = json(postTask(FRONT_OFFICE_SUPERVISOR, """
+                {
+                  "orgUnitId":"%s",
+                  "assigneeAssignmentId":"%s",
+                  "reviewerAssignmentId":"%s",
+                  "creatorAssignmentId":"%s",
+                  "title":"Dispatch photo reference",
+                  "dispatchNow":false,
+                  "sourceSnapshot":{"taskPolicy":{"attachmentRequired":true,"maxAttachments":10}}
+                }
+                """.formatted(HANGZHOU_HOTEL, FRONT_DESK_ASSIGNMENT,
+                FRONT_OFFICE_ASSIGNMENT, FRONT_OFFICE_ASSIGNMENT)));
+        String taskId = created.path("id").asText();
+        assertThat(created.path("lifecycle_status").asText()).isEqualTo("PROPOSED");
+        assertThat(created.path("created_by_assignment_id").asText()).isEqualTo(FRONT_OFFICE_ASSIGNMENT);
+
+        MvcResult uploaded = mockMvc.perform(multipart(
+                                "/api/v1/tasks/{taskId}/dispatch-attachments/upload", taskId)
+                        .file(new MockMultipartFile("file", "reference.png", "image/png", photo(800, 600)))
+                        .param("submittedByAssignmentId", FRONT_OFFICE_ASSIGNMENT)
+                        .param("note", "请按图中标注处处理")
+                        .header("X-Tenant-Id", TENANT)
+                        .header("X-Actor-Id", FRONT_OFFICE_SUPERVISOR))
+                .andExpect(status().isCreated())
+                .andReturn();
+        assertThat(json(uploaded).path("structuredResult").path("purpose").asText())
+                .isEqualTo("DISPATCH_REFERENCE");
+
+        JsonNode detail = json(getJson("/api/v1/tasks/" + taskId, FRONT_OFFICE_SUPERVISOR));
+        JsonNode persistedStructured = detail.path("evidence").get(0).path("structured_result");
+        if (persistedStructured.has("value")) {
+            persistedStructured = objectMapper.readTree(persistedStructured.path("value").asText());
+        }
+        assertThat(persistedStructured.path("note").asText())
+                .isEqualTo("请按图中标注处处理");
+
+        postCommandExpecting(taskId, "dispatch", FRONT_OFFICE_SUPERVISOR,
+                FRONT_OFFICE_ASSIGNMENT, 0, 200);
+        postCommandExpecting(taskId, "acknowledge", FRONT_DESK,
+                FRONT_DESK_ASSIGNMENT, 1, 200);
+        postCommandExpecting(taskId, "submit-result", FRONT_DESK,
+                FRONT_DESK_ASSIGNMENT, 2, 400);
+    }
+
+    @Test
     void hotelSupervisorCanTargetSameHotelAcrossDepartmentsButNotAnotherHotel() throws Exception {
         JsonNode targets = json(getJson("/api/v1/tasks/targets", FRONT_OFFICE_SUPERVISOR));
         assertThat(containsAssignment(targets, HOUSEKEEPING_ASSIGNMENT)).isTrue();
