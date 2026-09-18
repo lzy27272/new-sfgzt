@@ -67,7 +67,6 @@ import {
   requiredPermissionsForRoute,
   type AppNavigate,
   type AppRouteId,
-  type AppSectionId,
 } from './app/routeConfig'
 import {
   applyPublishedModuleVisibility,
@@ -76,8 +75,9 @@ import {
   resolveFullAccountPresentationRole,
   resolveRolePresentationPolicy,
   shouldUseRoleDefaultsFallback,
-  type MobilePresentationTab,
 } from './app/rolePresentationPolicy'
+import { buildNavigationCenters, canOpenStoreResources, navigationCenterForSection } from './app/navigationModel'
+import { CenterFeatureNavigation, MainCenterNavigation } from './shared/CenterNavigation'
 import { resolveNotificationNavigation } from './app/notificationNavigation'
 import { useHashRoute } from './app/useHashRoute'
 import { loadExecutiveTasks } from './features/executiveTasks/api'
@@ -98,12 +98,7 @@ import {
   writeResumableDraft,
   type StoredDraftFile,
 } from './app/resumableDrafts'
-import {
-  AllFunctionsPage,
-  MobileBottomNavigation,
-  type MobileNavigationIcon,
-  type MobileNavigationItems,
-} from './shared/MobileAppNavigation'
+import { AllFunctionsPage } from './shared/MobileAppNavigation'
 
 const icpRecordNumber = (import.meta.env.VITE_ICP_RECORD_NUMBER ?? '').trim()
 
@@ -135,7 +130,7 @@ const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; ico
   { id: 'hotel-dashboard', label: '门店工作台', icon: '▤', permissions: ['dashboard.hotel'] },
   { id: 'operations-dashboard', label: '多门店工作台', icon: '▥', permissions: ['dashboard.operations'] },
   { id: 'investments', label: '投资测算', icon: '¥', group: '投资决策', permissions: [permissionCodes.investment.read] },
-  { id: 'work-packages', label: '工作包中心', icon: '▦', group: '标准与工作', permissions: ['work-package.read', 'work-package.manage', 'standard.read'] },
+  { id: 'work-packages', label: '岗位工作模板', icon: '▦', group: '标准与工作', permissions: ['work-package.read', 'work-package.manage', 'standard.read'] },
   { id: 'my-work', label: '我的工作', icon: '✓', permissions: ['work-record.read', 'work-record.submit', 'work.submit'] },
   { id: 'team-work', label: '团队工作', icon: '◎', permissions: [permissionCodes.workRecord.readTeam, 'work-record.review'] },
   { id: 'daily-reports-my', sectionId: 'daily-reports', label: '日报中心', icon: '▣', group: '日报与运营', permissions: [permissionCodes.dailyReport.readOwn, permissionCodes.dailyReport.submit, permissionCodes.dailyReport.readTeam] },
@@ -154,26 +149,6 @@ const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; ico
   { id: 'wecom-onboarding', label: '企业微信入职审核', icon: '人', group: '系统配置', permissions: [permissionCodes.wecomBinding.read] },
   { id: 'wecom-bindings', label: '企微绑定与异常', icon: '◎', permissions: [permissionCodes.wecomBinding.read] },
 ]
-
-function sectionsForMobileTab(tab: Pick<MobilePresentationTab, 'slot'> & { target: AppRouteId }): readonly AppSectionId[] {
-  if (tab.slot === 'profile') return [tab.target === 'account-self-service' ? 'account-self-service' : 'all-functions']
-  if (tab.target === 'daily-reports-my' || tab.target === 'daily-reports-team') return ['daily-reports']
-  if (tab.target === 'daily-operations') return ['daily-operations']
-  if (tab.target === 'kpi-center') return ['kpi']
-  if (tab.target === 'investments') return ['investments']
-  if (tab.target === 'organization') return ['organization', 'wecom-bindings', 'wecom-onboarding', 'wecom-webhooks']
-  return [tab.target as AppSectionId]
-}
-
-function iconForMobileTab(tab: MobilePresentationTab): MobileNavigationIcon {
-  if (tab.target === 'kpi-center') return 'performance'
-  if (tab.target === 'daily-operations' || tab.target === 'organization') return 'operations'
-  if (tab.slot === 'secondary') return 'reports'
-  if (tab.slot === 'domain') return 'operations'
-  if (tab.slot === 'notifications') return 'performance'
-  if (tab.slot === 'profile') return 'profile'
-  return 'workbench'
-}
 
 const roleStorageKey = 'hotel-ai-os-role:v1'
 const statusText: Record<string, string> = {
@@ -1820,7 +1795,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const executiveTasksEnabled = me.data.capabilities.groupManagement.executiveTasksEnabled
   const permissionVisibleNavigation = useMemo(() => navigation.filter((item) => {
     if (item.administratorOnly && !isDataRetentionAdministrator) return false
-    if (['hotel-dashboard', 'operations-dashboard', 'tasks', 'notifications'].includes(item.id)) return false
+    if (['hotel-dashboard', 'operations-dashboard'].includes(item.id)) return false
     if (['rules', 'work-packages'].includes(item.id) && !isPlatformAdmin) return false
     if (item.id === 'my-work' && !activeIdentity.businessActorAssignmentId) return false
     if (item.id === 'tasks' && isChairmanContext) {
@@ -1847,6 +1822,10 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     const visibleIds = new Set(publishedModuleNavigation.map((item) => item.id))
     return navigation.filter((item) => visibleIds.has(item.id) || item.id === 'data-retention')
   }, [isDataRetentionAdministrator, publishedModuleNavigation])
+  const navigationCenters = useMemo(() => buildNavigationCenters(visibleNavigation, activeIdentity.label), [visibleNavigation, activeIdentity.label])
+  const activeCenterId = navigationCenterForSection(sectionId, routeParams)
+  const activeCenter = navigationCenters.find((center) => center.id === activeCenterId)
+  const storeResourcesAvailable = canOpenStoreResources(activePermissions, visibleNavigation)
   const navigationTarget = (id: AppRouteId): AppRouteId => {
     if (id !== 'daily-reports-my') return id
     const canUseTeamReport = activePermissions.includes('*')
@@ -1906,7 +1885,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     }
     let legacyPage: React.ReactNode
     switch (view) {
-      case 'workbench': legacyPage = <RoleWorkbench identity={activeIdentity} permissions={activePermissions} presentationKey={presentationPolicy.key} executiveTasksEnabled={executiveTasksEnabled} routeParams={routeParams} go={navigate} />; break
+      case 'workbench': legacyPage = <RoleWorkbench identity={activeIdentity} permissions={activePermissions} presentationKey={presentationPolicy.key} executiveTasksEnabled={executiveTasksEnabled} storeResourcesAvailable={storeResourcesAvailable} routeParams={routeParams} go={navigate} navigation={<CenterFeatureNavigation center={activeCenter} sectionId={sectionId} go={navigate} resolveTarget={navigationTarget} unreadCount={unreadCount} />} />; break
       case 'all-functions': legacyPage = <AllFunctionsPage
         items={visibleNavigation}
         roleLabel={activeIdentity.label}
@@ -1959,30 +1938,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     >
       <Suspense fallback={<div className="state-card"><div className="spinner" /><strong>正在加载当前岗位功能</strong></div>}>{legacyPage}</Suspense>
     </PageAccessBoundary>
-  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation])
-  const mobileNavigationItems = useMemo(() => {
-    const visibleIds = new Set(visibleNavigation.map((item) => item.id))
-    const resolveMobileTarget = (tab: MobilePresentationTab): AppRouteId | undefined => {
-      if (tab.target === 'all-functions' || tab.target === 'account-self-service') return tab.target
-      if (tab.target === 'workbench' && visibleIds.has('workbench')) return tab.target
-      if (tab.target === 'daily-reports-my' && visibleIds.has('daily-reports-my')) return navigationTarget(tab.target)
-      if (visibleIds.has(tab.target)) return navigationTarget(tab.target)
-      return undefined
-    }
-    return presentationPolicy.mobileTabs.map((tab) => {
-      const resolvedTarget = resolveMobileTarget(tab)
-      const target = resolvedTarget ?? visibleNavigation[0]?.id ?? 'all-functions'
-      return {
-        key: tab.slot,
-        label: tab.label,
-        target,
-        matchSections: resolvedTarget ? sectionsForMobileTab({ ...tab, target }) : [],
-        icon: iconForMobileTab(tab),
-        ...(!resolvedTarget ? { disabled: true } : {}),
-        ...(tab.target === 'notifications' ? { badge: 'unread' as const } : {}),
-      }
-    }) as unknown as MobileNavigationItems
-  }, [activeIdentity.businessActorAssignmentId, activePermissions, presentationPolicy, visibleNavigation])
+  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation, activeCenter, sectionId, storeResourcesAvailable, unreadCount])
   const changeRole = (key: string) => {
     const next = roleContexts.find((role) => role.key === key)
     if (!next) return
@@ -1997,7 +1953,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
 
   return <div className="shell">
     <aside className="sidebar"><div className="brand-mark"><div>四</div><span><strong>{product.name}</strong><small>{product.edition} · {product.editionLabel}</small></span></div>
-      <nav>{visibleNavigation.map((item, index) => <div key={item.id}>{item.group && <span className="nav-group">{item.group}</span>}<button className={sectionId === (item.sectionId ?? item.id) ? 'active' : ''} onClick={() => navigate(navigationTarget(item.id))}><i>{item.icon}</i><span>{item.id === 'workbench' ? `${activeIdentity.label}工作台` : item.label}</span>{item.id === 'notifications' && unreadCount > 0 && <b>{unreadCount}</b>}</button>{index === 0 && <div className="nav-separator" />}</div>)}</nav>
+      <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} />
       <div className="sidebar-footer"><span>{product.version}</span><small>标准 → 工作 → 任务 → 执行 → 验收</small>{icpRecordNumber && <a className="icp-record" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}</div>
     </aside>
     <main><header className="topbar"><div className="mobile-top-brand" aria-label={product.name}><span>四</span></div><div className={`connection ${me.error ? 'offline' : pilotDemoMode ? 'demo' : ''}`}><span className="live-dot" />{pilotDemoMode ? 'Pilot 演示数据' : me.error ? '身份接口异常' : '服务端权限已解析'}<small>{pilotDemoMode ? '仅用于界面与流程走查，不代表真实业务数据或权限' : authMode === 'dev-header' ? '本地验收账号 · 权限由数据库决定' : 'JWT/SSO 会话身份'}</small></div><span className="pilot-badge">{product.editionLabel}</span>
@@ -2006,17 +1962,13 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       {isFullAccountLevel && <span className="mobile-current-context">{activeIdentity.label}</span>}
       {canReadSidebarNotifications && <button className="bell" onClick={() => navigate('notifications')} aria-label={unreadCount > 0 ? `消息，${unreadCount}条未读` : '消息'}>消息{unreadCount > 0 && <b>{unreadCount}</b>}</button>}
       <div className="user"><span>{activeIdentity.userName.slice(-1)}</span><div><strong>{activeIdentity.userName}</strong><small>{activeIdentity.label}</small></div></div>
+      <button type="button" className="mobile-account-button" onClick={() => navigate(isChairmanContext ? 'account-self-service' : 'all-functions')} aria-label="个人与系统">我的</button>
       {authMode !== 'dev-header' && <button className="logout-button" onClick={() => setChangingPassword(true)}>修改密码</button>}
       {authMode !== 'dev-header' && <button className="logout-button" onClick={onLogout}>退出</button>}
     </header>
       {demoFallbackEnabled && <div className="demo-warning">已显式启用演示回退：仅当真实 API 请求失败时展示演示数据；API 返回空结果时仍显示空状态。</div>}
-      <div className="canvas">{page}</div>
-      <MobileBottomNavigation
-        sectionId={sectionId}
-        go={navigate}
-        items={mobileNavigationItems}
-        unreadCount={unreadCount}
-      />
+      <div className="canvas">{view !== 'workbench' && <CenterFeatureNavigation center={activeCenter} sectionId={sectionId} go={navigate} resolveTarget={navigationTarget} unreadCount={unreadCount} />}{page}</div>
+      <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} mobile />
       {changingPassword && <ChangePasswordDialog identity={activeIdentity} onClose={() => setChangingPassword(false)} onChanged={() => { setChangingPassword(false); onLogout?.() }} />}
     </main>
   </div>

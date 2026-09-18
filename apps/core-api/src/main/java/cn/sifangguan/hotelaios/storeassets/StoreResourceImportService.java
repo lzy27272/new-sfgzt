@@ -103,13 +103,23 @@ public class StoreResourceImportService {
     public Map<String, Object> preview(UUID hotelId, MultipartFile file) {
         TenantPrincipal principal = prepareHotel("store-resource.import-preview", hotelId);
         Upload upload = validatedUpload(file);
+        MapSqlParameterSource fileKey = hotel(principal, hotelId).addValue("importType", IMPORT_TYPE)
+                .addValue("sha256", upload.sha256());
+        // Serialize first uploads before a job row exists. Existing jobs also take
+        // the same row lock as apply, so a refresh can never overwrite APPLIED.
+        jdbc.queryForList("select pg_advisory_xact_lock(hashtextextended(:fileKey, 0))",
+                new MapSqlParameterSource("fileKey", principal.tenantId() + ":" + hotelId
+                        + ":" + IMPORT_TYPE + ":" + upload.sha256()));
         List<Map<String, Object>> duplicate = jdbc.queryForList("""
                 select * from tabular_import_job
                 where tenant_id = :tenantId and target_org_unit_id = :hotelId
                   and import_type = :importType and sha256 = :sha256
-                """, hotel(principal, hotelId).addValue("importType", IMPORT_TYPE)
-                .addValue("sha256", upload.sha256()));
-        if (!duplicate.isEmpty()) return jobResponse(duplicate.getFirst(), true);
+                for update
+                """, fileKey);
+        Map<String, Object> existing = duplicate.isEmpty() ? null : duplicate.getFirst();
+        if (existing != null && "APPLIED".equals(existing.get("status"))) {
+            return jobResponse(existing, true);
+        }
 
         Parsed parsed = parse(principal, hotelId, workbook.read(upload.bytes()));
         List<ImportError> errors = new ArrayList<>(parsed.errors());
@@ -125,7 +135,7 @@ public class StoreResourceImportService {
             errors.add(new ImportError("工作簿", 1, "数据", "工作簿没有可导入的数据", ""));
             status = "INVALID";
         }
-        UUID jobId = UUID.randomUUID();
+        UUID jobId = existing == null ? UUID.randomUUID() : uuid(existing.get("id"));
         MapSqlParameterSource params = hotel(principal, hotelId)
                 .addValue("id", jobId).addValue("importType", IMPORT_TYPE)
                 .addValue("templateVersion", TEMPLATE_VERSION).addValue("name", upload.name())
@@ -135,7 +145,7 @@ public class StoreResourceImportService {
                 .addValue("errors", json(errors)).addValue("rowCount", rowCount)
                 .addValue("validRows", validRows).addValue("errorCount", errors.size())
                 .addValue("actorId", principal.actorId());
-        int inserted = jdbc.update("""
+        int inserted = existing == null ? jdbc.update("""
                     insert into tabular_import_job
                       (id, tenant_id, target_org_unit_id, import_type, template_version,
                        original_name, media_type, size_bytes, sha256, scan_status, status,
@@ -147,19 +157,34 @@ public class StoreResourceImportService {
                        cast(:payload as jsonb), cast(:errors as jsonb), :rowCount, :validRows,
                        :errorCount, :actorId)
                     on conflict do nothing
-                    """, params);
+                    """, params) : 0;
         if (inserted == 0) {
-            Map<String, Object> existing = jdbc.queryForMap("""
+            if (existing == null) existing = jdbc.queryForMap("""
                     select * from tabular_import_job
                     where tenant_id = :tenantId and target_org_unit_id = :hotelId
                       and import_type = :importType and sha256 = :sha256
+                    for update
                     """, params);
-            return jobResponse(existing, true);
+            if ("APPLIED".equals(existing.get("status"))) return jobResponse(existing, true);
+            jobId = uuid(existing.get("id"));
+            int changed = jdbc.update("""
+                    update tabular_import_job
+                    set original_name = :name, scan_status = :scanStatus, status = :status,
+                        parsed_payload = cast(:payload as jsonb), validation_errors = cast(:errors as jsonb),
+                        row_count = :rowCount, valid_row_count = :validRows, error_count = :errorCount
+                    where tenant_id = :tenantId and target_org_unit_id = :hotelId
+                      and id = :id and status <> 'APPLIED'
+                    """, params.addValue("id", jobId));
+            if (changed != 1) throw conflict("导入任务状态已变化，请刷新后重试");
         }
-        auditWriter.record("STORE_RESOURCE_IMPORT_PREVIEWED", "TABULAR_IMPORT_JOB", jobId,
+        auditWriter.record(inserted == 1 ? "STORE_RESOURCE_IMPORT_PREVIEWED" : "STORE_RESOURCE_IMPORT_REPREVIEWED",
+                "TABULAR_IMPORT_JOB", jobId,
                 json(Map.of("hotelId", hotelId, "fileName", upload.name(), "rowCount", rowCount,
-                        "errorCount", errors.size(), "sha256", upload.sha256())));
-        return jobResponse(requireJob(principal, hotelId, jobId, false), false);
+                        "errorCount", errors.size(), "sha256", upload.sha256(),
+                        "previousStatus", existing == null ? "NEW" : existing.get("status"), "status", status)));
+        Map<String, Object> result = jobResponse(requireJob(principal, hotelId, jobId, false), inserted == 0);
+        result.put("revalidated", inserted == 0);
+        return result;
     }
 
     @Transactional(readOnly = true)

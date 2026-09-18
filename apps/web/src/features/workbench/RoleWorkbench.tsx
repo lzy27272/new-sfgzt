@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   loadAccessibleHotels,
   loadMyWork,
@@ -219,6 +219,8 @@ export function RoleWorkbench({
   permissions,
   presentationKey,
   executiveTasksEnabled,
+  storeResourcesAvailable = false,
+  navigation,
   routeParams = {},
   go,
 }: {
@@ -226,6 +228,8 @@ export function RoleWorkbench({
   permissions: string[]
   presentationKey: RolePresentationKey
   executiveTasksEnabled: boolean
+  storeResourcesAvailable?: boolean
+  navigation?: ReactNode
   routeParams?: RouteParams
   go: AppNavigate
 }) {
@@ -243,6 +247,7 @@ export function RoleWorkbench({
   const canReadReports = allows(permissions, permissionCodes.dailyReport.readOwn) || allows(permissions, permissionCodes.dailyReport.readTeam)
   const canReadDailyOperations = allows(permissions, permissionCodes.dailyOperations.readHotel) || allows(permissions, permissionCodes.dailyOperations.readCrossHotel)
   const canReadKpi = allows(permissions, permissionCodes.kpi.scorecardReadOwn) || allows(permissions, permissionCodes.kpi.scorecardReadTeam) || allows(permissions, permissionCodes.kpi.scorecardReadAll) || allows(permissions, permissionCodes.kpi.templateRead)
+  const canReadStoreResources = storeResourcesAvailable && allows(permissions, permissionCodes.storeResource.read)
   const executive = executiveKeys.has(presentationKey)
   const [currentBusinessDate, setCurrentBusinessDate] = useState(businessDate)
   const monthStart = `${currentBusinessDate.slice(0, 8)}01`
@@ -393,14 +398,15 @@ export function RoleWorkbench({
 
   return <section className="role-workbench">
     <section className="role-workbench-hero">
-      <div><span className="eyebrow">当前岗位工作</span><h1>{identity.label}工作台</h1><p>{identity.focus}</p></div>
+      <div><h1>{identity.label}工作台</h1><p>{identity.focus}</p></div>
       <div className="role-workbench-actions">
-        {canDispatch && <button type="button" className="primary" onClick={openTaskCreate}>＋ 一键下达任务</button>}
-        {canReadNotices && <button type="button" className="secondary" onClick={() => go('notifications')}>♧ 消息提醒{unreadNotices.length ? ` ${unreadNotices.length}` : ''}</button>}
-        <span className={`source-flag ${source}`}>{source === 'demo' ? '演示回退' : '实时 API'}</span>
+        {canDispatch && <button type="button" className="primary" onClick={openTaskCreate} aria-label="一键下达任务"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m21 3-6 18-4-8-8-4 18-6ZM11 13 21 3" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>工作下达</button>}
+        {canReadNotices && <button type="button" className="secondary" onClick={() => go('notifications')}><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 10a7 7 0 0 1 14 0v4l2 3H3l2-3v-4Zm5 11h4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>消息提醒{unreadNotices.length ? ` ${unreadNotices.length}` : ''}</button>}
+        {source === 'demo' && <span className="source-flag demo">演示回退</span>}
       </div>
     </section>
 
+    {navigation}
     {loading && <div className="state-card"><div className="spinner" /><strong>正在汇总当前岗位工作台</strong><span>门店、部门、人员与工作状态正在统一读取</span></div>}
     {error && <div className="state-card error-state"><b>!</b><strong>工作台读取失败</strong><span>{error}</span><button className="secondary" onClick={() => void work.reload()}>重新加载</button></div>}
     {!loading && !error && <>
@@ -435,7 +441,7 @@ export function RoleWorkbench({
               <span>{today.pending}</span>
               <button type="button" className={counts.OVERDUE ? 'danger-text' : ''} onClick={() => openHotelStatus(hotel.id, 'OVERDUE')}>{counts.OVERDUE}</button>
               <button type="button" className={counts.LATE_SUBMITTED ? 'warning-text' : ''} onClick={() => openHotelStatus(hotel.id, 'LATE_SUBMITTED')}>{counts.LATE_SUBMITTED}</button>
-              <span className="workbench-hotel-actions"><button type="button" className="link-button" onClick={() => openHotelStatus(hotel.id)}>进入门店</button><button type="button" className="link-button" onClick={() => openHotelStatus(hotel.id, 'OVERDUE')}>查看逾期</button></span>
+              <span className="workbench-hotel-actions"><button type="button" className="link-button" onClick={() => openHotelStatus(hotel.id)}>进入门店</button><button type="button" className="link-button" onClick={() => openHotelStatus(hotel.id, 'OVERDUE')}>查看逾期</button>{canReadStoreResources && <button type="button" className="link-button" onClick={() => go('store-resources', { hotelId: hotel.id, tab: 'assets' })}>库存与资产</button>}</span>
             </div>
           })}
         </div>}
@@ -447,6 +453,7 @@ export function RoleWorkbench({
           {canReadReports && <button type="button" onClick={() => go('daily-reports-team', { hotelId: selectedHotel.id })}>日报</button>}
           {canReadDailyOperations && <button type="button" onClick={() => go('daily-operations', { hotelId: selectedHotel.id })}>日运营</button>}
           {canReadKpi && <button type="button" onClick={() => go('kpi-center', { hotelId: selectedHotel.id })}>KPI</button>}
+          {canReadStoreResources && <button type="button" onClick={() => go('store-resources', { hotelId: selectedHotel.id, tab: 'assets' })}>库存与资产</button>}
         </div></header>
         <div className="workbench-detail-scroll" role="region" tabIndex={0} aria-label="门店工作明细，可左右滚动">
         <div className="workbench-detail-grid">

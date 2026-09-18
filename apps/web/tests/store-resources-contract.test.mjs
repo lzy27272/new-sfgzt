@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { createImportRequestGuard, resolveStoreResourceHotelId } from '../src/features/storeResources/interactionState.ts'
 import {
   parseFixedAsset,
   parseHandoverParticipants,
@@ -82,7 +83,7 @@ test('store resource client uses concrete backend routes and dedicated handover 
     'setStoreResourceItemEnabled', 'updateFixedAsset', 'retireFixedAsset',
     'previewStoreResourceImport', 'applyStoreResourceImport', 'downloadStoreResourceImportTemplate',
   ]) assert.match(page, new RegExp(call))
-  assert.match(page, /StoreResourceImportPanel key=\{selectedHotelId\}/)
+  assert.match(page, /StoreResourceImportPanel key=\{`\$\{identity.key\}:\$\{selectedHotelId\}`\}/)
   assert.match(page, /IMPORT: '表格导入'/)
   assert.match(page, /disabled=\{command\.busy\} onClick=\{\(\) => void download/)
   assert.match(api, /document\.body\.appendChild\(link\)/)
@@ -101,4 +102,34 @@ test('store resource client uses concrete backend routes and dedicated handover 
   assert.match(page, /activeItemIds\.has\(balance\.itemId\)/)
   assert.match(page, /asset\.status !== 'RETIRED'/)
   assert.match(css, /@media \(max-width: 760px\)/)
+})
+
+test('hotel deep links are authoritative across same-page navigation and reject inaccessible targets', () => {
+  const hotels = [{ id: 'hotel-a' }, { id: 'hotel-b' }]
+  assert.equal(resolveStoreResourceHotelId(hotels), 'hotel-a')
+  assert.equal(resolveStoreResourceHotelId(hotels, 'hotel-a'), 'hotel-a')
+  assert.equal(resolveStoreResourceHotelId(hotels, 'hotel-b'), 'hotel-b')
+  assert.equal(resolveStoreResourceHotelId(hotels, 'outside-scope'), '')
+  assert.equal(resolveStoreResourceHotelId([], 'hotel-a'), '')
+  const page = read('../src/features/storeResources/StoreResourceRoutes.tsx')
+  assert.match(page, /resolveStoreResourceHotelId\(hotels.data, params.hotelId\)/)
+  assert.doesNotMatch(page, /setSelectedHotelId/)
+})
+
+test('import responses are discarded after changing a file or departing the scope', () => {
+  const guard = createImportRequestGuard()
+  const original = guard.start()
+  assert.equal(guard.isCurrent(original), true)
+  guard.invalidate()
+  assert.equal(guard.isCurrent(original), false)
+  const next = guard.start()
+  assert.equal(guard.isCurrent(next), true)
+  assert.equal(guard.isCurrent(original), false)
+  guard.invalidate()
+  assert.equal(guard.isCurrent(next), false)
+  const page = read('../src/features/storeResources/StoreResourceRoutes.tsx')
+  assert.match(page, /type="file" disabled=\{command.busy\}/)
+  assert.match(page, /useEffect\(\(\) => \(\) => requestGuard.invalidate\(\)/)
+  assert.match(page, /if \(!result \|\| !requestGuard.isCurrent\(request\)\) return/)
+  assert.match(page, /if \(!job \|\| !canApply \|\| !job.canApply \|\| command.busy\) return/)
 })

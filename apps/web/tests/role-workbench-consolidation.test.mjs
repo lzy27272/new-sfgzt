@@ -14,8 +14,8 @@ const attachmentService = readFileSync(new URL('../../core-api/src/main/java/cn/
 const vicePresidentDispatchMigration = readFileSync(new URL('../../../database/migrations/V53__group_vice_president_task_dispatch.sql', import.meta.url), 'utf8')
 
 test('cockpit, task and notification entries are consolidated into the role workbench', () => {
-  assert.match(app, /\['hotel-dashboard', 'operations-dashboard', 'tasks', 'notifications'\]\.includes\(item\.id\)/)
-  assert.match(app, /item\.id === 'workbench' \? `\$\{activeIdentity\.label\}工作台`/)
+  assert.match(app, /\['hotel-dashboard', 'operations-dashboard'\]\.includes\(item\.id\)/)
+  assert.match(app, /buildNavigationCenters\(visibleNavigation, activeIdentity\.label\)/)
   assert.match(workbench, /一键下达任务/)
   assert.match(workbench, /消息提醒/)
 })

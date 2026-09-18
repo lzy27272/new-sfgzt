@@ -1,4 +1,5 @@
 import type { AppNavigate, AppRouteId, AppSectionId } from '../app/routeConfig'
+import { buildNavigationCenters } from '../app/navigationModel'
 
 export type FunctionNavigationItem = {
   id: AppRouteId
@@ -70,13 +71,6 @@ export function MobileBottomNavigation({
   </nav>
 }
 
-const groupOrder = ['日常工作', '标准与工作', '日报与运营', '行政人事', '管理闭环', '投资决策', '系统配置', '其他功能']
-
-function displayGroup(item: FunctionNavigationItem): string {
-  if (['my-work', 'tasks', 'notifications'].includes(item.id)) return '日常工作'
-  return item.group ?? '其他功能'
-}
-
 export function AllFunctionsPage({
   items,
   roleLabel,
@@ -94,16 +88,7 @@ export function AllFunctionsPage({
   onChangePassword?: () => void
   onLogout?: () => void
 }) {
-  const grouped = new Map<string, FunctionNavigationItem[]>()
-  items.filter((item) => item.id !== 'workbench').forEach((item) => {
-    const group = displayGroup(item)
-    grouped.set(group, [...(grouped.get(group) ?? []), item])
-  })
-  const groups = [...grouped.entries()].sort(([left], [right]) => {
-    const leftIndex = groupOrder.indexOf(left)
-    const rightIndex = groupOrder.indexOf(right)
-    return (leftIndex < 0 ? groupOrder.length : leftIndex) - (rightIndex < 0 ? groupOrder.length : rightIndex)
-  })
+  const groups = buildNavigationCenters(items.filter((item) => item.id !== 'workbench'), roleLabel)
 
   return <section className="all-functions-page">
     <header>
@@ -112,10 +97,10 @@ export function AllFunctionsPage({
       <div className="mobile-identity-summary"><strong>{roleLabel}</strong><span>{orgName}</span></div>
     </header>
     <div className="all-function-groups">
-      {groups.map(([group, groupItems]) => <section key={group}>
-        <h2>{group}</h2>
+      {groups.map((group) => <section key={group.id}>
+        <h2>{group.label}</h2>
         <div className="all-function-list">
-          {groupItems.map((item) => <button type="button" key={item.id} onClick={() => go(resolveTarget(item.id))}>
+          {group.items.map((item) => <button type="button" key={item.id} onClick={() => go(resolveTarget(item.id), item.params)}>
             <i aria-hidden="true">{item.icon}</i><span>{item.label}</span><b aria-hidden="true">›</b>
           </button>)}
         </div>
