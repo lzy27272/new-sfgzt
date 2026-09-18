@@ -403,7 +403,7 @@ public class DailyReportDispatchTransactionService {
                  and result.revision_id = report.current_revision_id
                  and result.result_status = 'PENDING'
                  and result.system_prefilled
-                 and result.source_summary ->> 'sourceType' = 'WORK_RECORD'
+                 and result.source_summary ->> 'sourceType' in ('WORK_RECORD', 'WORK_RECORD_COLLECTION')
                 join daily_report_template_item template_item
                   on template_item.tenant_id = result.tenant_id
                  and template_item.id = result.template_item_id

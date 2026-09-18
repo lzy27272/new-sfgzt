@@ -160,6 +160,8 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
     id: text(record, ['id']),
     status: text(record, ['status'], 'SUBMITTED'),
     attemptNo: number(record, ['attemptNo', 'attempt_no'], 1),
+    seriesEntryNo: number(record, ['seriesEntryNo', 'series_entry_no'], 1),
+    repeatableEntry: value(record, 'repeatableEntry', 'repeatable_entry') === true,
     submittedAt: text(record, ['submittedAt', 'submitted_at'], '') || undefined,
     reviewedAt: text(record, ['reviewedAt', 'reviewed_at'], '') || undefined,
     reviewReason: text(record, ['reviewReason', 'review_reason'], '') || undefined,

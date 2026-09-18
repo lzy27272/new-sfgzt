@@ -79,10 +79,50 @@ function dataSource(value: unknown): DailyReportItemResult['dataSource'] {
   return 'MIXED'
 }
 
+const workRecordFieldLabels: Record<string, string> = {
+  roomNumber: '房号',
+  serviceContent: '服务内容描述',
+  location: '房号',
+  complaintContent: '客诉内容',
+  initialHandling: '初步处理情况',
+}
+
+const workRecordStatusLabels: Record<string, string> = {
+  DRAFT: '草稿',
+  SUBMITTED: '已提交待审核',
+  APPROVED: '已审核',
+  REJECTED: '已退回',
+}
+
+function displayRepeatableWorkRecords(value: Row): string | undefined {
+  const entries = rows(value.entries)
+  if (!entries.length || number(value.recordCount) < 1) return undefined
+  const details = entries.map((entry, index) => {
+    const formData = jsonRow(entry.formData)
+    const formFacts = Object.entries(formData)
+      .filter(([, fieldValue]) => fieldValue !== undefined && fieldValue !== null && text(fieldValue).trim())
+      .map(([field, fieldValue]) => `${workRecordFieldLabels[field] ?? field}：${text(fieldValue)}`)
+    const status = workRecordStatusLabels[text(entry.status).toUpperCase()] ?? text(entry.status)
+    return `第 ${number(entry.seriesEntryNo, index + 1)} 条（${[status, ...formFacts].filter(Boolean).join('；')}）`
+  })
+  return `当日共 ${number(value.recordCount, entries.length)} 条记录：${details.join('；')}`
+}
+
 function displayValue(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
-  if (typeof value === 'string') return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      const repeatableRecords = displayRepeatableWorkRecords(row(parsed))
+      if (repeatableRecords) return repeatableRecords
+    } catch {
+      // Plain employee text is expected here and should remain unchanged.
+    }
+    return value
+  }
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  const repeatableRecords = displayRepeatableWorkRecords(row(value))
+  if (repeatableRecords) return repeatableRecords
   try { return JSON.stringify(value) } catch { return String(value) }
 }
 
