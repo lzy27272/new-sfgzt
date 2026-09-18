@@ -22,6 +22,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.util.UUID;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -379,6 +380,144 @@ class WorkPackageFlowIntegrationTest {
     }
 
     @Test
+    void repeatableDailyEventCreatesIndependentRecordsForOneExpectation() throws Exception {
+        LocalDate businessDate = LocalDate.now().plusYears(4);
+        OffsetDateTime effectiveFrom = OffsetDateTime.now().minusMinutes(1).withNano(0);
+        String packageCode = "WP-REPEATABLE-EVENT-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+
+        JsonNode definition = response(identity(post("/api/v1/work-packages"), PLATFORM_ADMIN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"code":"%s","name":"可重复事件测试工作包",
+                         "positionId":"%s","ownerOrgUnitId":"%s"}
+                        """.formatted(packageCode, FRONT_POSITION, HANGZHOU_HOTEL)), 201);
+        String workPackageId = definition.path("id").asText();
+        JsonNode version = response(identity(post("/api/v1/work-packages/{id}/versions", workPackageId), PLATFORM_ADMIN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"可重复事件测试 V1\"}"), 201);
+        String versionId = version.path("id").asText();
+
+        mockMvc.perform(identity(put("/api/v1/work-packages/{id}/versions/{versionId}",
+                        workPackageId, versionId), PLATFORM_ADMIN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title":"可重复事件测试 V1",
+                                  "scopes":[{"scopeType":"ORG_TREE","orgUnitId":"%s"}],
+                                  "items":[{
+                                    "itemCode":"REPEATABLE_GUEST_EVENT","name":"可重复对客事件",
+                                    "itemType":"EVENT_RECORD","formVersionId":"%s","periodType":"DAY",
+                                    "timezoneMode":"TENANT","dueLocalTime":"23:00:00","reviewMode":"NONE",
+                                    "submissionPolicy":{"completionStatementRequired":false,"attachmentRequired":false},
+                                    "reportPolicy":{"dailyReport":true,"aggregateAllRecords":true},
+                                    "executionPolicy":{"enabled":true,"repeatableDailyRecords":true},
+                                    "standards":[],
+                                    "responsibilities":[{"participantType":"EXECUTOR","resolverType":"CURRENT_ASSIGNMENT"}]
+                                  }]
+                                }
+                                """.formatted(HANGZHOU_HOTEL, FRONT_FORM_VERSION)))
+                .andExpect(status().isOk());
+        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/versions/{versionId}/publish",
+                        workPackageId, versionId), PLATFORM_ADMIN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"effectiveFrom\":\"" + effectiveFrom + "\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(identity(post("/api/v1/work-packages/{id}/allocations", workPackageId), PLATFORM_ADMIN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"workPackageVersionId":"%s","positionAssignmentId":"%s",
+                                 "targetOrgUnitId":"%s","validFrom":"%s"}
+                                """.formatted(versionId, FRONT_ASSIGNMENT, FRONT_DEPARTMENT,
+                                businessDate.minusDays(1))))
+                .andExpect(status().isCreated());
+        JsonNode generation = response(identity(post("/api/v1/work-expectations/actions/generate"), PLATFORM_ADMIN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"positionAssignmentId":"%s","targetOrgUnitId":"%s",
+                         "businessDate":"%s","periodType":"DAY","dutyPeriodId":null}
+                                 """.formatted(FRONT_ASSIGNMENT, FRONT_DEPARTMENT, businessDate)), 201);
+        String expectationId = generation.path("createdIds").get(0).asText();
+        String itemId = jdbc.queryForObject("""
+                select work_package_item_id::text from work_expectation
+                where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, expectationId);
+        UUID reportRevisionId = createRepeatableDailyReport(versionId, itemId, businessDate);
+
+        String completePayload = "{\"checkins\":1,\"complaints\":0}";
+        JsonNode first = response(identity(post("/api/v1/work-data/records"), FRONT_ACCOUNT)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(recordBody(businessDate, expectationId, completePayload, false)), 201);
+        JsonNode second = response(identity(post("/api/v1/work-data/records"), FRONT_ACCOUNT)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(recordBody(businessDate, expectationId, completePayload, false)), 201);
+
+        assertThat(second.path("seriesEntryNo").asInt()).isEqualTo(2);
+        assertThat(jdbc.queryForObject("""
+                select string_agg(series_entry_no::text, ',' order by series_entry_no)
+                from work_record
+                where tenant_id = ?::uuid and work_expectation_id = ?::uuid
+                  and repeatable_entry and status = 'SUBMITTED'
+                """, String.class, TENANT, expectationId)).isEqualTo("1,2");
+        assertThat(jdbc.queryForObject("""
+                select value ->> 'recordCount' from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?::uuid
+                  and source_summary ->> 'sourceType' = 'WORK_RECORD_COLLECTION'
+                """, String.class, TENANT, reportRevisionId)).isEqualTo("2");
+        assertThat(jdbc.queryForObject("""
+                select jsonb_array_length(value -> 'entries') from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?::uuid
+                  and source_summary ->> 'sourceType' = 'WORK_RECORD_COLLECTION'
+                """, Integer.class, TENANT, reportRevisionId)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from daily_report_source_reference source
+                join daily_report_item_result result
+                  on result.tenant_id = source.tenant_id and result.id = source.item_result_id
+                where source.tenant_id = ?::uuid and source.revision_id = ?::uuid
+                  and result.source_summary ->> 'sourceType' = 'WORK_RECORD_COLLECTION'
+                """, Integer.class, TENANT, reportRevisionId)).isEqualTo(2);
+
+        mockMvc.perform(identity(post("/api/v1/work-data/records/{recordId}/actions/review",
+                        first.path("id").asText()), PLATFORM_ADMIN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"APPROVED\",\"expectedVersion\":0}"))
+                .andExpect(status().isOk());
+        assertThat(jdbc.queryForObject("""
+                select status from work_expectation
+                where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, expectationId)).isEqualTo("SUBMITTED");
+
+        mockMvc.perform(identity(post("/api/v1/work-data/records/{recordId}/actions/review",
+                        second.path("id").asText()), PLATFORM_ADMIN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"outcome\":\"APPROVED\",\"expectedVersion\":0}"))
+                .andExpect(status().isOk());
+        assertThat(jdbc.queryForObject("""
+                select status from work_expectation
+                where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, expectationId)).isEqualTo("SATISFIED");
+        assertThat(jdbc.queryForObject("""
+                select result_status from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?::uuid
+                  and source_summary ->> 'sourceType' = 'WORK_RECORD_COLLECTION'
+                """, String.class, TENANT, reportRevisionId)).isEqualTo("COMPLETED");
+
+        JsonNode third = response(identity(post("/api/v1/work-data/records"), FRONT_ACCOUNT)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(recordBody(businessDate, expectationId, completePayload, false)), 201);
+        assertThat(third.path("seriesEntryNo").asInt()).isEqualTo(3);
+        assertThat(jdbc.queryForObject("""
+                select status from work_expectation
+                where tenant_id = ?::uuid and id = ?::uuid
+                """, String.class, TENANT, expectationId)).isEqualTo("SUBMITTED");
+        assertThat(jdbc.queryForObject("""
+                select concat(value ->> 'recordCount', ':', result_status)
+                from daily_report_item_result
+                where tenant_id = ?::uuid and revision_id = ?::uuid
+                  and source_summary ->> 'sourceType' = 'WORK_RECORD_COLLECTION'
+                """, String.class, TENANT, reportRevisionId)).isEqualTo("3:PENDING");
+    }
+
+    @Test
     void draftVersionCanReplaceExistingItemsAndTheirGuardedRelations() throws Exception {
         JsonNode definition = response(identity(post("/api/v1/work-packages"), PLATFORM_ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -470,6 +609,91 @@ class WorkPackageFlowIntegrationTest {
                 }
                 """.formatted(FRONT_DEPARTMENT, FRONT_EMPLOYEE, FRONT_ASSIGNMENT, FRONT_FORM_VERSION,
                 date, payload, expectationId, FRONT_DEPARTMENT, draft);
+    }
+
+    private UUID createRepeatableDailyReport(
+            String workPackageVersionId,
+            String workPackageItemId,
+            LocalDate businessDate
+    ) {
+        UUID templateId = UUID.randomUUID();
+        UUID templateVersionId = UUID.randomUUID();
+        UUID sectionId = UUID.randomUUID();
+        UUID sectionVersionId = UUID.randomUUID();
+        UUID reportId = UUID.randomUUID();
+        UUID revisionId = UUID.randomUUID();
+        String suffix = templateId.toString().substring(0, 8);
+        jdbc.update("""
+                insert into daily_report_template_definition
+                    (id, tenant_id, code, name, template_origin, owner_org_unit_id,
+                     position_id, status, created_by)
+                values (?, ?::uuid, ?, '可重复事件日报测试', 'HQ', ?::uuid,
+                        ?::uuid, 'ACTIVE', ?::uuid)
+                """, templateId, TENANT, "DRT-REPEATABLE-" + suffix,
+                HANGZHOU_HOTEL, FRONT_POSITION, PLATFORM_ADMIN);
+        jdbc.update("""
+                insert into daily_report_section_definition
+                    (id, tenant_id, code, name, section_origin, owner_org_unit_id,
+                     position_id, status, created_by)
+                values (?, ?::uuid, ?, '可重复事件日报事实', 'HQ', ?::uuid,
+                        ?::uuid, 'ACTIVE', ?::uuid)
+                """, sectionId, TENANT, "DRS-REPEATABLE-" + suffix,
+                HANGZHOU_HOTEL, FRONT_POSITION, PLATFORM_ADMIN);
+        jdbc.update("""
+                insert into daily_report_template_version
+                    (id, tenant_id, template_id, version_no, lifecycle_status,
+                     work_package_version_id, configuration, created_by)
+                values (?, ?::uuid, ?, 1, 'DRAFT', ?::uuid,
+                        '{"repeatableEventAggregation":true}'::jsonb, ?::uuid)
+                """, templateVersionId, TENANT, templateId,
+                workPackageVersionId, PLATFORM_ADMIN);
+        jdbc.update("""
+                insert into daily_report_section_version
+                    (id, tenant_id, section_definition_id, version_no, lifecycle_status,
+                     condition_expression, configuration, created_by)
+                values (?, ?::uuid, ?, 1, 'DRAFT', '{}'::jsonb, '{}'::jsonb, ?::uuid)
+                """, sectionVersionId, TENANT, sectionId, PLATFORM_ADMIN);
+        jdbc.update("""
+                insert into daily_report_template_section
+                    (id, tenant_id, template_version_id, section_version_id,
+                     section_role, required, sort_order)
+                values (?, ?::uuid, ?, ?, 'BASE', true, 1)
+                """, UUID.randomUUID(), TENANT, templateVersionId, sectionVersionId);
+        jdbc.update("""
+                insert into daily_report_template_item
+                    (id, tenant_id, section_version_id, item_code, label, input_type,
+                     required, work_package_item_id, evidence_policy, source_policy,
+                     validation_rules, option_values, sort_order)
+                values (?, ?::uuid, ?, 'repeatable_event_fact', '可重复事件',
+                        'WORK_RECORD_REFERENCE', false, ?::uuid,
+                        '{"inheritFromWorkRecord":true,"includeEvidenceLinks":true}'::jsonb,
+                        '{"sourceType":"WORK_RECORD","mode":"AUTO_ALL_RECORDS"}'::jsonb,
+                        '{}'::jsonb, '[]'::jsonb, 1)
+                """, UUID.randomUUID(), TENANT, sectionVersionId, workPackageItemId);
+        jdbc.update("""
+                insert into daily_report
+                    (id, tenant_id, hotel_org_unit_id, org_unit_id, employee_id,
+                     position_assignment_id, business_date, timezone, cutoff_local_time,
+                     report_deadline_at, template_version_id, work_package_version_id,
+                     report_status, review_status, current_revision_no, trace_id,
+                     created_by_account_id)
+                values (?, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?, 'Asia/Shanghai',
+                        time '06:00', now() + interval '12 hours', ?, ?::uuid,
+                        'DRAFT', 'NOT_REQUIRED', 1, ?, ?::uuid)
+                """, reportId, TENANT, HANGZHOU_HOTEL, FRONT_DEPARTMENT,
+                FRONT_EMPLOYEE, FRONT_ASSIGNMENT, businessDate, templateVersionId,
+                workPackageVersionId, UUID.randomUUID(), FRONT_ACCOUNT);
+        jdbc.update("""
+                insert into daily_report_revision
+                    (id, tenant_id, report_id, revision_no, revision_type,
+                     revision_status, payload_snapshot, created_by_account_id)
+                values (?, ?::uuid, ?, 1, 'ORIGINAL', 'DRAFT', '{}'::jsonb, ?::uuid)
+                """, revisionId, TENANT, reportId, FRONT_ACCOUNT);
+        jdbc.update("""
+                update daily_report set current_revision_id = ?
+                where tenant_id = ?::uuid and id = ?
+                """, revisionId, TENANT, reportId);
+        return revisionId;
     }
 
     private JsonNode response(MockHttpServletRequestBuilder request, int expectedStatus) throws Exception {

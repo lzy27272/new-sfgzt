@@ -141,6 +141,7 @@ export type WorkExpectation = {
     ownerRestOption?: boolean
     oneClickRestTransfer?: boolean
     requiredRoomCountFormula?: string
+    repeatableDailyRecords?: boolean
   }
   guestRoomFloorCount?: number
   operationalFeatureFlags?: Record<string, boolean>
@@ -252,6 +253,8 @@ export type WorkRecordSummary = {
   id: string
   status: string
   attemptNo: number
+  seriesEntryNo?: number
+  repeatableEntry?: boolean
   submittedAt?: string
   reviewedAt?: string
   reviewReason?: string

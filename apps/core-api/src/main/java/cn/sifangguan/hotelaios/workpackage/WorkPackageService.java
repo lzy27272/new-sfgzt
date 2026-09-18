@@ -1024,7 +1024,8 @@ public class WorkPackageService {
                 order by s.usage_type, sd.code
                 """, base(principal).addValue("itemId", result.get("work_package_item_id"))));
         result.put("records", jdbc.queryForList("""
-                select record.id, record.status, record.attempt_no, record.payload,
+                select record.id, record.status, record.series_entry_no, record.repeatable_entry,
+                       record.attempt_no, record.payload,
                        record.position_assignment_id as actual_executor_assignment_id,
                        employee.id as actual_executor_employee_id,
                        employee.name as actual_executor_employee_name,
@@ -1041,7 +1042,7 @@ public class WorkPackageService {
                   on position.tenant_id = assignment.tenant_id
                  and position.id = assignment.position_id
                 where record.tenant_id = :tenantId and record.work_expectation_id = :expectationId
-                order by record.attempt_no desc
+                order by record.series_entry_no desc, record.attempt_no desc
                 """, params));
         return result;
     }

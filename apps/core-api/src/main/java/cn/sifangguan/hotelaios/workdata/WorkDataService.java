@@ -167,7 +167,8 @@ public class WorkDataService {
         }
         return jdbc.queryForList("""
                 select w.id, w.business_date, w.status, w.record_kind, w.payload, w.occurred_at,
-                       w.submitted_at, w.attempt_no, w.row_version, w.content_hash,
+                       w.submitted_at, w.series_entry_no, w.repeatable_entry,
+                       w.attempt_no, w.row_version, w.content_hash,
                        w.work_package_version_id, w.work_package_item_id, w.work_expectation_id,
                        w.org_unit_id, owner_org.name as org_unit_name,
                        w.target_org_unit_id, target_org.name as target_org_unit_name,
@@ -250,12 +251,15 @@ public class WorkDataService {
         } else {
             validatePayload(principal, request.formVersionId(), request.payload());
         }
-        int attemptNo = nextAttempt(principal, request, workContext);
+        RecordSequence sequence = nextRecordSequence(principal, request, workContext);
+        int attemptNo = sequence.attemptNo();
         String recordKind = resolveRecordKind(request.recordKind(), workContext.itemType());
         String status = saveAsDraft ? "DRAFT" : "SUBMITTED";
         boolean applicable = true;
         if ("SUBMITTED".equals(status)) {
-            requireFirstSharedSubmission(principal, workContext.expectationId(), null);
+            if (!workContext.repeatableDailyRecords()) {
+                requireFirstSharedSubmission(principal, workContext.expectationId(), null);
+            }
             validateConditionalFields(workContext.itemCode(), request.payload());
             applicable = validateSubmissionPolicy(principal, workContext.itemId(), null,
                     request.payload(), targetOrgUnitId,
@@ -270,14 +274,14 @@ public class WorkDataService {
                      form_version_id, business_date, status, payload, submitted_at,
                      work_package_version_id, work_package_item_id, work_expectation_id,
                      record_kind, target_org_unit_id, occurred_at, submitted_by_account_id,
-                     supersedes_work_record_id, attempt_no, content_hash,
+                     supersedes_work_record_id, series_entry_no, repeatable_entry, attempt_no, content_hash,
                      completion_statement, exception_statement, next_action)
                 values
                     (:id, :tenantId, :orgUnitId, :employeeId, :assignmentId,
                      :formVersionId, :businessDate, :status, cast(:payload as jsonb), :submittedAt,
                      :workPackageVersionId, :workPackageItemId, :workExpectationId,
                      :recordKind, :targetOrgUnitId, :occurredAt, :actorId,
-                     :supersedesWorkRecordId, :attemptNo, :contentHash,
+                     :supersedesWorkRecordId, :seriesEntryNo, :repeatableEntry, :attemptNo, :contentHash,
                      :completionStatement, :exceptionStatement, :nextAction)
                 """, base(principal)
                 .addValue("id", id)
@@ -297,12 +301,15 @@ public class WorkDataService {
                 .addValue("occurredAt", occurredAt)
                 .addValue("actorId", principal.actorId())
                 .addValue("supersedesWorkRecordId", request.supersedesWorkRecordId())
+                .addValue("seriesEntryNo", sequence.seriesEntryNo())
+                .addValue("repeatableEntry", workContext.repeatableDailyRecords())
                 .addValue("attemptNo", attemptNo)
                 .addValue("contentHash", contentHash)
                 .addValue("completionStatement", trimToNull(request.completionStatement()))
                 .addValue("exceptionStatement", trimToNull(request.exceptionStatement()))
                 .addValue("nextAction", trimToNull(request.nextAction())));
-        updateExpectationAfterRecord(principal, workContext.expectationId(), status, applicable);
+        updateExpectationAfterRecord(principal, workContext.expectationId(), status, applicable,
+                workContext.repeatableDailyRecords());
         auditWriter.record("DRAFT".equals(status) ? "WORK_RECORD_DRAFT_CREATED" : "WORK_RECORD_SUBMITTED",
                 "WORK_RECORD", id, request.payload().toString());
         if ("SUBMITTED".equals(status)) {
@@ -313,7 +320,8 @@ public class WorkDataService {
             }
         }
         return response("id", id, "status", status, "businessDate", request.businessDate(),
-                "recordKind", recordKind, "attemptNo", attemptNo, "rowVersion", 0L,
+                "recordKind", recordKind, "seriesEntryNo", sequence.seriesEntryNo(),
+                "attemptNo", attemptNo, "rowVersion", 0L,
                 "applicabilityStatus", applicable ? "APPLICABLE" : "NOT_APPLICABLE");
     }
 
@@ -362,7 +370,9 @@ public class WorkDataService {
             throw new IllegalArgumentException("只有草稿工作记录可以提交");
         }
         validatePayload(principal, record.formVersionId(), readJson(record.payloadJson()));
-        requireFirstSharedSubmission(principal, record.expectationId(), recordId);
+        if (!record.repeatableEntry()) {
+            requireFirstSharedSubmission(principal, record.expectationId(), recordId);
+        }
         boolean applicable = validateSubmissionPolicyForRecord(principal, recordId);
         int changed = jdbc.update("""
                 update work_record
@@ -377,7 +387,8 @@ public class WorkDataService {
         if (changed != 1) {
             throw new IllegalArgumentException("工作记录版本已变化，请刷新后重试");
         }
-        updateExpectationAfterRecord(principal, record.expectationId(), "SUBMITTED", applicable);
+        updateExpectationAfterRecord(principal, record.expectationId(), "SUBMITTED", applicable,
+                record.repeatableEntry());
         auditWriter.record("WORK_RECORD_SUBMITTED", "WORK_RECORD", recordId, record.payloadJson());
         emitSubmitted(principal, recordId);
         routineProjectionService.projectWorkRecord(recordId);
@@ -423,7 +434,9 @@ public class WorkDataService {
         if (changed != 1) {
             throw new IllegalArgumentException("工作记录状态或版本已变化，请刷新后重试");
         }
-        if (record.expectationId() != null) {
+        if (record.expectationId() != null && record.repeatableEntry()) {
+            refreshRepeatableExpectationStatus(principal, record.expectationId());
+        } else if (record.expectationId() != null) {
             jdbc.update("""
                     update work_expectation
                     set status = :expectationStatus, row_version = row_version + 1
@@ -1247,11 +1260,14 @@ public class WorkDataService {
             WorkContext context = jdbc.queryForObject("""
                     select v.id as version_id, i.id as item_id, x.id as expectation_id,
                            i.item_type, i.item_code, i.form_version_id, x.position_assignment_id,
-                           x.target_org_unit_id, x.business_date, x.status
+                           x.target_org_unit_id, x.business_date, x.status,
+                           coalesce((i.execution_policy ->> 'repeatableDailyRecords')::boolean, false)
+                               as repeatable_daily_records
                     from work_expectation x
                     join work_package_item i on i.tenant_id = x.tenant_id and i.id = x.work_package_item_id
                     join work_package_version v on v.tenant_id = i.tenant_id and v.id = i.work_package_version_id
                     where x.tenant_id = :tenantId and x.id = :expectationId
+                    for update of x
                     """, base(principal).addValue("expectationId", request.workExpectationId()),
                     (rs, rowNum) -> new WorkContext(
                             rs.getObject("version_id", UUID.class),
@@ -1263,12 +1279,16 @@ public class WorkDataService {
                             rs.getObject("position_assignment_id", UUID.class),
                             rs.getObject("target_org_unit_id", UUID.class),
                             rs.getObject("business_date", java.time.LocalDate.class),
-                            rs.getString("status")));
+                            rs.getString("status"),
+                            rs.getBoolean("repeatable_daily_records")));
+            Set<String> executableStatuses = context.repeatableDailyRecords()
+                    ? Set.of("PLANNED", "AVAILABLE", "IN_PROGRESS", "SUBMITTED", "SATISFIED", "FAILED", "MISSED")
+                    : Set.of("PLANNED", "AVAILABLE", "IN_PROGRESS", "FAILED", "MISSED");
             if (!canExecuteExpectation(principal, context.expectationId(), request.positionAssignmentId())
                     || !targetOrgUnitId.equals(context.targetOrgUnitId())
                     || !request.businessDate().equals(context.businessDate())
                     || !request.formVersionId().equals(context.formVersionId())
-                    || !Set.of("PLANNED", "AVAILABLE", "IN_PROGRESS", "FAILED", "MISSED").contains(context.expectationStatus())) {
+                    || !executableStatuses.contains(context.expectationStatus())) {
                 throw new IllegalArgumentException("工作期望与任职、门店、周期或表单不匹配");
             }
             if (request.workPackageVersionId() != null && !request.workPackageVersionId().equals(context.versionId())) {
@@ -1286,7 +1306,9 @@ public class WorkDataService {
             return WorkContext.legacy();
         }
         return jdbc.queryForObject("""
-                select v.id as version_id, i.id as item_id, i.item_type, i.item_code, i.form_version_id
+                select v.id as version_id, i.id as item_id, i.item_type, i.item_code, i.form_version_id,
+                       coalesce((i.execution_policy ->> 'repeatableDailyRecords')::boolean, false)
+                           as repeatable_daily_records
                 from work_package_version v
                 join work_package_item i on i.tenant_id = v.tenant_id and i.work_package_version_id = v.id
                 where v.tenant_id = :tenantId and v.id = :versionId and i.id = :itemId
@@ -1300,7 +1322,7 @@ public class WorkDataService {
                         rs.getObject("item_id", UUID.class), null,
                         rs.getString("item_type"), rs.getString("item_code"),
                         rs.getObject("form_version_id", UUID.class),
-                        null, null, null, null));
+                        null, null, null, null, rs.getBoolean("repeatable_daily_records")));
     }
 
     private boolean canExecuteExpectation(
@@ -1363,35 +1385,46 @@ public class WorkDataService {
         }
     }
 
-    private int nextAttempt(
+    private RecordSequence nextRecordSequence(
             TenantPrincipal principal,
             WorkDataModels.SubmitWorkRecord request,
             WorkContext context
     ) {
         if (request.supersedesWorkRecordId() != null) {
-            Integer previousAttempt = jdbc.queryForObject("""
-                    select attempt_no from work_record
+            RecordSequence previous = jdbc.queryForObject("""
+                    select series_entry_no, attempt_no from work_record
                     where tenant_id = :tenantId and id = :previousId
                       and position_assignment_id = :assignmentId and form_version_id = :formVersionId
                       and business_date = :businessDate and status in ('SUBMITTED', 'APPROVED', 'REJECTED')
+                      and work_expectation_id is not distinct from :expectationId
                     """, base(principal)
                     .addValue("previousId", request.supersedesWorkRecordId())
                     .addValue("assignmentId", request.positionAssignmentId())
                     .addValue("formVersionId", request.formVersionId())
-                    .addValue("businessDate", request.businessDate()), Integer.class);
-            if (previousAttempt == null) {
+                    .addValue("businessDate", request.businessDate())
+                    .addValue("expectationId", context.expectationId()),
+                    (rs, rowNum) -> new RecordSequence(
+                            rs.getInt("series_entry_no"), rs.getInt("attempt_no")));
+            if (previous == null) {
                 throw new IllegalArgumentException("被纠正的历史工作记录不匹配");
             }
-            return previousAttempt + 1;
+            return new RecordSequence(previous.seriesEntryNo(), previous.attemptNo() + 1);
         }
         if (context.expectationId() != null) {
+            if (context.repeatableDailyRecords()) {
+                Integer nextSeries = jdbc.queryForObject("""
+                        select coalesce(max(series_entry_no), 0) + 1 from work_record
+                        where tenant_id = :tenantId and work_expectation_id = :expectationId
+                        """, base(principal).addValue("expectationId", context.expectationId()), Integer.class);
+                return new RecordSequence(nextSeries == null ? 1 : nextSeries, 1);
+            }
             Integer next = jdbc.queryForObject("""
                     select coalesce(max(attempt_no), 0) + 1 from work_record
                     where tenant_id = :tenantId and work_expectation_id = :expectationId
                     """, base(principal).addValue("expectationId", context.expectationId()), Integer.class);
-            return next == null ? 1 : next;
+            return new RecordSequence(1, next == null ? 1 : next);
         }
-        return 1;
+        return new RecordSequence(1, 1);
     }
 
     private void validatePayload(TenantPrincipal principal, UUID formVersionId, JsonNode payload) {
@@ -1429,7 +1462,8 @@ public class WorkDataService {
             TenantPrincipal principal,
             UUID expectationId,
             String recordStatus,
-            boolean applicable
+            boolean applicable,
+            boolean repeatableEntry
     ) {
         if (expectationId == null) {
             return;
@@ -1449,6 +1483,10 @@ public class WorkDataService {
                     "{\"reason\":\"NOT_APPLICABLE_RECORDED\"}");
             return;
         }
+        if (repeatableEntry) {
+            refreshRepeatableExpectationStatus(principal, expectationId);
+            return;
+        }
         String expectationStatus = "DRAFT".equals(recordStatus) ? "IN_PROGRESS" : "SUBMITTED";
         jdbc.update("""
                 update work_expectation
@@ -1458,6 +1496,40 @@ public class WorkDataService {
                 """, base(principal)
                 .addValue("expectationId", expectationId)
                 .addValue("status", expectationStatus));
+    }
+
+    private void refreshRepeatableExpectationStatus(TenantPrincipal principal, UUID expectationId) {
+        jdbc.update("""
+                with latest_series as (
+                    select distinct on (record.series_entry_no)
+                           record.series_entry_no, record.status
+                    from work_record record
+                    where record.tenant_id = :tenantId
+                      and record.work_expectation_id = :expectationId
+                      and record.repeatable_entry
+                    order by record.series_entry_no, record.attempt_no desc,
+                             record.created_at desc, record.id desc
+                ), aggregate_status as (
+                    select case
+                               when bool_or(status = 'REJECTED') then 'FAILED'
+                               when bool_or(status = 'SUBMITTED') then 'SUBMITTED'
+                               when bool_or(status = 'DRAFT') then 'IN_PROGRESS'
+                               when bool_or(status = 'APPROVED') then 'SATISFIED'
+                               else null
+                           end as status
+                    from latest_series
+                )
+                update work_expectation expectation
+                set status = aggregate_status.status,
+                    row_version = expectation.row_version + 1,
+                    updated_at = now()
+                from aggregate_status
+                where expectation.tenant_id = :tenantId
+                  and expectation.id = :expectationId
+                  and aggregate_status.status is not null
+                  and expectation.status not in ('CANCELLED', 'WAIVED')
+                  and expectation.status is distinct from aggregate_status.status
+                """, base(principal).addValue("expectationId", expectationId));
     }
 
     private void emitSubmitted(TenantPrincipal principal, UUID recordId) {
@@ -1519,7 +1591,7 @@ public class WorkDataService {
         return jdbc.queryForObject("""
                 select status, target_org_unit_id, position_assignment_id, form_version_id,
                        work_package_item_id, work_expectation_id, submitted_by_account_id,
-                       business_date, occurred_at, payload::text
+                       business_date, occurred_at, payload::text, repeatable_entry, series_entry_no
                 from work_record where tenant_id = :tenantId and id = :recordId
                 """ + (forUpdate ? " for update" : ""), base(principal).addValue("recordId", recordId),
                 (rs, rowNum) -> new RecordAccess(
@@ -1532,7 +1604,9 @@ public class WorkDataService {
                         rs.getObject("submitted_by_account_id", UUID.class),
                         rs.getObject("business_date", java.time.LocalDate.class),
                         rs.getObject("occurred_at", OffsetDateTime.class),
-                        rs.getString("payload")));
+                        rs.getString("payload"),
+                        rs.getBoolean("repeatable_entry"),
+                        rs.getInt("series_entry_no")));
     }
 
     private void requireConfiguredReviewer(TenantPrincipal principal, RecordAccess record) {
@@ -1771,11 +1845,15 @@ public class WorkDataService {
             UUID assignmentId,
             UUID targetOrgUnitId,
             java.time.LocalDate businessDate,
-            String expectationStatus
+            String expectationStatus,
+            boolean repeatableDailyRecords
     ) {
         private static WorkContext legacy() {
-            return new WorkContext(null, null, null, null, null, null, null, null, null, null);
+            return new WorkContext(null, null, null, null, null, null, null, null, null, null, false);
         }
+    }
+
+    private record RecordSequence(int seriesEntryNo, int attemptNo) {
     }
 
     private record RecordAccess(
@@ -1788,7 +1866,9 @@ public class WorkDataService {
             UUID submittedByAccountId,
             java.time.LocalDate businessDate,
             OffsetDateTime occurredAt,
-            String payloadJson
+            String payloadJson,
+            boolean repeatableEntry,
+            int seriesEntryNo
     ) {
     }
 
