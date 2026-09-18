@@ -1,6 +1,11 @@
 -- 客房服务员事件型日清：对客服务记录、客诉报备可在同一营业日重复提交，
 -- 每条记录独立保留证据，并在岗位日报中按当日全部记录汇总。
 
+-- A production upgrade starts with a fresh NOBYPASSRLS owner connection.
+-- Scope this tenant-specific seed to this transaction without disabling RLS
+-- or depending on session context left by earlier migrations.
+SELECT set_config('app.tenant_id', '10000000-0000-0000-0000-000000000001', true);
+
 ALTER TABLE work_record
     ADD COLUMN series_entry_no INTEGER NOT NULL DEFAULT 1,
     ADD COLUMN repeatable_entry BOOLEAN NOT NULL DEFAULT false,

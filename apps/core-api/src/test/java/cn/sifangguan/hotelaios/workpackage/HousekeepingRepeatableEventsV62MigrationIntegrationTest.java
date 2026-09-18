@@ -11,6 +11,46 @@ class HousekeepingRepeatableEventsV62MigrationIntegrationTest {
     private static final String TENANT = "10000000-0000-0000-0000-000000000001";
 
     @Test
+    void upgradesFromV61WithFreshNonBypassRlsOwnerConnection() throws Exception {
+        try (EmbeddedPostgres postgres = EmbeddedPostgres.builder().start()) {
+            var dataSource = postgres.getPostgresDatabase();
+            Flyway.configure().dataSource(dataSource).locations("classpath:db/migration")
+                    .target("61").load().migrate();
+            var jdbc = new JdbcTemplate(dataSource);
+            jdbc.execute("CREATE ROLE housekeeping_migration_owner LOGIN NOSUPERUSER NOBYPASSRLS");
+            jdbc.execute("GRANT USAGE, CREATE ON SCHEMA public TO housekeeping_migration_owner");
+            jdbc.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO housekeeping_migration_owner");
+            jdbc.execute("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO housekeeping_migration_owner");
+            jdbc.execute("ALTER TABLE work_record OWNER TO housekeeping_migration_owner");
+            jdbc.execute("ALTER TABLE work_package_item OWNER TO housekeeping_migration_owner");
+            var owner = postgres.getDatabase("housekeeping_migration_owner", "postgres");
+            var restrictedJdbc = new JdbcTemplate(owner);
+            assertThat(restrictedJdbc.queryForObject("select count(*) from work_package_definition", Integer.class)).isZero();
+
+            Flyway.configure().dataSource(owner).locations("classpath:db/migration")
+                    .target("62").load().migrate();
+
+            assertThat(jdbc.queryForObject("""
+                    select count(*) from work_package_item
+                    where work_package_version_id = md5('V62:wpv:HK_ATTENDANT')::uuid
+                      and (execution_policy ->> 'repeatableDailyRecords')::boolean
+                    """, Integer.class)).isEqualTo(2);
+            assertThat(jdbc.queryForObject("""
+                    select version from flyway_schema_history order by installed_rank desc limit 1
+                    """, String.class)).isEqualTo("62");
+            assertThat(jdbc.queryForObject("""
+                    select count(*) from pg_class where relname in
+                      ('work_record', 'work_package_definition', 'work_package_item')
+                      and relrowsecurity and relforcerowsecurity
+                    """, Integer.class)).isEqualTo(3);
+            assertThat(jdbc.queryForObject("""
+                    select rolsuper or rolbypassrls from pg_roles where rolname = 'housekeeping_migration_owner'
+                    """, Boolean.class)).isFalse();
+            assertThat(restrictedJdbc.queryForObject("select count(*) from work_package_definition", Integer.class)).isZero();
+        }
+    }
+
+    @Test
     void publishesRepeatableHousekeepingEventsAndDailyReportAggregation() throws Exception {
         try (EmbeddedPostgres postgres = EmbeddedPostgres.builder().start()) {
             var dataSource = postgres.getPostgresDatabase();
