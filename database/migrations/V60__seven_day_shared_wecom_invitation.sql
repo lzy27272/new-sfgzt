@@ -1,5 +1,6 @@
 -- Extend only the shared QR entry. Existing expiry timestamps and the
 -- 120-minute employee-specific credential constraint must stay unchanged.
+-- V59 is reserved for the already-deployed store spreadsheet import foundation.
 DO $$
 DECLARE
     ttl_constraint_name text;

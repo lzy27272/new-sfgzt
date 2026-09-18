@@ -9,13 +9,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class WeComSharedInvitationV59MigrationIntegrationTest {
+class WeComSharedInvitationV60MigrationIntegrationTest {
     @Test
     void upgradePreservesExistingExpiriesAndPersonalLimitsWhileAllowingSevenDaySharedCodes() throws Exception {
         try (var postgres = EmbeddedPostgres.builder().start()) {
             var dataSource = postgres.getPostgresDatabase();
             Flyway.configure().dataSource(dataSource).locations("classpath:db/migration")
-                    .target("58").load().migrate();
+                    .target("59").load().migrate();
             var jdbc = new JdbcTemplate(dataSource);
             jdbc.update("""
                     insert into wecom_open_onboarding_invitation
@@ -32,7 +32,7 @@ class WeComSharedInvitationV59MigrationIntegrationTest {
                     from wecom_open_onboarding_invitation order by id
                     """);
             Flyway.configure().dataSource(dataSource).locations("classpath:db/migration")
-                    .target("59").load().migrate();
+                    .target("60").load().migrate();
             assertThat(jdbc.queryForList("""
                     select id, issued_at, expires_at, token_hash
                     from wecom_open_onboarding_invitation order by id
