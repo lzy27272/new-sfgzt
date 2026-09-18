@@ -154,6 +154,74 @@ export type StoreResourceHandoverInput = {
   note?: string
 }
 
+export type StoreResourceImportError = {
+  sheetName: string
+  rowNumber: number
+  field: string
+  message: string
+  value?: string
+}
+
+export type StoreResourceImportPreviewItem = {
+  rowNumber: number
+  sku: string
+  name: string
+  category: StoreResourceItemCategory
+  unit: string
+  unitCost: number
+  minimumQuantity: number
+  openingQuantity: number
+}
+
+export type StoreResourceImportPreviewAsset = {
+  rowNumber: number
+  assetCode: string
+  name: string
+  category: string
+  unit: string
+  originalValue: number
+  acquiredOn?: string
+  location?: string
+  status: string
+}
+
+export type StoreResourceImportJob = {
+  id: string
+  fileName: string
+  status: 'INVALID' | 'READY' | 'APPLIED' | 'CANCELLED'
+  rowCount: number
+  validRowCount: number
+  errorCount: number
+  canApply: boolean
+  duplicateUpload: boolean
+  summary: {
+    itemCount: number
+    assetCount: number
+    openingQuantity: number
+    openingInventoryValue: number
+    assetOriginalValue: number
+  }
+  preview: {
+    items: StoreResourceImportPreviewItem[]
+    assets: StoreResourceImportPreviewAsset[]
+  }
+  errors: StoreResourceImportError[]
+  result?: Record<string, unknown>
+  createdAt?: string
+  appliedAt?: string
+}
+
+export type StoreResourceImportHistory = {
+  id: string
+  originalName: string
+  status: string
+  rowCount: number
+  validRowCount: number
+  errorCount: number
+  createdAt: string
+  appliedAt?: string
+}
+
 type JsonObject = Record<string, unknown>
 
 function object(value: unknown, label: string): JsonObject {
@@ -318,4 +386,65 @@ export function parseStoreResourceHandoverDetail(value: unknown): StoreResourceH
       }
     }),
   }
+}
+
+export function parseStoreResourceImportJob(value: unknown): StoreResourceImportJob {
+  const row = object(value, 'store-resource-import')
+  const status = text(row, 'status')
+  if (!['INVALID', 'READY', 'APPLIED', 'CANCELLED'].includes(status)) {
+    throw new Error('STORE_RESOURCE_RESPONSE_INVALID:importStatus')
+  }
+  const summary = object(row.summary ?? {}, 'import-summary')
+  const preview = object(row.preview ?? {}, 'import-preview')
+  const parseItem = (entry: unknown): StoreResourceImportPreviewItem => {
+    const item = object(entry, 'import-item')
+    return {
+      rowNumber: numberValue(item, 'rowNumber'), sku: text(item, 'sku'), name: text(item, 'name'),
+      category: category(text(item, 'category', 'OPERATING_ITEM')), unit: text(item, 'unit'),
+      unitCost: numberValue(item, 'unitCost'), minimumQuantity: numberValue(item, 'minimumQuantity'),
+      openingQuantity: numberValue(item, 'openingQuantity'),
+    }
+  }
+  const parseAsset = (entry: unknown): StoreResourceImportPreviewAsset => {
+    const asset = object(entry, 'import-asset')
+    return {
+      rowNumber: numberValue(asset, 'rowNumber'), assetCode: text(asset, 'assetCode'), name: text(asset, 'name'),
+      category: text(asset, 'category'), unit: text(asset, 'unit'), originalValue: numberValue(asset, 'originalValue'),
+      acquiredOn: optionalText(asset, 'acquiredOn'), location: optionalText(asset, 'location'), status: text(asset, 'status', 'ACTIVE'),
+    }
+  }
+  const errors = Array.isArray(row.errors) ? row.errors.map((entry) => {
+    const error = object(entry, 'import-error')
+    return {
+      sheetName: text(error, 'sheetName'), rowNumber: numberValue(error, 'rowNumber'), field: text(error, 'field'),
+      message: text(error, 'message'), value: optionalText(error, 'value'),
+    }
+  }) : []
+  return {
+    id: text(row, 'id'), fileName: text(row, 'fileName'), status: status as StoreResourceImportJob['status'],
+    rowCount: numberValue(row, 'rowCount'), validRowCount: numberValue(row, 'validRowCount'), errorCount: numberValue(row, 'errorCount'),
+    canApply: booleanValue(row, 'canApply'), duplicateUpload: booleanValue(row, 'duplicateUpload'),
+    summary: {
+      itemCount: numberValue(summary, 'itemCount'), assetCount: numberValue(summary, 'assetCount'),
+      openingQuantity: numberValue(summary, 'openingQuantity'), openingInventoryValue: numberValue(summary, 'openingInventoryValue'),
+      assetOriginalValue: numberValue(summary, 'assetOriginalValue'),
+    },
+    preview: {
+      items: Array.isArray(preview.items) ? preview.items.map(parseItem) : [],
+      assets: Array.isArray(preview.assets) ? preview.assets.map(parseAsset) : [],
+    },
+    errors, result: row.result && typeof row.result === 'object' && !Array.isArray(row.result) ? row.result as Record<string, unknown> : undefined,
+    createdAt: optionalText(row, 'createdAt'), appliedAt: optionalText(row, 'appliedAt'),
+  }
+}
+
+export function parseStoreResourceImportHistory(value: unknown): StoreResourceImportHistory[] {
+  return list(value).map((entry) => {
+    const row = object(entry, 'import-history')
+    return {
+      id: text(row, 'id'), originalName: text(row, 'originalName'), status: text(row, 'status'),
+      rowCount: numberValue(row, 'rowCount'), validRowCount: numberValue(row, 'validRowCount'),
+      errorCount: numberValue(row, 'errorCount'), createdAt: text(row, 'createdAt'), appliedAt: optionalText(row, 'appliedAt'),
+    }
+  })
 }

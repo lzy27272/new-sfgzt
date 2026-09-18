@@ -7,6 +7,7 @@ import {
   parseInventoryMovements,
   parseStoreInventoryBalances,
   parseStoreResourceHandoverDetail,
+  parseStoreResourceImportJob,
   parseStoreResourceItem,
 } from '../src/features/storeResources/types.ts'
 
@@ -34,6 +35,15 @@ test('store resource response parsers accept the backend contract', () => {
     id: 'handover-1', status: 'PHYSICAL_COUNT_REQUIRED', transferorAssignmentId: 'a1', recipientAssignmentId: 'a2', approverAssignmentId: 'a3', transferorName: '移交人', recipientName: '签收人', approverName: '审批人', lineCount: 1, createdAt: '2026-09-17T08:00:00+08:00', rowVersion: 1,
     lines: [{ id: 'line-1', resourceType: 'INVENTORY', resourceCode: 'LINEN-001', resourceName: '浴巾', unit: '条', bookQuantity: 12, bookValue: 222 }],
   }).lines[0].bookQuantity, 12)
+  assert.equal(parseStoreResourceImportJob({
+    id: 'job-1', fileName: 'new-store.xlsx', status: 'READY', rowCount: 2, validRowCount: 2, errorCount: 0,
+    canApply: true, duplicateUpload: false,
+    summary: { itemCount: 1, assetCount: 1, openingQuantity: 20, openingInventoryValue: 30, assetOriginalValue: 2600 },
+    preview: {
+      items: [{ rowNumber: 2, sku: 'C-001', name: '牙刷', category: 'CONSUMABLE', unit: '支', unitCost: 1.5, minimumQuantity: 5, openingQuantity: 20 }],
+      assets: [{ rowNumber: 2, assetCode: 'TV-001', name: '电视', category: '电器', unit: '台', originalValue: 2600, status: 'ACTIVE' }],
+    }, errors: [],
+  }).summary.openingInventoryValue, 30)
 })
 
 test('navigation, route and permissions expose the administrator store resource module', () => {
@@ -47,6 +57,7 @@ test('navigation, route and permissions expose the administrator store resource 
     'store-resource.read', 'store-resource.item-manage', 'store-resource.movement-create',
     'store-resource.asset-manage', 'store-resource.handover-create',
     'store-resource.handover-confirm', 'store-resource.handover-approve',
+    'store-resource.import-preview', 'store-resource.import-apply',
   ]) assert.match(permissions, new RegExp(code.replaceAll('.', '\\.')))
   assert.match(app, /StoreResourceRoutes/)
   assert.match(app, /库存与固定资产/)
@@ -61,6 +72,7 @@ test('store resource client uses concrete backend routes and dedicated handover 
     '/balances', '/movements', '/assignment-options', '/actions/dispute-decision',
     '/actions/physical-count', '/actions/${party}-confirm', '/actions/approve',
     "enabled ? 'enable' : 'disable'", "method: 'PUT'", "method: 'DELETE'",
+    '/imports/preview', '/imports/template', '/actions/apply', '/errors',
   ]) assert.ok(api.includes(fragment), fragment)
   assert.ok(!api.includes('/summary'), 'summary must be derived from supported resources')
   assert.ok(!api.includes('runStoreResourceHandoverAction'), 'generic empty-body action is forbidden')
@@ -68,7 +80,13 @@ test('store resource client uses concrete backend routes and dedicated handover 
     'decideStoreResourceHandoverDispute', 'submitStoreResourcePhysicalCount',
     'confirmStoreResourceHandover', 'approveStoreResourceHandover',
     'setStoreResourceItemEnabled', 'updateFixedAsset', 'retireFixedAsset',
+    'previewStoreResourceImport', 'applyStoreResourceImport', 'downloadStoreResourceImportTemplate',
   ]) assert.match(page, new RegExp(call))
+  assert.match(page, /StoreResourceImportPanel key=\{selectedHotelId\}/)
+  assert.match(page, /IMPORT: '表格导入'/)
+  assert.match(page, /disabled=\{command\.busy\} onClick=\{\(\) => void download/)
+  assert.match(api, /document\.body\.appendChild\(link\)/)
+  assert.match(api, /window\.setTimeout\(\(\) => URL\.revokeObjectURL\(link\.href\), 0\)/)
   for (const movementType of ['RECEIPT', 'CONSUMPTION', 'RETURN', 'DAMAGE', 'ADJUSTMENT']) {
     assert.match(page, new RegExp(`value="${movementType}"`))
   }

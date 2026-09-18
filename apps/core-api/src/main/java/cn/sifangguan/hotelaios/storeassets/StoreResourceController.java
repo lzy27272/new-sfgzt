@@ -1,7 +1,9 @@
 package cn.sifangguan.hotelaios.storeassets;
 
 import jakarta.validation.Valid;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -11,8 +13,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.nio.charset.StandardCharsets;
 
 import java.util.List;
 import java.util.Map;
@@ -22,9 +28,11 @@ import java.util.UUID;
 @RequestMapping("/api/v1/store-resources")
 public class StoreResourceController {
     private final StoreResourceService service;
+    private final StoreResourceImportService importService;
 
-    public StoreResourceController(StoreResourceService service) {
+    public StoreResourceController(StoreResourceService service, StoreResourceImportService importService) {
         this.service = service;
+        this.importService = importService;
     }
 
     @GetMapping("/hotels")
@@ -147,6 +155,42 @@ public class StoreResourceController {
         return service.assignmentOptions(hotelId);
     }
 
+    @GetMapping("/hotels/{hotelId}/imports/template")
+    public ResponseEntity<byte[]> importTemplate(@PathVariable UUID hotelId) {
+        return file(importService.template(hotelId));
+    }
+
+    @GetMapping("/hotels/{hotelId}/imports")
+    public List<Map<String, Object>> importHistory(@PathVariable UUID hotelId) {
+        return importService.history(hotelId);
+    }
+
+    @PostMapping(value = "/hotels/{hotelId}/imports/preview", consumes = "multipart/form-data")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Map<String, Object> previewImport(
+            @PathVariable UUID hotelId,
+            @RequestPart("file") MultipartFile file
+    ) {
+        return importService.preview(hotelId, file);
+    }
+
+    @GetMapping("/hotels/{hotelId}/imports/{jobId}/errors")
+    public ResponseEntity<byte[]> importErrors(
+            @PathVariable UUID hotelId,
+            @PathVariable UUID jobId
+    ) {
+        return file(importService.errors(hotelId, jobId));
+    }
+
+    @PostMapping("/hotels/{hotelId}/imports/{jobId}/actions/apply")
+    public Map<String, Object> applyImport(
+            @PathVariable UUID hotelId,
+            @PathVariable UUID jobId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey
+    ) {
+        return importService.apply(hotelId, jobId, idempotencyKey);
+    }
+
     @GetMapping("/hotels/{hotelId}/handovers")
     public List<Map<String, Object>> handovers(@PathVariable UUID hotelId) {
         return service.handovers(hotelId);
@@ -204,5 +248,13 @@ public class StoreResourceController {
             @Valid @RequestBody StoreResourceModels.ApprovalRequest request
     ) {
         return service.approve(handoverId, request);
+    }
+
+    private ResponseEntity<byte[]> file(StoreResourceImportService.ImportFile file) {
+        return ResponseEntity.ok()
+                .header("Content-Disposition", ContentDisposition.attachment()
+                        .filename(file.name(), StandardCharsets.UTF_8).build().toString())
+                .header("Content-Type", file.mediaType())
+                .body(file.content());
     }
 }

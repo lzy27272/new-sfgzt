@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.storeassets;
 
 import cn.sifangguan.hotelaios.PlatformAdminTestFixture;
+import cn.sifangguan.hotelaios.shared.imports.XlsxWorkbook;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -17,14 +18,18 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.mock.web.MockMultipartFile;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.util.UUID;
+import java.util.LinkedHashMap;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -56,6 +61,9 @@ class StoreResourceFlowIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private XlsxWorkbook workbook;
 
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry registry) {
@@ -339,6 +347,92 @@ class StoreResourceFlowIntegrationTest {
                 .isEqualTo("AWAITING_TRANSFEROR_CONFIRMATION");
         assertThat(counted.path("row_version").asLong()).isEqualTo(2);
         assertThat(counted.path("actions")).hasSize(3);
+    }
+
+    @Test
+    void newStoreWorkbookIsPreviewedBeforeAtomicIdempotentImport() throws Exception {
+        String employeeNo = jdbc.queryForObject("""
+                select employee_no from employee where tenant_id = ?::uuid and account_id = ?::uuid
+                """, String.class, TENANT, TRANSFEROR_ACCOUNT);
+        String positionCode = jdbc.queryForObject("""
+                select position.code from employee_position_assignment assignment
+                join position_definition position on position.tenant_id = assignment.tenant_id
+                  and position.id = assignment.position_id
+                where assignment.tenant_id = ?::uuid and assignment.id = ?::uuid
+                """, String.class, TENANT, TRANSFEROR_ASSIGNMENT);
+        LinkedHashMap<String, List<List<String>>> sheets = new LinkedHashMap<>();
+        sheets.put("填写说明", List.of(List.of("集成测试")));
+        sheets.put("物品与期初库存", List.of(
+                List.of("物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*"),
+                List.of("IMPORT-TOOTHBRUSH", "导入牙刷", "耗品", "支", "1.2500", "10", "50")
+        ));
+        sheets.put("固定资产", List.of(
+                List.of("资产编号*", "资产名称*", "资产分类*", "规格型号", "序列号", "计量单位*",
+                        "原值*", "购置日期", "存放位置", "责任人工号", "责任人岗位编码", "状态"),
+                List.of("IMPORT-TV-001", "导入电视", "电器", "55寸", "SN-IMPORT-001", "台",
+                        "2600", "2026-09-18", "客房801", employeeNo, positionCode, "在用")
+        ));
+        byte[] content = workbook.write(sheets);
+        MockMultipartFile file = new MockMultipartFile("file", "new-store.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content);
+        JsonNode preview = response(identity(multipart(
+                        "/api/v1/store-resources/hotels/{hotelId}/imports/preview", HOTEL).file(file),
+                        TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT), 201);
+        assertThat(preview.path("status").asText()).isEqualTo("READY");
+        assertThat(preview.path("canApply").asBoolean()).isTrue();
+        assertThat(preview.path("summary").path("openingInventoryValue").decimalValue())
+                .isEqualByComparingTo("62.5000");
+        String jobId = preview.path("id").asText();
+
+        JsonNode duplicate = response(identity(multipart(
+                        "/api/v1/store-resources/hotels/{hotelId}/imports/preview", HOTEL).file(file),
+                        TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT), 201);
+        assertThat(duplicate.path("id").asText()).isEqualTo(jobId);
+        assertThat(duplicate.path("duplicateUpload").asBoolean()).isTrue();
+
+        JsonNode history = response(identity(get(
+                        "/api/v1/store-resources/hotels/{hotelId}/imports", HOTEL),
+                        TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT), 200);
+        assertThat(history.isArray()).isTrue();
+        assertThat(history.get(0).path("id").asText()).isEqualTo(jobId);
+        assertThat(history.get(0).path("originalName").asText()).isEqualTo("new-store.xlsx");
+        assertThat(history.get(0).path("rowCount").asInt()).isEqualTo(2);
+        assertThat(history.get(0).path("validRowCount").asInt()).isEqualTo(2);
+        assertThat(history.get(0).path("errorCount").asInt()).isZero();
+        assertThat(history.get(0).path("createdAt").asText()).isNotBlank();
+
+        JsonNode applied = response(identity(post(
+                        "/api/v1/store-resources/hotels/{hotelId}/imports/{jobId}/actions/apply", HOTEL, jobId),
+                        TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT)
+                .header("Idempotency-Key", "store-import-test-" + UUID.randomUUID())
+                .contentType("application/json").content("{}"), 200);
+        assertThat(applied.path("status").asText()).isEqualTo("APPLIED");
+        assertThat(jdbc.queryForObject("""
+                select count(*) from store_resource_item
+                where tenant_id = ?::uuid and hotel_org_unit_id = ?::uuid and sku = 'IMPORT-TOOTHBRUSH'
+                """, Integer.class, TENANT, HOTEL)).isOne();
+        assertThat(jdbc.queryForObject("""
+                select count(*) from store_inventory_movement movement
+                join store_resource_item item on item.tenant_id = movement.tenant_id and item.id = movement.item_id
+                where movement.tenant_id = ?::uuid and movement.hotel_org_unit_id = ?::uuid
+                  and item.sku = 'IMPORT-TOOTHBRUSH' and movement.movement_type = 'OPENING'
+                  and movement.source_type = 'IMPORT' and movement.source_id = ?::uuid
+                """, Integer.class, TENANT, HOTEL, jobId)).isOne();
+        assertThat(jdbc.queryForObject("""
+                select count(*) from store_fixed_asset
+                where tenant_id = ?::uuid and hotel_org_unit_id = ?::uuid and asset_code = 'IMPORT-TV-001'
+                  and responsible_assignment_id = ?::uuid
+                """, Integer.class, TENANT, HOTEL, TRANSFEROR_ASSIGNMENT)).isOne();
+
+        response(identity(post(
+                        "/api/v1/store-resources/hotels/{hotelId}/imports/{jobId}/actions/apply", HOTEL, jobId),
+                        TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT)
+                .header("Idempotency-Key", "store-import-test-replay-" + UUID.randomUUID())
+                .contentType("application/json").content("{}"), 200);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from store_inventory_movement
+                where tenant_id = ?::uuid and source_type = 'IMPORT' and source_id = ?::uuid
+                """, Integer.class, TENANT, jobId)).isOne();
     }
 
     private JsonNode handoverAction(

@@ -7,10 +7,12 @@ import { useScopedResource } from '../../shared/useScopedResource'
 import { useStableCommand } from '../../shared/useStableCommand'
 import { FeatureHeader, formatLocalDateTime } from '../shared/FeatureUI'
 import {
-  approveStoreResourceHandover, confirmStoreResourceHandover, createFixedAsset, createInventoryMovement,
+  applyStoreResourceImport, approveStoreResourceHandover, confirmStoreResourceHandover, createFixedAsset, createInventoryMovement,
   createStoreResourceHandover, createStoreResourceItem, decideStoreResourceHandoverDispute,
+  downloadStoreResourceImportErrors, downloadStoreResourceImportTemplate,
   loadFixedAssets, loadHandoverParticipants, loadInventoryMovements, loadStoreInventoryBalances,
-  loadStoreResourceHandover, loadStoreResourceHandovers, loadStoreResourceHotels, loadStoreResourceItems,
+  loadStoreResourceHandover, loadStoreResourceHandovers, loadStoreResourceHotels, loadStoreResourceImportHistory, loadStoreResourceItems,
+  previewStoreResourceImport,
   retireFixedAsset, setStoreResourceItemEnabled, submitStoreResourcePhysicalCount, updateFixedAsset,
   updateStoreResourceItem,
 } from './api'
@@ -18,7 +20,7 @@ import styles from './storeResources.module.css'
 import type {
   FixedAsset, FixedAssetInput, HandoverParticipant, InventoryAdjustmentInput, StoreInventoryBalance,
   StoreResourceHandover, StoreResourceHandoverDetail, StoreResourceHandoverInput, StoreResourceItem,
-  StoreResourceItemCategory, StoreResourceItemInput, StoreResourceTab,
+  StoreResourceImportJob, StoreResourceItemCategory, StoreResourceItemInput, StoreResourceTab,
 } from './types'
 
 const tabs: Array<{ id: StoreResourceTab; label: string; description: string }> = [
@@ -34,6 +36,9 @@ const movementLabels: Record<string, string> = {
   OPENING: '期初入账', RECEIPT: '入库', ISSUE: '领用', CONSUMPTION: '消耗', CONSUME: '消耗',
   RETURN: '退回', DAMAGE: '损坏', ADJUSTMENT: '库存调整', TRANSFER_IN: '调入', TRANSFER_OUT: '调出',
 }
+const movementSourceLabels: Record<string, string> = {
+  MANUAL: '手工登记', WORK_RECORD: '工作记录联动', HANDOVER: '异动移交', IMPORT: '表格导入',
+}
 const terminalHandoverStatuses = new Set(['COMPLETED', 'REJECTED', 'CANCELLED'])
 
 function validTab(value?: string): StoreResourceTab {
@@ -47,6 +52,7 @@ function statusLabel(value: string): string {
     AWAITING_DISPUTE_DECISION: '待确认是否有异议', PHYSICAL_COUNT_REQUIRED: '有异议，待实物盘点',
     AWAITING_TRANSFEROR_CONFIRMATION: '待移交人确认', AWAITING_RECIPIENT_CONFIRMATION: '待签收人确认',
     AWAITING_APPROVAL: '待审批人审批', COMPLETED: '已完成', REJECTED: '已拒绝', CANCELLED: '已取消',
+    INVALID: '校验未通过', READY: '待确认导入', APPLIED: '已导入',
   } as Record<string, string>)[value] ?? value
 }
 type ResourceState<T> = ReturnType<typeof useScopedResource<T[]>>
@@ -58,6 +64,7 @@ export function StoreResourceRoutes({ identity, grantedPermissions, params, go }
   const [selectedHotelId, setSelectedHotelId] = useState(params.hotelId ?? '')
   const [message, setMessage] = useState<string>()
   const [commandError, setCommandError] = useState<string>()
+  const [showImport, setShowImport] = useState(false)
   const hotels = useScopedResource(`${identity.key}:store-resource-hotels`, (signal) => loadStoreResourceHotels(identity, signal), [])
   useEffect(() => {
     if (selectedHotelId && hotels.data.some((hotel) => hotel.id === selectedHotelId)) return
@@ -89,12 +96,13 @@ export function StoreResourceRoutes({ identity, grantedPermissions, params, go }
     setSelectedHotelId(hotelId); setMessage(undefined); setCommandError(undefined); go('store-resources', { hotelId, tab: selectedTab })
   }
   return <section className={styles.page}>
-    <FeatureHeader eyebrow="STORE RESOURCES" title="门店库存与固定资产" description="集中维护门店布草、耗品、经营物品、库存流水、固定资产和异动移交，所有变更保留操作记录。" actions={<button type="button" className="secondary" onClick={() => void Promise.all([hotels.reload(), items.reload(), balances.reload(), movements.reload(), assets.reload(), handovers.reload(), participants.reload()])}>刷新</button>} />
+    <FeatureHeader eyebrow="STORE RESOURCES" title="门店库存与固定资产" description="集中维护门店布草、耗品、经营物品、库存流水、固定资产和异动移交，所有变更保留操作记录。" actions={<>{hasPermission(grantedPermissions, permissions.storeResource.importPreview) && <button type="button" className="primary" disabled={!selectedHotelId} onClick={() => setShowImport((value) => !value)}>{showImport ? '收起批量导入' : '表格批量导入'}</button>}<button type="button" className="secondary" onClick={() => void Promise.all([hotels.reload(), items.reload(), balances.reload(), movements.reload(), assets.reload(), handovers.reload(), participants.reload()])}>刷新</button></>} />
     <section className={styles.scopeBar}><label>当前门店<select aria-label="当前门店" value={selectedHotelId} onChange={(event) => switchHotel(event.target.value)} disabled={hotels.loading || !hotels.data.length}>
       {!hotels.data.length && <option value="">暂无可管理门店</option>}{hotels.data.map((hotel) => <option key={hotel.id} value={hotel.id}>{hotel.name}{hotel.city ? ` · ${hotel.city}` : ''}</option>)}
     </select></label><span>{selectedHotel?.code ?? '—'}</span></section>
     <AsyncState loading={hotels.loading} error={hotels.error} empty={!hotels.loading && !hotels.error && !hotels.data.length} onRetry={hotels.reload} emptyTitle="当前权限范围没有门店" emptyDescription="请由管理员为当前任职授权门店范围和门店资源读取权限。" />
     {!!selectedHotelId && <>
+      {showImport && <StoreResourceImportPanel key={selectedHotelId} identity={identity} hotelId={selectedHotelId} canApply={hasPermission(grantedPermissions, permissions.storeResource.importApply)} onApplied={() => success('新店物品、期初库存和固定资产已一次性导入', [items.reload, balances.reload, movements.reload, assets.reload])} onError={setCommandError} />}
       <section className={styles.metrics}><Metric label="物品种类" value={summary.itemCount} note="当前启用配置" /><Metric label="低库存" value={summary.lowStockCount} note="低于最低库存" warning={summary.lowStockCount > 0} /><Metric label="固定资产" value={summary.assetCount} note="当前门店资产" /><Metric label="待办移交" value={summary.pendingHandoverCount} note={`库存金额 ${money(summary.inventoryValue)}`} warning={summary.pendingHandoverCount > 0} /></section>
       <nav className={styles.tabs} aria-label="门店资源功能">{tabs.map((tab) => <button type="button" key={tab.id} className={selectedTab === tab.id ? styles.active : ''} onClick={() => go('store-resources', { hotelId: selectedHotelId, tab: tab.id })}><strong>{tab.label}</strong><small>{tab.description}</small></button>)}</nav>
       {message && <div className={styles.success} role="status">{message}</div>}{commandError && <div className={styles.error} role="alert">{commandError}</div>}
@@ -103,6 +111,69 @@ export function StoreResourceRoutes({ identity, grantedPermissions, params, go }
       {selectedTab === 'assets' && <AssetTab key={`assets:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} assets={assets} participants={participants.data} canManage={hasPermission(grantedPermissions, permissions.storeResource.assetManage)} onSuccess={(value) => success(value, [assets.reload])} onError={setCommandError} />}
       {selectedTab === 'handovers' && <HandoverTab key={`handovers:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} handovers={handovers} participants={participants.data} canCreate={hasPermission(grantedPermissions, permissions.storeResource.handoverCreate)} canConfirm={hasPermission(grantedPermissions, permissions.storeResource.handoverConfirm)} canApprove={hasPermission(grantedPermissions, permissions.storeResource.handoverApprove)} onSuccess={(value) => success(value, [handovers.reload, balances.reload, assets.reload])} onError={setCommandError} />}
     </>}
+  </section>
+}
+
+function StoreResourceImportPanel({ identity, hotelId, canApply, onApplied, onError }: {
+  identity: RoleContext; hotelId: string; canApply: boolean; onApplied: () => Promise<void>; onError: (message: string) => void
+}) {
+  const [file, setFile] = useState<File>()
+  const [job, setJob] = useState<StoreResourceImportJob>()
+  const [notice, setNotice] = useState<string>()
+  const command = useStableCommand(`store-resource-import-${hotelId}`)
+  const history = useScopedResource(`${identity.key}:store-resource-import-history:${hotelId}`, (signal) => loadStoreResourceImportHistory(identity, hotelId, signal), [])
+  const preview = async () => {
+    if (!file) return
+    let result: StoreResourceImportJob | undefined
+    try {
+      result = await command.run(() => previewStoreResourceImport(identity, hotelId, file))
+      if (!result) return
+      setJob(result)
+      setNotice(result.duplicateUpload
+        ? '该文件已经上传过，已返回原导入任务，系统不会重复创建或重复入账。'
+        : result.canApply ? '整表校验通过，请核对汇总后确认导入。' : `发现${result.errorCount}项问题，正式数据尚未写入。`)
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : '导入文件预检失败')
+      return
+    }
+    try {
+      await history.reload()
+    } catch {
+      onError('文件预检已完成，但导入历史刷新失败；可稍后点击页面刷新，不影响本次预检结果。')
+    }
+  }
+  const apply = async () => {
+    if (!job) return
+    let result: StoreResourceImportJob | undefined
+    try {
+      result = await command.run((key) => applyStoreResourceImport(identity, hotelId, job.id, key))
+      if (!result) return
+      setJob(result); setNotice('导入已完成，期初数量已形成不可修改的期初导入流水。')
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : '确认导入失败')
+      return
+    }
+    const refreshes = await Promise.allSettled([history.reload(), onApplied()])
+    if (refreshes.some((refresh) => refresh.status === 'rejected')) {
+      onError('导入已经成功入账，但页面数据刷新失败；请点击刷新重新加载最新数据。')
+    }
+  }
+  const download = async (action: () => Promise<void>, fallback: string) => {
+    try {
+      await command.run(() => action())
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : fallback)
+    }
+  }
+  return <section className={`${styles.panel} ${styles.importPanel}`}>
+    <header><div><h2>新店库存与固定资产批量导入</h2><p>下载标准模板，填写物品、期初库存和固定资产后上传。上传只做预检；确认后才会整批入账，任何错误均不写正式数据。</p></div><button type="button" className="secondary" disabled={command.busy} onClick={() => void download(() => downloadStoreResourceImportTemplate(identity, hotelId), '标准模板下载失败')}>下载标准模板</button></header>
+    <div className={styles.importUpload}><label>选择已填写的 .xlsx 文件<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => { setFile(event.target.files?.[0]); setJob(undefined); setNotice(undefined) }} /></label><button type="button" className="primary" disabled={!file || command.busy} onClick={() => void preview()}>{command.busy ? '处理中…' : '上传并预检'}</button></div>
+    {notice && <div className={job?.canApply || job?.status === 'APPLIED' ? styles.success : styles.error} role="status">{notice}</div>}
+    {job && <><section className={styles.importMetrics}><Metric label="物品" value={job.summary.itemCount} note={`期初数量 ${numeric(job.summary.openingQuantity)}`} /><Metric label="期初库存金额" value={money(job.summary.openingInventoryValue)} note="按单位成本计算" /><Metric label="固定资产" value={job.summary.assetCount} note={`原值 ${money(job.summary.assetOriginalValue)}`} /><Metric label="校验结果" value={job.errorCount ? `${job.errorCount}项错误` : '全部通过'} note={`${job.validRowCount}/${job.rowCount} 行有效`} warning={job.errorCount > 0} /></section>
+      {job.errors.length > 0 && <section><div className={styles.importSectionTitle}><h3>需要修正</h3><button type="button" className="secondary" disabled={command.busy} onClick={() => void download(() => downloadStoreResourceImportErrors(identity, hotelId, job.id), '错误表下载失败')}>下载错误表</button></div><div className={styles.tableWrap}><table className={styles.importTable}><thead><tr><th>工作表</th><th>行号</th><th>字段</th><th>问题</th><th>原值</th></tr></thead><tbody>{job.errors.map((error, index) => <tr key={`${error.sheetName}:${error.rowNumber}:${error.field}:${index}`}><td>{error.sheetName}</td><td>{error.rowNumber}</td><td>{error.field}</td><td>{error.message}</td><td>{error.value || '—'}</td></tr>)}</tbody></table></div></section>}
+      {job.errorCount === 0 && <details className={styles.importPreview}><summary>查看前30行数据预览</summary><div className={styles.previewColumns}><div><h3>物品与期初库存</h3>{job.preview.items.map((item) => <p key={`item:${item.rowNumber}`}><strong>{item.sku} · {item.name}</strong><span>{categoryLabels[item.category]} · {numeric(item.openingQuantity)} {item.unit} · {money(item.unitCost)}/{item.unit}</span></p>)}</div><div><h3>固定资产</h3>{job.preview.assets.map((asset) => <p key={`asset:${asset.rowNumber}`}><strong>{asset.assetCode} · {asset.name}</strong><span>{asset.category} · {asset.location || '未填位置'} · {money(asset.originalValue)}</span></p>)}</div></div></details>}
+      <div className={styles.actions}>{job.status === 'APPLIED' && <span className={styles.goodPill}>已导入，不会重复入账</span>}{job.status === 'READY' && <button type="button" className="primary" disabled={!canApply || command.busy} title={canApply ? undefined : '当前岗位没有确认导入权限'} onClick={() => void apply()}>{command.busy ? '导入中…' : '确认整批导入'}</button>}</div></>}
+    {history.data.length > 0 && <details className={styles.importHistory}><summary>最近导入记录（{history.data.length}）</summary>{history.data.map((entry) => <p key={entry.id}><span>{entry.originalName}</span><strong>{statusLabel(entry.status)} · {entry.rowCount}行 · {formatLocalDateTime(entry.appliedAt || entry.createdAt)}</strong></p>)}</details>}
   </section>
 }
 
@@ -142,7 +213,7 @@ function InventoryTab({ identity, hotelId, items, balances, movements, canCreate
   return <section className={styles.panel}><header><div><h2>库存流水与调整</h2><p>任何增加或减少均生成不可覆盖的流水，并记录操作人、时间和原因。</p></div>{canCreate && <button type="button" className="primary" onClick={() => setShowForm((value) => !value)}>新增库存流水</button>}</header>
     {showForm && <AdjustmentForm items={items.filter((item) => item.status === 'ACTIVE')} balances={balances} busy={command.busy} onCancel={() => setShowForm(false)} onSubmit={async (input) => { try { await command.run((key) => createInventoryMovement(identity, hotelId, input, key)); setShowForm(false); await onSuccess('库存变动已记入流水') } catch (reason) { onError(reason instanceof Error ? reason.message : '库存变动登记失败') } }} />}
     <AsyncState loading={movements.loading} error={movements.error} empty={!movements.data.length} onRetry={movements.reload} emptyTitle="暂无库存流水" />
-    <div className={styles.timeline}>{movements.data.map((movement) => <article key={movement.id}><div><strong>{movement.itemName}</strong><span>{movementLabels[movement.movementType] ?? movement.movementType}</span></div><b className={movement.quantityDelta < 0 ? styles.dangerText : styles.goodText}>{movement.quantityDelta > 0 ? '+' : ''}{numeric(movement.quantityDelta)} {movement.unit}</b><p>{numeric(movement.quantityBefore)} → {numeric(movement.quantityAfter)} · {movement.reason}</p><small>{movement.operatorName} · {formatLocalDateTime(movement.occurredAt)}{movement.sourceType ? ` · ${movement.sourceType}` : ''}</small></article>)}</div>
+    <div className={styles.timeline}>{movements.data.map((movement) => <article key={movement.id}><div><strong>{movement.itemName}</strong><span>{movementLabels[movement.movementType] ?? movement.movementType}</span></div><b className={movement.quantityDelta < 0 ? styles.dangerText : styles.goodText}>{movement.quantityDelta > 0 ? '+' : ''}{numeric(movement.quantityDelta)} {movement.unit}</b><p>{numeric(movement.quantityBefore)} → {numeric(movement.quantityAfter)} · {movement.reason}</p><small>{movement.operatorName} · {formatLocalDateTime(movement.occurredAt)}{movement.sourceType ? ` · ${movementSourceLabels[movement.sourceType] ?? movement.sourceType}` : ''}</small></article>)}</div>
   </section>
 }
 
