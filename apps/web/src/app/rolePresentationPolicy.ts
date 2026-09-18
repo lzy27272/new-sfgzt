@@ -237,6 +237,7 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
       'daily-report-templates', 'daily-operations', 'kpi-center', 'rules',
       'evaluations', 'templates', 'organization', 'wecom-webhooks',
       'wecom-bindings', 'wecom-onboarding', 'notifications', 'all-functions',
+      'store-resources',
     ),
     mobileTabs: platformTabs(),
   }),

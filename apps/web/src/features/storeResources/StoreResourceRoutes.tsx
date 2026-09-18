@@ -1,0 +1,215 @@
+import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { hasPermission, permissions } from '../../app/permissions'
+import type { AppNavigate } from '../../app/routeConfig'
+import type { RoleContext, RouteParams } from '../../domain'
+import { AsyncState } from '../../shared/AsyncState'
+import { useScopedResource } from '../../shared/useScopedResource'
+import { useStableCommand } from '../../shared/useStableCommand'
+import { FeatureHeader, formatLocalDateTime } from '../shared/FeatureUI'
+import {
+  approveStoreResourceHandover, confirmStoreResourceHandover, createFixedAsset, createInventoryMovement,
+  createStoreResourceHandover, createStoreResourceItem, decideStoreResourceHandoverDispute,
+  loadFixedAssets, loadHandoverParticipants, loadInventoryMovements, loadStoreInventoryBalances,
+  loadStoreResourceHandover, loadStoreResourceHandovers, loadStoreResourceHotels, loadStoreResourceItems,
+  retireFixedAsset, setStoreResourceItemEnabled, submitStoreResourcePhysicalCount, updateFixedAsset,
+  updateStoreResourceItem,
+} from './api'
+import styles from './storeResources.module.css'
+import type {
+  FixedAsset, FixedAssetInput, HandoverParticipant, InventoryAdjustmentInput, StoreInventoryBalance,
+  StoreResourceHandover, StoreResourceHandoverDetail, StoreResourceHandoverInput, StoreResourceItem,
+  StoreResourceItemCategory, StoreResourceItemInput, StoreResourceTab,
+} from './types'
+
+const tabs: Array<{ id: StoreResourceTab; label: string; description: string }> = [
+  { id: 'items', label: '物品配置', description: '布草、耗品、清洁用品及门店物品' },
+  { id: 'inventory', label: '库存流水与调整', description: '收发、消耗、退回与调整全程留痕' },
+  { id: 'assets', label: '固定资产', description: '资产卡片、位置、状态和责任人' },
+  { id: 'handovers', label: '异动移交', description: '账面快照、异议盘点与三方确认' },
+]
+const categoryLabels: Record<StoreResourceItemCategory, string> = {
+  LINEN: '布草', CONSUMABLE: '耗品', CLEANING_SUPPLY: '清洁用品', OPERATING_ITEM: '经营物品',
+}
+const movementLabels: Record<string, string> = {
+  OPENING: '期初入账', RECEIPT: '入库', ISSUE: '领用', CONSUMPTION: '消耗', CONSUME: '消耗',
+  RETURN: '退回', DAMAGE: '损坏', ADJUSTMENT: '库存调整', TRANSFER_IN: '调入', TRANSFER_OUT: '调出',
+}
+const terminalHandoverStatuses = new Set(['COMPLETED', 'REJECTED', 'CANCELLED'])
+
+function validTab(value?: string): StoreResourceTab {
+  return tabs.some((tab) => tab.id === value) ? value as StoreResourceTab : 'items'
+}
+function money(value: number) { return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 2 }).format(value) }
+function numeric(value: number) { return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value) }
+function statusLabel(value: string): string {
+  return ({
+    ACTIVE: '在用', INACTIVE: '停用', MAINTENANCE: '维修中', DAMAGED: '损坏', MISSING: '盘亏', RETIRED: '已退役',
+    AWAITING_DISPUTE_DECISION: '待确认是否有异议', PHYSICAL_COUNT_REQUIRED: '有异议，待实物盘点',
+    AWAITING_TRANSFEROR_CONFIRMATION: '待移交人确认', AWAITING_RECIPIENT_CONFIRMATION: '待签收人确认',
+    AWAITING_APPROVAL: '待审批人审批', COMPLETED: '已完成', REJECTED: '已拒绝', CANCELLED: '已取消',
+  } as Record<string, string>)[value] ?? value
+}
+type ResourceState<T> = ReturnType<typeof useScopedResource<T[]>>
+
+export function StoreResourceRoutes({ identity, grantedPermissions, params, go }: {
+  identity: RoleContext; grantedPermissions: string[]; params: RouteParams; go: AppNavigate
+}) {
+  const selectedTab = validTab(params.tab)
+  const [selectedHotelId, setSelectedHotelId] = useState(params.hotelId ?? '')
+  const [message, setMessage] = useState<string>()
+  const [commandError, setCommandError] = useState<string>()
+  const hotels = useScopedResource(`${identity.key}:store-resource-hotels`, (signal) => loadStoreResourceHotels(identity, signal), [])
+  useEffect(() => {
+    if (selectedHotelId && hotels.data.some((hotel) => hotel.id === selectedHotelId)) return
+    const next = params.hotelId && hotels.data.some((hotel) => hotel.id === params.hotelId) ? params.hotelId : hotels.data[0]?.id ?? ''
+    if (next !== selectedHotelId) setSelectedHotelId(next)
+  }, [hotels.data, params.hotelId, selectedHotelId])
+  const items = useScopedResource(`${identity.key}:store-resource-items:${selectedHotelId || 'none'}`, (signal) => selectedHotelId ? loadStoreResourceItems(identity, selectedHotelId, signal) : Promise.resolve([]), [])
+  const balances = useScopedResource(`${identity.key}:store-resource-balances:${selectedHotelId || 'none'}`, (signal) => selectedHotelId ? loadStoreInventoryBalances(identity, selectedHotelId, signal) : Promise.resolve([]), [])
+  const assets = useScopedResource(`${identity.key}:store-resource-assets:${selectedHotelId || 'none'}`, (signal) => selectedHotelId ? loadFixedAssets(identity, selectedHotelId, signal) : Promise.resolve([]), [])
+  const handovers = useScopedResource(`${identity.key}:store-resource-handovers:${selectedHotelId || 'none'}`, (signal) => selectedHotelId ? loadStoreResourceHandovers(identity, selectedHotelId, signal) : Promise.resolve([]), [])
+  const movements = useScopedResource(`${identity.key}:store-resource-movements:${selectedHotelId || 'none'}:${selectedTab === 'inventory'}`, (signal) => selectedHotelId && selectedTab === 'inventory' ? loadInventoryMovements(identity, selectedHotelId, signal) : Promise.resolve([]), [])
+  const participants = useScopedResource(`${identity.key}:store-resource-participants:${selectedHotelId || 'none'}`, (signal) => selectedHotelId ? loadHandoverParticipants(identity, selectedHotelId, signal) : Promise.resolve([]), [])
+  const summary = useMemo(() => {
+    const activeItems = items.data.filter((item) => item.status === 'ACTIVE')
+    const activeItemIds = new Set(activeItems.map((item) => item.id))
+    return {
+      itemCount: activeItems.length,
+      lowStockCount: balances.data.filter((balance) => activeItemIds.has(balance.itemId) && balance.quantity < balance.minimumQuantity).length,
+      assetCount: assets.data.filter((asset) => asset.status !== 'RETIRED').length,
+      pendingHandoverCount: handovers.data.filter((handover) => !terminalHandoverStatuses.has(handover.status)).length,
+      inventoryValue: balances.data.reduce((total, balance) => total + balance.inventoryValue, 0),
+    }
+  }, [assets.data, balances.data, handovers.data, items.data])
+  const selectedHotel = hotels.data.find((hotel) => hotel.id === selectedHotelId)
+  const success = async (value: string, reloads: Array<() => Promise<unknown>>) => {
+    setMessage(value); setCommandError(undefined); await Promise.all(reloads.map((reload) => reload()))
+  }
+  const switchHotel = (hotelId: string) => {
+    setSelectedHotelId(hotelId); setMessage(undefined); setCommandError(undefined); go('store-resources', { hotelId, tab: selectedTab })
+  }
+  return <section className={styles.page}>
+    <FeatureHeader eyebrow="STORE RESOURCES" title="门店库存与固定资产" description="集中维护门店布草、耗品、经营物品、库存流水、固定资产和异动移交，所有变更保留操作记录。" actions={<button type="button" className="secondary" onClick={() => void Promise.all([hotels.reload(), items.reload(), balances.reload(), movements.reload(), assets.reload(), handovers.reload(), participants.reload()])}>刷新</button>} />
+    <section className={styles.scopeBar}><label>当前门店<select aria-label="当前门店" value={selectedHotelId} onChange={(event) => switchHotel(event.target.value)} disabled={hotels.loading || !hotels.data.length}>
+      {!hotels.data.length && <option value="">暂无可管理门店</option>}{hotels.data.map((hotel) => <option key={hotel.id} value={hotel.id}>{hotel.name}{hotel.city ? ` · ${hotel.city}` : ''}</option>)}
+    </select></label><span>{selectedHotel?.code ?? '—'}</span></section>
+    <AsyncState loading={hotels.loading} error={hotels.error} empty={!hotels.loading && !hotels.error && !hotels.data.length} onRetry={hotels.reload} emptyTitle="当前权限范围没有门店" emptyDescription="请由管理员为当前任职授权门店范围和门店资源读取权限。" />
+    {!!selectedHotelId && <>
+      <section className={styles.metrics}><Metric label="物品种类" value={summary.itemCount} note="当前启用配置" /><Metric label="低库存" value={summary.lowStockCount} note="低于最低库存" warning={summary.lowStockCount > 0} /><Metric label="固定资产" value={summary.assetCount} note="当前门店资产" /><Metric label="待办移交" value={summary.pendingHandoverCount} note={`库存金额 ${money(summary.inventoryValue)}`} warning={summary.pendingHandoverCount > 0} /></section>
+      <nav className={styles.tabs} aria-label="门店资源功能">{tabs.map((tab) => <button type="button" key={tab.id} className={selectedTab === tab.id ? styles.active : ''} onClick={() => go('store-resources', { hotelId: selectedHotelId, tab: tab.id })}><strong>{tab.label}</strong><small>{tab.description}</small></button>)}</nav>
+      {message && <div className={styles.success} role="status">{message}</div>}{commandError && <div className={styles.error} role="alert">{commandError}</div>}
+      {selectedTab === 'items' && <ItemConfigurationTab key={`items:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} items={items} balances={balances.data} canManage={hasPermission(grantedPermissions, permissions.storeResource.itemManage)} onSuccess={(value) => success(value, [items.reload, balances.reload])} onError={setCommandError} />}
+      {selectedTab === 'inventory' && <InventoryTab key={`inventory:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} items={items.data} balances={balances.data} movements={movements} canCreate={hasPermission(grantedPermissions, permissions.storeResource.movementCreate)} onSuccess={(value) => success(value, [movements.reload, balances.reload])} onError={setCommandError} />}
+      {selectedTab === 'assets' && <AssetTab key={`assets:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} assets={assets} participants={participants.data} canManage={hasPermission(grantedPermissions, permissions.storeResource.assetManage)} onSuccess={(value) => success(value, [assets.reload])} onError={setCommandError} />}
+      {selectedTab === 'handovers' && <HandoverTab key={`handovers:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} handovers={handovers} participants={participants.data} canCreate={hasPermission(grantedPermissions, permissions.storeResource.handoverCreate)} canConfirm={hasPermission(grantedPermissions, permissions.storeResource.handoverConfirm)} canApprove={hasPermission(grantedPermissions, permissions.storeResource.handoverApprove)} onSuccess={(value) => success(value, [handovers.reload, balances.reload, assets.reload])} onError={setCommandError} />}
+    </>}
+  </section>
+}
+
+function Metric({ label, value, note, warning = false }: { label: string; value: string | number; note: string; warning?: boolean }) {
+  return <article className={warning ? styles.metricWarning : ''}><span>{label}</span><strong>{value}</strong><small>{note}</small></article>
+}
+
+function ItemConfigurationTab({ identity, hotelId, items, balances, canManage, onSuccess, onError }: {
+  identity: RoleContext; hotelId: string; items: ResourceState<StoreResourceItem>; balances: StoreInventoryBalance[]; canManage: boolean
+  onSuccess: (message: string) => Promise<void>; onError: (message: string) => void
+}) {
+  const [editing, setEditing] = useState<StoreResourceItem>(); const [showForm, setShowForm] = useState(false)
+  const command = useStableCommand(`store-resource-item-${hotelId}`)
+  const balanceByItem = useMemo(() => new Map(balances.map((balance) => [balance.itemId, balance])), [balances])
+  return <section className={styles.panel}><header><div><h2>门店物品配置</h2><p>统一配置员工填报可选择的布草、耗品、清洁用品和经营物品。</p></div>{canManage && <button type="button" className="primary" onClick={() => { setEditing(undefined); setShowForm(true) }}>新增物品</button>}</header>
+    {showForm && <ItemForm key={editing?.id ?? 'new-item'} initial={editing} busy={command.busy} onCancel={() => { setShowForm(false); setEditing(undefined) }} onSubmit={async (input) => { try { await command.run((key) => editing ? updateStoreResourceItem(identity, hotelId, editing.id, input, editing.rowVersion, key) : createStoreResourceItem(identity, hotelId, input, key)); setShowForm(false); setEditing(undefined); await onSuccess(editing ? '物品配置已更新' : '物品已创建') } catch (reason) { onError(reason instanceof Error ? reason.message : '保存物品失败') } }} />}
+    <AsyncState loading={items.loading} error={items.error} empty={!items.data.length} onRetry={items.reload} emptyTitle="暂无门店物品配置" />
+    <div className={styles.resourceList}>{items.data.map((item) => { const current = balanceByItem.get(item.id)?.quantity ?? 0; return <article key={item.id}><div><span className={styles.code}>{item.sku}</span><h3>{item.name}</h3><small>{categoryLabels[item.category]} · 单位 {item.unit}</small></div><dl><div><dt>现存</dt><dd className={current < item.minimumQuantity ? styles.dangerText : ''}>{numeric(current)} {item.unit}</dd></div><div><dt>最低库存</dt><dd>{numeric(item.minimumQuantity)} {item.unit}</dd></div><div><dt>单位成本</dt><dd>{money(item.unitCost)}</dd></div></dl><footer><span className={item.status === 'ACTIVE' ? styles.goodPill : styles.mutedPill}>{statusLabel(item.status)}</span>{canManage && <><button type="button" className="secondary" onClick={() => { setEditing(item); setShowForm(true) }}>编辑</button><button type="button" className="secondary" disabled={command.busy} onClick={() => void (async () => { try { await command.run((key) => setStoreResourceItemEnabled(identity, hotelId, item.id, item.status !== 'ACTIVE', item.rowVersion, key)); await onSuccess(item.status === 'ACTIVE' ? '物品已停用' : '物品已启用') } catch (reason) { onError(reason instanceof Error ? reason.message : '物品状态更新失败') } })()}>{item.status === 'ACTIVE' ? '停用' : '启用'}</button></>}</footer></article> })}</div>
+  </section>
+}
+
+function ItemForm({ initial, busy, onCancel, onSubmit }: { initial?: StoreResourceItem; busy: boolean; onCancel: () => void; onSubmit: (input: StoreResourceItemInput) => Promise<void> }) {
+  const [form, setForm] = useState({ sku: initial?.sku ?? '', name: initial?.name ?? '', category: initial?.category ?? 'CONSUMABLE' as StoreResourceItemCategory, unit: initial?.unit ?? '个', unitCost: String(initial?.unitCost ?? 0), minimumQuantity: String(initial?.minimumQuantity ?? 0) })
+  return <form className={styles.form} onSubmit={(event) => { event.preventDefault(); void onSubmit({ sku: form.sku.trim(), name: form.name.trim(), category: form.category, unit: form.unit.trim(), unitCost: Number(form.unitCost), minimumQuantity: Number(form.minimumQuantity) }) }}><h3>{initial ? '编辑物品' : '新增物品'}</h3><div className={styles.formGrid}>
+    <label>物品编码<input required maxLength={80} value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} /></label><label>物品名称<input required maxLength={160} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
+    <label>分类<select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value as StoreResourceItemCategory })}>{Object.entries(categoryLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>计量单位<input required maxLength={32} value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} /></label>
+    <label>单位成本<input required type="number" min="0" step="0.01" value={form.unitCost} onChange={(event) => setForm({ ...form, unitCost: event.target.value })} /></label><label>最低库存<input required type="number" min="0" step="0.01" value={form.minimumQuantity} onChange={(event) => setForm({ ...form, minimumQuantity: event.target.value })} /></label>
+  </div><div className={styles.actions}><button type="button" className="secondary" onClick={onCancel}>取消</button><button type="submit" className="primary" disabled={busy}>{busy ? '保存中…' : '保存物品'}</button></div></form>
+}
+
+function InventoryTab({ identity, hotelId, items, balances, movements, canCreate, onSuccess, onError }: {
+  identity: RoleContext; hotelId: string; items: StoreResourceItem[]; balances: StoreInventoryBalance[]
+  movements: ResourceState<Awaited<ReturnType<typeof loadInventoryMovements>>[number]>; canCreate: boolean
+  onSuccess: (message: string) => Promise<void>; onError: (message: string) => void
+}) {
+  const [showForm, setShowForm] = useState(false); const command = useStableCommand(`store-resource-movement-${hotelId}`)
+  return <section className={styles.panel}><header><div><h2>库存流水与调整</h2><p>任何增加或减少均生成不可覆盖的流水，并记录操作人、时间和原因。</p></div>{canCreate && <button type="button" className="primary" onClick={() => setShowForm((value) => !value)}>新增库存流水</button>}</header>
+    {showForm && <AdjustmentForm items={items.filter((item) => item.status === 'ACTIVE')} balances={balances} busy={command.busy} onCancel={() => setShowForm(false)} onSubmit={async (input) => { try { await command.run((key) => createInventoryMovement(identity, hotelId, input, key)); setShowForm(false); await onSuccess('库存变动已记入流水') } catch (reason) { onError(reason instanceof Error ? reason.message : '库存变动登记失败') } }} />}
+    <AsyncState loading={movements.loading} error={movements.error} empty={!movements.data.length} onRetry={movements.reload} emptyTitle="暂无库存流水" />
+    <div className={styles.timeline}>{movements.data.map((movement) => <article key={movement.id}><div><strong>{movement.itemName}</strong><span>{movementLabels[movement.movementType] ?? movement.movementType}</span></div><b className={movement.quantityDelta < 0 ? styles.dangerText : styles.goodText}>{movement.quantityDelta > 0 ? '+' : ''}{numeric(movement.quantityDelta)} {movement.unit}</b><p>{numeric(movement.quantityBefore)} → {numeric(movement.quantityAfter)} · {movement.reason}</p><small>{movement.operatorName} · {formatLocalDateTime(movement.occurredAt)}{movement.sourceType ? ` · ${movement.sourceType}` : ''}</small></article>)}</div>
+  </section>
+}
+
+function AdjustmentForm({ items, balances, busy, onCancel, onSubmit }: { items: StoreResourceItem[]; balances: StoreInventoryBalance[]; busy: boolean; onCancel: () => void; onSubmit: (input: InventoryAdjustmentInput) => Promise<void> }) {
+  const [itemId, setItemId] = useState(items[0]?.id ?? ''); const [movementType, setMovementType] = useState<InventoryAdjustmentInput['movementType']>('RECEIPT'); const [quantity, setQuantity] = useState(''); const [unitCost, setUnitCost] = useState(''); const [reason, setReason] = useState('')
+  const balanceByItem = new Map(balances.map((balance) => [balance.itemId, balance])); const quantityNumber = Number(quantity); const invalidQuantity = !quantity || quantityNumber === 0 || (movementType !== 'ADJUSTMENT' && quantityNumber < 0)
+  return <form className={styles.form} onSubmit={(event) => { event.preventDefault(); void onSubmit({ itemId, movementType, quantity: quantityNumber, unitCost: unitCost ? Number(unitCost) : undefined, reason: reason.trim() }) }}><h3>新增库存流水</h3><div className={styles.formGrid}>
+    <label>物品<select required value={itemId} onChange={(event) => setItemId(event.target.value)}><option value="">请选择</option>{items.map((item) => <option key={item.id} value={item.id}>{item.name}（现存 {numeric(balanceByItem.get(item.id)?.quantity ?? 0)} {item.unit}）</option>)}</select></label><label>变动类型<select value={movementType} onChange={(event) => setMovementType(event.target.value as InventoryAdjustmentInput['movementType'])}><option value="RECEIPT">入库</option><option value="CONSUMPTION">消耗</option><option value="RETURN">退回</option><option value="DAMAGE">损坏</option><option value="ADJUSTMENT">盘点调整</option></select></label>
+    <label>数量<input required type="number" step="0.01" value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder={movementType === 'ADJUSTMENT' ? '可填正数或负数' : '请输入正数'} /></label><label>本次单位成本（选填）<input type="number" min="0" step="0.01" value={unitCost} onChange={(event) => setUnitCost(event.target.value)} /></label><label className={styles.full}>变动原因<textarea required maxLength={1000} rows={3} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+  </div><div className={styles.actions}><button type="button" className="secondary" onClick={onCancel}>取消</button><button type="submit" className="primary" disabled={busy || !itemId || invalidQuantity || !reason.trim()}>{busy ? '登记中…' : '确认并留痕'}</button></div></form>
+}
+
+function AssetTab({ identity, hotelId, assets, participants, canManage, onSuccess, onError }: { identity: RoleContext; hotelId: string; assets: ResourceState<FixedAsset>; participants: HandoverParticipant[]; canManage: boolean; onSuccess: (message: string) => Promise<void>; onError: (message: string) => void }) {
+  const [showForm, setShowForm] = useState(false); const [editing, setEditing] = useState<FixedAsset>(); const command = useStableCommand(`store-resource-asset-${hotelId}`)
+  return <section className={styles.panel}><header><div><h2>固定资产</h2><p>登记资产编号、状态、位置、原值和当前责任人。</p></div>{canManage && <button type="button" className="primary" onClick={() => { setEditing(undefined); setShowForm(true) }}>登记资产</button>}</header>
+    {showForm && <AssetForm key={editing?.id ?? 'new-asset'} initial={editing} participants={participants} busy={command.busy} onCancel={() => { setShowForm(false); setEditing(undefined) }} onSubmit={async (input) => { try { await command.run((key) => editing ? updateFixedAsset(identity, hotelId, editing.id, input, editing.rowVersion, key) : createFixedAsset(identity, hotelId, input, key)); setShowForm(false); setEditing(undefined); await onSuccess(editing ? '固定资产已更新' : '固定资产已登记') } catch (reason) { onError(reason instanceof Error ? reason.message : '资产保存失败') } }} />}
+    <AsyncState loading={assets.loading} error={assets.error} empty={!assets.data.length} onRetry={assets.reload} emptyTitle="暂无固定资产" /><div className={styles.resourceList}>{assets.data.map((asset) => <article key={asset.id}><div><span className={styles.code}>{asset.assetCode}</span><h3>{asset.name}</h3><small>{asset.category}{asset.specification ? ` · ${asset.specification}` : ''}{asset.location ? ` · ${asset.location}` : ''}</small></div><dl><div><dt>状态</dt><dd>{statusLabel(asset.status)}</dd></div><div><dt>责任人</dt><dd>{asset.responsibleName ?? '未指定'}</dd></div><div><dt>资产原值</dt><dd>{money(asset.originalValue)}</dd></div></dl><footer>{asset.acquiredOn && <small>购置日期 {asset.acquiredOn}</small>}{canManage && asset.status !== 'RETIRED' && <><button type="button" className="secondary" onClick={() => { setEditing(asset); setShowForm(true) }}>编辑</button><button type="button" className="secondary" disabled={command.busy} onClick={() => { if (!window.confirm(`确认将资产“${asset.name}”退役？退役记录将永久保留。`)) return; void (async () => { try { await command.run((key) => retireFixedAsset(identity, hotelId, asset.id, key)); await onSuccess('固定资产已退役') } catch (reason) { onError(reason instanceof Error ? reason.message : '资产退役失败') } })() }}>退役</button></>}</footer></article>)}</div>
+  </section>
+}
+
+function AssetForm({ initial, participants, busy, onCancel, onSubmit }: { initial?: FixedAsset; participants: HandoverParticipant[]; busy: boolean; onCancel: () => void; onSubmit: (input: FixedAssetInput) => Promise<void> }) {
+  const [form, setForm] = useState({ assetCode: initial?.assetCode ?? '', name: initial?.name ?? '', category: initial?.category ?? '', specification: initial?.specification ?? '', serialNumber: initial?.serialNumber ?? '', unit: initial?.unit ?? '台', originalValue: String(initial?.originalValue ?? ''), acquiredOn: initial?.acquiredOn ?? '', location: initial?.location ?? '', responsibleAssignmentId: initial?.responsibleAssignmentId ?? '', status: initial?.status ?? 'ACTIVE' })
+  return <form className={styles.form} onSubmit={(event) => { event.preventDefault(); void onSubmit({ assetCode: form.assetCode.trim(), name: form.name.trim(), category: form.category.trim(), specification: form.specification.trim() || undefined, serialNumber: form.serialNumber.trim() || undefined, unit: form.unit.trim(), originalValue: Number(form.originalValue), acquiredOn: form.acquiredOn || undefined, location: form.location.trim() || undefined, responsibleAssignmentId: form.responsibleAssignmentId || undefined, status: form.status }) }}><h3>{initial ? '编辑固定资产' : '固定资产登记'}</h3><div className={styles.formGrid}>
+    <label>资产编号<input required maxLength={80} value={form.assetCode} onChange={(event) => setForm({ ...form, assetCode: event.target.value })} /></label><label>资产名称<input required maxLength={160} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label><label>资产分类<input required maxLength={80} value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} /></label><label>规格型号<input maxLength={240} value={form.specification} onChange={(event) => setForm({ ...form, specification: event.target.value })} /></label><label>序列号<input maxLength={160} value={form.serialNumber} onChange={(event) => setForm({ ...form, serialNumber: event.target.value })} /></label><label>计量单位<input required maxLength={32} value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} /></label><label>资产原值<input required type="number" min="0" step="0.01" value={form.originalValue} onChange={(event) => setForm({ ...form, originalValue: event.target.value })} /></label><label>购置日期<input type="date" value={form.acquiredOn} onChange={(event) => setForm({ ...form, acquiredOn: event.target.value })} /></label><label>存放位置<input maxLength={160} value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label><label>责任人<select value={form.responsibleAssignmentId} onChange={(event) => setForm({ ...form, responsibleAssignmentId: event.target.value })}><option value="">暂不指定</option>{participants.map((person) => <option key={person.assignmentId} value={person.assignmentId}>{person.employeeName} · {person.positionName}</option>)}</select></label><label>资产状态<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}><option value="ACTIVE">在用</option><option value="MAINTENANCE">维修中</option><option value="DAMAGED">损坏</option><option value="MISSING">盘亏</option><option value="RETIRED">已退役</option></select></label>
+  </div><div className={styles.actions}><button type="button" className="secondary" onClick={onCancel}>取消</button><button type="submit" className="primary" disabled={busy || !form.originalValue}>{busy ? '登记中…' : '登记资产'}</button></div></form>
+}
+
+function HandoverTab({ identity, hotelId, handovers, participants, canCreate, canConfirm, canApprove, onSuccess, onError }: { identity: RoleContext; hotelId: string; handovers: ResourceState<StoreResourceHandover>; participants: HandoverParticipant[]; canCreate: boolean; canConfirm: boolean; canApprove: boolean; onSuccess: (message: string) => Promise<void>; onError: (message: string) => void }) {
+  const [showForm, setShowForm] = useState(false); const [countingDetail, setCountingDetail] = useState<StoreResourceHandoverDetail>(); const [loadingCountId, setLoadingCountId] = useState<string>(); const command = useStableCommand(`store-resource-handover-${hotelId}`); const currentAssignmentId = identity.businessActorAssignmentId
+  const runAction = async (action: (key: string) => Promise<unknown>, successMessage: string) => { try { await command.run(action); setCountingDetail(undefined); await onSuccess(successMessage) } catch (reason) { onError(reason instanceof Error ? reason.message : '移交操作失败') } }
+  const openCount = async (handover: StoreResourceHandover) => { setLoadingCountId(handover.id); try { setCountingDetail(await loadStoreResourceHandover(identity, handover.id)) } catch (reason) { onError(reason instanceof Error ? reason.message : '读取盘点明细失败') } finally { setLoadingCountId(undefined) } }
+  return <section className={styles.panel}><header><div><h2>资产与库存异动移交</h2><p>自动生成账面快照；有异议才进入实物盘点，随后由移交人、签收人、审批人依次确认并永久留痕。</p></div>{canCreate && <button type="button" className="primary" onClick={() => setShowForm((value) => !value)}>发起移交</button>}</header>
+    {showForm && <HandoverForm participants={participants} busy={command.busy} onCancel={() => setShowForm(false)} onSubmit={async (input) => { try { await command.run((key) => createStoreResourceHandover(identity, hotelId, input, key)); setShowForm(false); await onSuccess('移交已发起并生成账面快照') } catch (reason) { onError(reason instanceof Error ? reason.message : '发起移交失败') } }} />}
+    <AsyncState loading={handovers.loading} error={handovers.error} empty={!handovers.data.length} onRetry={handovers.reload} emptyTitle="暂无异动移交记录" /><div className={styles.handoverList}>{handovers.data.map((handover) => { const isTransferor = currentAssignmentId === handover.transferorAssignmentId; const isRecipient = currentAssignmentId === handover.recipientAssignmentId; const isApprover = currentAssignmentId === handover.approverAssignmentId; return <article key={handover.id}><header><div><span>{handover.handoverNo ?? handover.id.slice(0, 8).toUpperCase()}</span><h3>{statusLabel(handover.status)}</h3></div><b>{handover.disputeDecision === 'OBJECTION' ? '有异议' : handover.disputeDecision === 'NO_OBJECTION' ? '无异议' : '待确认'}</b></header><div className={styles.handoverPeople}><span>移交人<strong>{handover.transferorName}</strong></span><i>→</i><span>签收人<strong>{handover.recipientName}</strong></span><i>→</i><span>审批人<strong>{handover.approverName}</strong></span></div><p>账面快照共 {handover.lineCount} 项{handover.disputeReason ? ` · 异议说明：${handover.disputeReason}` : ''}</p><small>发起 {formatLocalDateTime(handover.createdAt)}{handover.snapshotAt ? ` · 快照 ${formatLocalDateTime(handover.snapshotAt)}` : ''}</small><footer>
+      {canConfirm && (isTransferor || isRecipient) && handover.status === 'AWAITING_DISPUTE_DECISION' && <><button type="button" className="primary" disabled={command.busy} onClick={() => void runAction((key) => decideStoreResourceHandoverDispute(identity, handover.id, false, undefined, handover.rowVersion, key), '已确认账面快照无异议')}>无异议</button><button type="button" className="secondary" disabled={command.busy} onClick={() => { const reason = window.prompt('请填写异议原因'); if (reason?.trim()) void runAction((key) => decideStoreResourceHandoverDispute(identity, handover.id, true, reason.trim(), handover.rowVersion, key), '异议已登记，请完成实物盘点') }}>有异议</button></>}
+      {canConfirm && isTransferor && handover.status === 'PHYSICAL_COUNT_REQUIRED' && <button type="button" className="primary" disabled={loadingCountId === handover.id || command.busy} onClick={() => void openCount(handover)}>{loadingCountId === handover.id ? '读取中…' : '填写实物盘点'}</button>}
+      {canConfirm && isTransferor && handover.status === 'AWAITING_TRANSFEROR_CONFIRMATION' && <button type="button" className="primary" disabled={command.busy} onClick={() => void runAction((key) => confirmStoreResourceHandover(identity, handover.id, 'transferor', handover.rowVersion, key), '移交人已确认')}>移交人确认</button>}
+      {canConfirm && isRecipient && handover.status === 'AWAITING_RECIPIENT_CONFIRMATION' && <button type="button" className="primary" disabled={command.busy} onClick={() => void runAction((key) => confirmStoreResourceHandover(identity, handover.id, 'recipient', handover.rowVersion, key), '签收人已确认')}>签收确认</button>}
+      {canApprove && isApprover && handover.status === 'AWAITING_APPROVAL' && <><button type="button" className="primary" disabled={command.busy} onClick={() => void runAction((key) => approveStoreResourceHandover(identity, handover.id, true, undefined, handover.rowVersion, key), '审批通过，责任已正式转移')}>审批通过</button><button type="button" className="secondary" disabled={command.busy} onClick={() => { const reason = window.prompt('请填写拒绝原因'); if (reason?.trim()) void runAction((key) => approveStoreResourceHandover(identity, handover.id, false, reason.trim(), handover.rowVersion, key), '移交已拒绝') }}>拒绝</button></>}
+    </footer>{countingDetail?.id === handover.id && <PhysicalCountForm key={countingDetail.id} detail={countingDetail} busy={command.busy} onCancel={() => setCountingDetail(undefined)} onSubmit={(lines, note) => runAction((key) => submitStoreResourcePhysicalCount(identity, handover.id, lines, note, countingDetail.rowVersion, key), '实物盘点已提交')} />}</article> })}</div>
+  </section>
+}
+
+function PhysicalCountForm({ detail, busy, onCancel, onSubmit }: { detail: StoreResourceHandoverDetail; busy: boolean; onCancel: () => void; onSubmit: (lines: Array<{ lineId: string; physicalQuantity?: number; physicalState?: string; differenceReason?: string }>, note?: string) => Promise<void> }) {
+  const [rows, setRows] = useState(() => detail.lines.map((line) => ({ lineId: line.id, physicalQuantity: line.physicalQuantity === undefined ? (line.bookQuantity === undefined ? '' : String(line.bookQuantity)) : String(line.physicalQuantity), physicalState: line.physicalState ?? line.bookState ?? 'ACTIVE', differenceReason: line.differenceReason ?? '' }))); const [note, setNote] = useState(''); const lineById = new Map(detail.lines.map((line) => [line.id, line])); const change = (lineId: string, patch: Partial<(typeof rows)[number]>) => setRows((current) => current.map((row) => row.lineId === lineId ? { ...row, ...patch } : row)); const invalid = rows.some((row) => lineById.get(row.lineId)?.resourceType === 'INVENTORY' && (row.physicalQuantity === '' || Number(row.physicalQuantity) < 0))
+  return <form className={styles.form} onSubmit={(event) => { event.preventDefault(); void onSubmit(rows.map((row) => lineById.get(row.lineId)?.resourceType === 'INVENTORY' ? { lineId: row.lineId, physicalQuantity: Number(row.physicalQuantity), differenceReason: row.differenceReason.trim() || undefined } : { lineId: row.lineId, physicalState: row.physicalState, differenceReason: row.differenceReason.trim() || undefined }), note.trim() || undefined) }}><h3>实物盘点</h3><p>逐项核对快照；数量或状态不一致时填写差异原因。</p>{rows.map((row) => { const line = lineById.get(row.lineId)!; return <div className={styles.formGrid} key={row.lineId}><label>{line.resourceName}<small>账面：{line.resourceType === 'INVENTORY' ? `${numeric(line.bookQuantity ?? 0)} ${line.unit ?? ''}` : statusLabel(line.bookState ?? 'ACTIVE')}</small>{line.resourceType === 'INVENTORY' ? <input required type="number" min="0" step="0.01" value={row.physicalQuantity} onChange={(event) => change(row.lineId, { physicalQuantity: event.target.value })} /> : <select value={row.physicalState} onChange={(event) => change(row.lineId, { physicalState: event.target.value })}><option value="ACTIVE">在用</option><option value="MAINTENANCE">维修中</option><option value="DAMAGED">损坏</option><option value="MISSING">盘亏</option><option value="RETIRED">已退役</option></select>}</label><label>差异原因（如有）<input maxLength={2000} value={row.differenceReason} onChange={(event) => change(row.lineId, { differenceReason: event.target.value })} /></label></div> })}<label>盘点说明<textarea rows={3} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} /></label><div className={styles.actions}><button type="button" className="secondary" onClick={onCancel}>取消</button><button type="submit" className="primary" disabled={busy || invalid}>{busy ? '提交中…' : '提交实物盘点'}</button></div></form>
+}
+
+function HandoverForm({ participants, busy, onCancel, onSubmit }: { participants: HandoverParticipant[]; busy: boolean; onCancel: () => void; onSubmit: (input: StoreResourceHandoverInput) => Promise<void> }) {
+  const [transferorAssignmentId, setTransferorAssignmentId] = useState('')
+  const [recipientAssignmentId, setRecipientAssignmentId] = useState('')
+  const [approverAssignmentId, setApproverAssignmentId] = useState('')
+  const [note, setNote] = useState('')
+  const confirmingParticipants = participants.filter((person) => person.canConfirmHandover)
+  const approvingParticipants = participants.filter((person) => person.canApproveHandover)
+  const participantByAssignment = new Map(participants.map((person) => [person.assignmentId, person]))
+  const transferorEmployeeId = participantByAssignment.get(transferorAssignmentId)?.employeeId
+  const recipientEmployeeId = participantByAssignment.get(recipientAssignmentId)?.employeeId
+  const selectedEmployeeIds = [transferorAssignmentId, recipientAssignmentId, approverAssignmentId]
+    .map((assignmentId) => participantByAssignment.get(assignmentId)?.employeeId)
+    .filter((employeeId): employeeId is string => Boolean(employeeId))
+  const distinctPeople = selectedEmployeeIds.length === 3 && new Set(selectedEmployeeIds).size === 3
+  const confirmingIds = new Set(confirmingParticipants.map((person) => person.assignmentId))
+  const approvingIds = new Set(approvingParticipants.map((person) => person.assignmentId))
+  const eligible = confirmingIds.has(transferorAssignmentId)
+    && confirmingIds.has(recipientAssignmentId)
+    && approvingIds.has(approverAssignmentId)
+  const option = (person: HandoverParticipant) => <option key={person.assignmentId} value={person.assignmentId}>{person.employeeName} · {person.positionName}</option>
+  return <form className={styles.form} onSubmit={(event) => { event.preventDefault(); void onSubmit({ transferorAssignmentId, recipientAssignmentId, approverAssignmentId, note: note.trim() || undefined }) }}><h3>发起门店资产与库存移交</h3><div className={styles.formGrid}><label>移交人<select required value={transferorAssignmentId} onChange={(event) => setTransferorAssignmentId(event.target.value)}><option value="">请选择</option>{confirmingParticipants.map(option)}</select></label><label>签收人<select required value={recipientAssignmentId} onChange={(event) => setRecipientAssignmentId(event.target.value)}><option value="">请选择</option>{confirmingParticipants.filter((person) => person.employeeId !== transferorEmployeeId).map(option)}</select></label><label>审批人<select required value={approverAssignmentId} onChange={(event) => setApproverAssignmentId(event.target.value)}><option value="">请选择</option>{approvingParticipants.filter((person) => person.employeeId !== transferorEmployeeId && person.employeeId !== recipientEmployeeId).map(option)}</select></label><label className={styles.full}>移交说明<textarea rows={3} maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label></div><div className="inline-warning">移交人、签收人需要移交确认权限，审批人需要移交审批权限，且三方必须为不同人员；发起后由服务端冻结当时的账面快照。</div><div className={styles.actions}><button type="button" className="secondary" onClick={onCancel}>取消</button><button type="submit" className="primary" disabled={busy || !transferorAssignmentId || !recipientAssignmentId || !approverAssignmentId || !distinctPeople || !eligible}>{busy ? '发起中…' : '生成快照并发起'}</button></div></form>
+}

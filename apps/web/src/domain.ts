@@ -15,6 +15,7 @@ export type ViewId =
   | 'notifications'
   | 'templates'
   | 'organization'
+  | 'store-resources'
   | 'data-retention'
   | 'wecom-webhooks'
   | 'wecom-bindings'

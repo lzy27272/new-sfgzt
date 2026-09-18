@@ -105,6 +105,15 @@ export const permissions = Object.freeze({
     read: 'executive-task.read',
     assign: 'executive-task.assign',
   },
+  storeResource: {
+    read: 'store-resource.read',
+    itemManage: 'store-resource.item-manage',
+    movementCreate: 'store-resource.movement-create',
+    assetManage: 'store-resource.asset-manage',
+    handoverCreate: 'store-resource.handover-create',
+    handoverConfirm: 'store-resource.handover-confirm',
+    handoverApprove: 'store-resource.handover-approve',
+  },
 })
 
 export function hasPermission(granted: string[], permission: string): boolean {

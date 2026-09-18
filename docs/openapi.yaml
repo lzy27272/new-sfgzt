@@ -29,6 +29,7 @@ tags:
   - name: Metrics
   - name: Dashboard
   - name: Enterprise Template
+  - name: Store Resource
 paths:
   /api/v1/org/units:
     get:
@@ -1488,6 +1489,341 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/ObjectResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreResourceHotels
+      summary: List hotels visible to the current identity for inventory and asset management
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/items:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreResourceItems
+      summary: List configured consumables, linen, cleaning supplies and operating items
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - name: includeInactive
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Store Resource]
+      operationId: createStoreResourceItem
+      summary: Create a hotel inventory item configuration
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStoreResourceItem' }
+      responses:
+        '201': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/summary:
+    get:
+      tags: [Store Resource]
+      operationId: getStoreResourceSummary
+      summary: Get item, low-stock, fixed-asset, open-handover and inventory-value totals
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/items/{itemId}:
+    put:
+      tags: [Store Resource]
+      operationId: updateStoreResourceItem
+      summary: Update a hotel inventory item using optimistic locking
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreResourceItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateStoreResourceItem' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Store Resource]
+      operationId: deactivateStoreResourceItem
+      summary: Deactivate an inventory item that is no longer used
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreResourceItemId'
+      responses:
+        '204': { description: Item deactivated }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/items/{itemId}/actions/enable:
+    post:
+      tags: [Store Resource]
+      operationId: enableStoreResourceItem
+      summary: Enable an inventory item using optimistic locking
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreResourceItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StoreResourceVersionCommand' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/items/{itemId}/actions/disable:
+    post:
+      tags: [Store Resource]
+      operationId: disableStoreResourceItem
+      summary: Disable an inventory item using optimistic locking
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreResourceItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StoreResourceVersionCommand' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/balances:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreInventoryBalances
+      summary: List current item quantities, values and low-stock state for a hotel
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/movements:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreInventoryMovements
+      summary: List the append-only inventory movement ledger for a hotel
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100 }
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Store Resource]
+      operationId: createStoreInventoryMovement
+      summary: Record an idempotent receipt, consumption, return, damage or adjustment
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStoreInventoryMovement' }
+      responses:
+        '201': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/assets:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreFixedAssets
+      summary: List fixed assets for a hotel
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - name: includeRetired
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Store Resource]
+      operationId: createStoreFixedAsset
+      summary: Register a fixed asset
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStoreFixedAsset' }
+      responses:
+        '201': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/assets/{assetId}:
+    put:
+      tags: [Store Resource]
+      operationId: updateStoreFixedAsset
+      summary: Update a fixed asset using optimistic locking
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreFixedAssetId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateStoreFixedAsset' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Store Resource]
+      operationId: retireStoreFixedAsset
+      summary: Retire a fixed asset
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreFixedAssetId'
+      responses:
+        '204': { description: Asset retired }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/assignment-options:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreResourceAssignmentOptions
+      summary: List active same-hotel assignments eligible for asset responsibility or handover roles
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/handovers:
+    get:
+      tags: [Store Resource]
+      operationId: listStoreResourceHandovers
+      summary: List inventory and asset handovers for a hotel
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Store Resource]
+      operationId: createStoreResourceHandover
+      summary: Create a three-party handover and take an immutable book snapshot
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStoreResourceHandover' }
+      responses:
+        '201': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/handovers/{handoverId}:
+    get:
+      tags: [Store Resource]
+      operationId: getStoreResourceHandover
+      summary: Get a handover with snapshot lines and immutable action history
+      parameters:
+        - $ref: '#/components/parameters/StoreResourceHandoverId'
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/handovers/{handoverId}/actions/dispute-decision:
+    post:
+      tags: [Store Resource]
+      operationId: decideStoreResourceHandoverDispute
+      summary: Record whether the recipient disputes the generated book snapshot
+      parameters:
+        - $ref: '#/components/parameters/StoreResourceHandoverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StoreResourceDisputeDecision' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/handovers/{handoverId}/actions/physical-count:
+    post:
+      tags: [Store Resource]
+      operationId: recordStoreResourceHandoverPhysicalCount
+      summary: Record physical counts and asset states when the snapshot is disputed
+      parameters:
+        - $ref: '#/components/parameters/StoreResourceHandoverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StoreResourcePhysicalCount' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/handovers/{handoverId}/actions/transferor-confirm:
+    post:
+      tags: [Store Resource]
+      operationId: confirmStoreResourceHandoverTransferor
+      summary: Confirm the handover as the transferor
+      parameters:
+        - $ref: '#/components/parameters/StoreResourceHandoverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StoreResourceVersionCommand' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/handovers/{handoverId}/actions/recipient-confirm:
+    post:
+      tags: [Store Resource]
+      operationId: confirmStoreResourceHandoverRecipient
+      summary: Confirm the handover as the recipient
+      parameters:
+        - $ref: '#/components/parameters/StoreResourceHandoverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StoreResourceVersionCommand' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/handovers/{handoverId}/actions/approve:
+    post:
+      tags: [Store Resource]
+      operationId: approveStoreResourceHandover
+      summary: Approve or reject the handover as its configured approver
+      parameters:
+        - $ref: '#/components/parameters/StoreResourceHandoverId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApproveStoreResourceHandover' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
 components:
   securitySchemes:
     BearerAuth:
@@ -1523,6 +1859,9 @@ components:
     EvaluationId: { name: evaluationId, in: path, required: true, schema: { type: string, format: uuid } }
     NotificationId: { name: notificationId, in: path, required: true, schema: { type: string, format: uuid } }
     HotelId: { name: hotelId, in: path, required: true, schema: { type: string, format: uuid } }
+    StoreResourceItemId: { name: itemId, in: path, required: true, schema: { type: string, format: uuid } }
+    StoreFixedAssetId: { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
+    StoreResourceHandoverId: { name: handoverId, in: path, required: true, schema: { type: string, format: uuid } }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -2414,3 +2753,134 @@ components:
         hotels:
           type: array
           items: { $ref: '#/components/schemas/OperationsHotel' }
+    CreateStoreResourceItem:
+      type: object
+      additionalProperties: false
+      required: [sku, name, category, unit, unitCost, minimumQuantity]
+      properties:
+        sku: { type: string, minLength: 1, maxLength: 80 }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        category:
+          type: string
+          enum: [CONSUMABLE, LINEN, CLEANING_SUPPLY, OPERATING_ITEM]
+        unit: { type: string, minLength: 1, maxLength: 32 }
+        unitCost: { type: number, minimum: 0 }
+        minimumQuantity: { type: number, minimum: 0 }
+    UpdateStoreResourceItem:
+      type: object
+      additionalProperties: false
+      required: [sku, name, category, unit, unitCost, minimumQuantity, expectedVersion]
+      properties:
+        sku: { type: string, minLength: 1, maxLength: 80 }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        category:
+          type: string
+          enum: [CONSUMABLE, LINEN, CLEANING_SUPPLY, OPERATING_ITEM]
+        unit: { type: string, minLength: 1, maxLength: 32 }
+        unitCost: { type: number, minimum: 0 }
+        minimumQuantity: { type: number, minimum: 0 }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+    StoreResourceVersionCommand:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+        reason: { type: [string, 'null'] }
+    CreateStoreInventoryMovement:
+      type: object
+      additionalProperties: false
+      required: [itemId, movementType, quantity, reason]
+      properties:
+        itemId: { type: string, format: uuid }
+        movementType:
+          type: string
+          enum: [RECEIPT, CONSUMPTION, RETURN, DAMAGE, ADJUSTMENT]
+        quantity:
+          type: number
+          description: Quantity magnitude for receipt, consumption, return and damage; signed delta for adjustment.
+        unitCost: { type: [number, 'null'], minimum: 0 }
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        occurredAt: { type: [string, 'null'], format: date-time }
+    CreateStoreFixedAsset:
+      type: object
+      additionalProperties: false
+      required: [assetCode, name, category, unit, originalValue]
+      properties:
+        assetCode: { type: string, minLength: 1, maxLength: 80 }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        category: { type: string, minLength: 1, maxLength: 80 }
+        specification: { type: [string, 'null'], maxLength: 240 }
+        serialNumber: { type: [string, 'null'], maxLength: 160 }
+        unit: { type: string, minLength: 1, maxLength: 32 }
+        originalValue: { type: number, minimum: 0 }
+        acquiredOn: { type: [string, 'null'], format: date }
+        location: { type: [string, 'null'], maxLength: 160 }
+        responsibleAssignmentId: { type: [string, 'null'], format: uuid }
+        status:
+          type: [string, 'null']
+          enum: [ACTIVE, MAINTENANCE, DAMAGED, MISSING, RETIRED, null]
+    UpdateStoreFixedAsset:
+      type: object
+      additionalProperties: false
+      required: [assetCode, name, category, unit, originalValue, status, expectedVersion]
+      properties:
+        assetCode: { type: string, minLength: 1, maxLength: 80 }
+        name: { type: string, minLength: 1, maxLength: 160 }
+        category: { type: string, minLength: 1, maxLength: 80 }
+        specification: { type: [string, 'null'], maxLength: 240 }
+        serialNumber: { type: [string, 'null'], maxLength: 160 }
+        unit: { type: string, minLength: 1, maxLength: 32 }
+        originalValue: { type: number, minimum: 0 }
+        acquiredOn: { type: [string, 'null'], format: date }
+        location: { type: [string, 'null'], maxLength: 160 }
+        responsibleAssignmentId: { type: [string, 'null'], format: uuid }
+        status:
+          type: string
+          enum: [ACTIVE, MAINTENANCE, DAMAGED, MISSING, RETIRED]
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+    CreateStoreResourceHandover:
+      type: object
+      additionalProperties: false
+      required: [transferorAssignmentId, recipientAssignmentId, approverAssignmentId]
+      properties:
+        transferorAssignmentId: { type: string, format: uuid }
+        recipientAssignmentId: { type: string, format: uuid }
+        approverAssignmentId: { type: string, format: uuid }
+        note: { type: [string, 'null'], maxLength: 1000 }
+    StoreResourceDisputeDecision:
+      type: object
+      additionalProperties: false
+      required: [hasDispute, expectedVersion]
+      properties:
+        hasDispute: { type: boolean }
+        reason: { type: [string, 'null'], maxLength: 2000 }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+    StoreResourcePhysicalCountLine:
+      type: object
+      additionalProperties: false
+      required: [lineId]
+      properties:
+        lineId: { type: string, format: uuid }
+        physicalQuantity: { type: [number, 'null'], minimum: 0 }
+        physicalState: { type: [string, 'null'] }
+        differenceReason: { type: [string, 'null'], maxLength: 2000 }
+    StoreResourcePhysicalCount:
+      type: object
+      additionalProperties: false
+      required: [lines, expectedVersion]
+      properties:
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/StoreResourcePhysicalCountLine' }
+        note: { type: [string, 'null'], maxLength: 2000 }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+    ApproveStoreResourceHandover:
+      type: object
+      additionalProperties: false
+      required: [approved, expectedVersion]
+      properties:
+        approved: { type: boolean }
+        reason: { type: [string, 'null'], maxLength: 2000 }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }

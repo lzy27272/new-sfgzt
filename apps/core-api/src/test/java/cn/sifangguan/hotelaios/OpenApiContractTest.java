@@ -46,8 +46,64 @@ class OpenApiContractTest {
         assertThat(list(accessibleHotel.get("required"))).containsExactly("id", "code", "name");
     }
 
+    @Test
+    void storeResourceContractsExposeInventoryAssetsAndThreePartyHandover() throws IOException {
+        LoaderOptions options = new LoaderOptions();
+        options.setAllowDuplicateKeys(false);
+        Map<String, Object> document;
+        try (Reader reader = Files.newBufferedReader(openApiPath())) {
+            document = map(new Yaml(new SafeConstructor(options)).load(reader));
+        }
+
+        Map<String, Object> paths = map(document.get("paths"));
+        assertThat(paths).containsKeys(
+                "/api/v1/store-resources/hotels",
+                "/api/v1/store-resources/hotels/{hotelId}/items",
+                "/api/v1/store-resources/hotels/{hotelId}/items/{itemId}",
+                "/api/v1/store-resources/hotels/{hotelId}/summary",
+                "/api/v1/store-resources/hotels/{hotelId}/balances",
+                "/api/v1/store-resources/hotels/{hotelId}/movements",
+                "/api/v1/store-resources/hotels/{hotelId}/assets",
+                "/api/v1/store-resources/hotels/{hotelId}/assignment-options",
+                "/api/v1/store-resources/hotels/{hotelId}/handovers",
+                "/api/v1/store-resources/handovers/{handoverId}",
+                "/api/v1/store-resources/handovers/{handoverId}/actions/dispute-decision",
+                "/api/v1/store-resources/handovers/{handoverId}/actions/physical-count",
+                "/api/v1/store-resources/handovers/{handoverId}/actions/transferor-confirm",
+                "/api/v1/store-resources/handovers/{handoverId}/actions/recipient-confirm",
+                "/api/v1/store-resources/handovers/{handoverId}/actions/approve"
+        );
+
+        Map<String, Object> movementPost = map(map(paths.get(
+                "/api/v1/store-resources/hotels/{hotelId}/movements")).get("post"));
+        assertThat(list(movementPost.get("parameters")))
+                .extracting(parameter -> String.valueOf(map(parameter).get("$ref")))
+                .contains("#/components/parameters/HotelId", "#/components/parameters/IdempotencyKey");
+        assertThat(requestSchemaRef(movementPost))
+                .isEqualTo("#/components/schemas/CreateStoreInventoryMovement");
+
+        Map<String, Object> createHandover = map(map(paths.get(
+                "/api/v1/store-resources/hotels/{hotelId}/handovers")).get("post"));
+        assertThat(requestSchemaRef(createHandover))
+                .isEqualTo("#/components/schemas/CreateStoreResourceHandover");
+
+        Map<String, Object> schemas = map(map(document.get("components")).get("schemas"));
+        assertThat(list(map(schemas.get("CreateStoreResourceHandover")).get("required")))
+                .containsExactly("transferorAssignmentId", "recipientAssignmentId", "approverAssignmentId");
+        assertThat(list(map(schemas.get("StoreResourcePhysicalCount")).get("required")))
+                .containsExactly("lines", "expectedVersion");
+        assertThat(list(map(map(map(schemas.get("CreateStoreResourceItem"))
+                .get("properties")).get("category")).get("enum")))
+                .containsExactly("CONSUMABLE", "LINEN", "CLEANING_SUPPLY", "OPERATING_ITEM");
+    }
+
     private static String responseSchemaRef(Map<String, Object> operation) {
         return String.valueOf(map(map(map(map(map(operation.get("responses")).get("200"))
+                .get("content")).get("application/json")).get("schema")).get("$ref"));
+    }
+
+    private static String requestSchemaRef(Map<String, Object> operation) {
+        return String.valueOf(map(map(map(map(operation.get("requestBody"))
                 .get("content")).get("application/json")).get("schema")).get("$ref"));
     }
 

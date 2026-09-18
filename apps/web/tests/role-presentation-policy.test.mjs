@@ -54,6 +54,14 @@ function migrationRoleModuleMatrix() {
       }
     }
   }
+  const storeResourceMigration = readFileSync(new URL('../../../database/migrations/V58__store_inventory_assets_and_handover.sql', import.meta.url), 'utf8')
+  if (storeResourceMigration.includes("'ui.module.store-resources'")
+      && storeResourceMigration.includes("role_item.code IN ('PLATFORM_ADMIN', 'GROUP_ADMIN')")) {
+    for (const roleCode of ['PLATFORM_ADMIN', 'GROUP_ADMIN']) {
+      const moduleIds = result.get(roleCode) ?? []
+      result.set(roleCode, [...new Set([...moduleIds, 'store-resources'])])
+    }
+  }
   return result
 }
 
@@ -158,7 +166,7 @@ test('desktop module allowlists match every frozen role template', () => {
     GROUP_VICE_PRESIDENT: ['workbench', 'operations-dashboard', 'tasks', 'daily-reports-my', 'daily-operations', 'kpi-center', 'notifications', 'all-functions'],
     GROUP_CHAIRMAN: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'team-work', 'tasks', 'daily-reports-my', 'daily-operations', 'evaluations', 'notifications'],
     CEO: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'investments', 'team-work', 'tasks', 'daily-reports-my', 'daily-report-templates', 'daily-operations', 'kpi-center', 'evaluations', 'templates', 'organization', 'wecom-bindings', 'wecom-onboarding', 'notifications', 'all-functions'],
-    PLATFORM_ADMIN: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'investments', 'work-packages', 'my-work', 'team-work', 'tasks', 'daily-reports-my', 'daily-report-templates', 'daily-operations', 'kpi-center', 'rules', 'evaluations', 'templates', 'organization', 'wecom-webhooks', 'wecom-bindings', 'wecom-onboarding', 'notifications', 'all-functions'],
+    PLATFORM_ADMIN: ['workbench', 'hotel-dashboard', 'operations-dashboard', 'investments', 'work-packages', 'my-work', 'team-work', 'tasks', 'daily-reports-my', 'daily-report-templates', 'daily-operations', 'kpi-center', 'rules', 'evaluations', 'templates', 'organization', 'wecom-webhooks', 'wecom-bindings', 'wecom-onboarding', 'notifications', 'all-functions', 'store-resources'],
   }
   for (const [roleCode, expected] of Object.entries(cases)) {
     assert.deepEqual(resolveRolePresentationPolicy(roleCode).desktopModuleIds, expected, roleCode)
