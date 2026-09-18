@@ -33,6 +33,13 @@ public class PositionManagementController {
         return service.functionOptions(positionId);
     }
 
+    @GetMapping("/profile-context")
+    public PositionManagementModels.ProfileContext profileContext(
+            @RequestParam(required = false) UUID positionId
+    ) {
+        return service.profileContext(positionId);
+    }
+
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public PositionManagementModels.PositionSummary create(

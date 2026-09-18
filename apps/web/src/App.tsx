@@ -69,7 +69,6 @@ import {
   type AppRouteId,
 } from './app/routeConfig'
 import {
-  applyPublishedModuleVisibility,
   isRouteAllowedByRoleDefaults,
   resolveDailyReportsTarget,
   resolveFullAccountPresentationRole,
@@ -77,6 +76,7 @@ import {
   shouldUseRoleDefaultsFallback,
 } from './app/rolePresentationPolicy'
 import { buildNavigationCenters, canOpenStoreResources, navigationCenterForSection } from './app/navigationModel'
+import { navigation, visibleNavigationForContext } from './app/navigationAccess'
 import { CenterFeatureNavigation, MainCenterNavigation } from './shared/CenterNavigation'
 import { resolveNotificationNavigation } from './app/notificationNavigation'
 import { useHashRoute } from './app/useHashRoute'
@@ -124,31 +124,6 @@ const DataRetentionAdministration = lazy(() => import('./features/dataRetention/
 const StoreResourceFeature = lazy(() => import('./features/storeResources/StoreResourceRoutes').then((module) => ({ default: module.StoreResourceRoutes })))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
-
-const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; icon: string; group?: string; permissions?: string[]; administratorOnly?: boolean }> = [
-  { id: 'workbench', label: '角色工作台', icon: '⌂' },
-  { id: 'hotel-dashboard', label: '门店工作台', icon: '▤', permissions: ['dashboard.hotel'] },
-  { id: 'operations-dashboard', label: '多门店工作台', icon: '▥', permissions: ['dashboard.operations'] },
-  { id: 'investments', label: '投资测算', icon: '¥', group: '投资决策', permissions: [permissionCodes.investment.read] },
-  { id: 'work-packages', label: '岗位工作模板', icon: '▦', group: '标准与工作', permissions: ['work-package.read', 'work-package.manage', 'standard.read'] },
-  { id: 'my-work', label: '我的工作', icon: '✓', permissions: ['work-record.read', 'work-record.submit', 'work.submit'] },
-  { id: 'team-work', label: '团队工作', icon: '◎', permissions: [permissionCodes.workRecord.readTeam, 'work-record.review'] },
-  { id: 'daily-reports-my', sectionId: 'daily-reports', label: '日报中心', icon: '▣', group: '日报与运营', permissions: [permissionCodes.dailyReport.readOwn, permissionCodes.dailyReport.submit, permissionCodes.dailyReport.readTeam] },
-  { id: 'daily-operations', label: '日运营中心', icon: '◫', permissions: [permissionCodes.dailyOperations.readHotel, permissionCodes.dailyOperations.readCrossHotel] },
-  { id: 'kpi-center', sectionId: 'kpi', label: 'KPI绩效中心', icon: '◎', group: '行政人事', permissions: [permissionCodes.kpi.scorecardReadOwn, permissionCodes.kpi.scorecardReadTeam, permissionCodes.kpi.scorecardReadAll, permissionCodes.kpi.templateRead] },
-  { id: 'rules', label: '企业规则中心', icon: '◇', group: '管理闭环', permissions: ['rule.read', 'rule.manage'] },
-  { id: 'tasks', label: '任务中心', icon: '↗', permissions: ['task.read', 'task.act', 'task.review', permissionCodes.executiveTask.read, permissionCodes.executiveTask.assign] },
-  { id: 'evaluations', label: '标准评价', icon: '★', permissions: ['evaluation.read', 'evaluation.manual-review'] },
-  { id: 'notifications', label: '通知中心', icon: '◉', permissions: ['notification.read'] },
-  { id: 'templates', label: '集团模板配置', icon: '▧', group: '系统配置', permissions: ['template.manage'] },
-  { id: 'daily-report-templates', label: '日报模板中心', icon: '▤', permissions: [permissionCodes.dailyReportTemplate.read, permissionCodes.dailyReportTemplate.edit, permissionCodes.dailyReportTemplate.publish] },
-  { id: 'organization', label: '组织与权限', icon: '⚙', group: '系统配置', permissions: ['org.manage', 'position-profile.read'] },
-  { id: 'store-resources', label: '库存与固定资产', icon: '库', group: '系统配置', permissions: [permissionCodes.storeResource.read] },
-  { id: 'data-retention', label: '数据留存策略', icon: '◷', group: '系统配置', administratorOnly: true },
-  { id: 'wecom-webhooks', label: '企业微信 Webhook', icon: '◉', group: '系统配置', permissions: ['org.manage'] },
-  { id: 'wecom-onboarding', label: '企业微信入职审核', icon: '人', group: '系统配置', permissions: [permissionCodes.wecomBinding.read] },
-  { id: 'wecom-bindings', label: '企微绑定与异常', icon: '◎', permissions: [permissionCodes.wecomBinding.read] },
-]
 
 const roleStorageKey = 'hotel-ai-os-role:v1'
 const statusText: Record<string, string> = {
@@ -1793,35 +1768,15 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const pilotDemoMode = demoFallbackEnabled && me.source === 'demo'
   const isChairmanContext = presentationRoleCode === 'GROUP_CHAIRMAN'
   const executiveTasksEnabled = me.data.capabilities.groupManagement.executiveTasksEnabled
-  const permissionVisibleNavigation = useMemo(() => navigation.filter((item) => {
-    if (item.administratorOnly && !isDataRetentionAdministrator) return false
-    if (['hotel-dashboard', 'operations-dashboard'].includes(item.id)) return false
-    if (['rules', 'work-packages'].includes(item.id) && !isPlatformAdmin) return false
-    if (item.id === 'my-work' && !activeIdentity.businessActorAssignmentId) return false
-    if (item.id === 'tasks' && isChairmanContext) {
-      return executiveTasksEnabled && Boolean(activeIdentity.businessActorAssignmentId) &&
-        (activePermissions.includes('*') || activePermissions.includes(permissionCodes.executiveTask.read) || activePermissions.includes(permissionCodes.executiveTask.assign))
-    }
-    return !item.permissions?.length ||
-      (demoFallbackEnabled && me.source === 'demo' && !isDailyFeatureRoute(item.id) && !isInvestmentFeatureRoute(item.id)) ||
-      activePermissions.includes('*') ||
-      item.permissions.some((permission) => activePermissions.includes(permission))
-  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.source])
-  const publishedModuleNavigation = useMemo(
-    () => applyPublishedModuleVisibility(
-      permissionVisibleNavigation,
-      activePermissions,
-      presentationRoleCode,
-    ),
-    [activePermissions, permissionVisibleNavigation, presentationRoleCode],
-  )
-  const visibleNavigation = useMemo(() => {
-    if (!isDataRetentionAdministrator || publishedModuleNavigation.some((item) => item.id === 'data-retention')) {
-      return publishedModuleNavigation
-    }
-    const visibleIds = new Set(publishedModuleNavigation.map((item) => item.id))
-    return navigation.filter((item) => visibleIds.has(item.id) || item.id === 'data-retention')
-  }, [isDataRetentionAdministrator, publishedModuleNavigation])
+  const visibleNavigation = useMemo(() => visibleNavigationForContext({
+    permissions: activePermissions,
+    roleCode: presentationRoleCode,
+    hasAssignment: Boolean(activeIdentity.businessActorAssignmentId),
+    executiveTasksEnabled,
+    isPlatformAdmin,
+    isDataRetentionAdministrator,
+    demo: demoFallbackEnabled && me.source === 'demo',
+  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isDataRetentionAdministrator, isPlatformAdmin, me.source, presentationRoleCode])
   const navigationCenters = useMemo(() => buildNavigationCenters(visibleNavigation, activeIdentity.label), [visibleNavigation, activeIdentity.label])
   const activeCenterId = navigationCenterForSection(sectionId, routeParams)
   const activeCenter = navigationCenters.find((center) => center.id === activeCenterId)

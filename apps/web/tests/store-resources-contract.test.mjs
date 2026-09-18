@@ -61,7 +61,7 @@ test('navigation, route and permissions expose the administrator store resource 
     'store-resource.import-preview', 'store-resource.import-apply',
   ]) assert.match(permissions, new RegExp(code.replaceAll('.', '\\.')))
   assert.match(app, /StoreResourceRoutes/)
-  assert.match(app, /库存与固定资产/)
+  assert.match(read('../src/app/navigationAccess.ts'), /库存与固定资产/)
   assert.match(app, /case 'store-resources'/)
 })
 

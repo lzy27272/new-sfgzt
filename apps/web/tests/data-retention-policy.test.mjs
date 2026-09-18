@@ -107,7 +107,8 @@ test('frontend uses the agreed read/update endpoints without a destructive reque
 })
 
 test('administrator navigation and direct-link boundary are explicit', () => {
-  assert.match(appSource, /id: 'data-retention'.*administratorOnly: true/)
+  const navigationSource = readFileSync(new URL('../src/app/navigationAccess.ts', import.meta.url), 'utf8')
+  assert.match(navigationSource, /id: 'data-retention'.*administratorOnly: true/)
   assert.match(appSource, /hasDataRetentionAdministrationRole\(me\.data\.roleCodes\)/)
   assert.match(appSource, /view !== 'data-retention' \|\| isDataRetentionAdministrator/)
   assert.match(appSource, /<DataRetentionAdministration identity=\{activeIdentity\}/)

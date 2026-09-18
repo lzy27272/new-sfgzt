@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+const navigation = readFileSync(new URL('../src/app/navigationAccess.ts', import.meta.url), 'utf8')
 const workbench = readFileSync(new URL('../src/features/workbench/RoleWorkbench.tsx', import.meta.url), 'utf8')
 const resources = readFileSync(new URL('../src/api/resources.ts', import.meta.url), 'utf8')
 const styles = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8')
@@ -14,7 +15,7 @@ const attachmentService = readFileSync(new URL('../../core-api/src/main/java/cn/
 const vicePresidentDispatchMigration = readFileSync(new URL('../../../database/migrations/V53__group_vice_president_task_dispatch.sql', import.meta.url), 'utf8')
 
 test('cockpit, task and notification entries are consolidated into the role workbench', () => {
-  assert.match(app, /\['hotel-dashboard', 'operations-dashboard'\]\.includes\(item\.id\)/)
+  assert.match(navigation, /\['hotel-dashboard', 'operations-dashboard'\]\.includes\(item\.id\)/)
   assert.match(app, /buildNavigationCenters\(visibleNavigation, activeIdentity\.label\)/)
   assert.match(workbench, /一键下达任务/)
   assert.match(workbench, /消息提醒/)
@@ -39,7 +40,7 @@ test('quick dispatch does not require optional template or standard read permiss
 })
 
 test('rules and work package routes are platform-administrator only', () => {
-  assert.match(app, /\['rules', 'work-packages'\]\.includes\(item\.id\) && !isPlatformAdmin/)
+  assert.match(navigation, /\['rules', 'work-packages'\]\.includes\(item\.id\) && !isPlatformAdmin/)
   assert.match(app, /administratorRouteAllowed/)
 })
 
