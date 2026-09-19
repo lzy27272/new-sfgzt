@@ -1,4 +1,4 @@
-import { apiBlob, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
+import { apiBlob, apiMutation, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
 import { withRequestDeadline } from './requestDeadline'
 import { dashboardApiPaths } from '../app/dashboardContract'
 import { materializeFileForUpload, readableUploadError } from '../app/uploadFiles'
@@ -780,6 +780,10 @@ function normalizeTask(item: JsonObject): ManagementTask {
     sizeBytes: value(row, 'sizeBytes', 'size_bytes') === undefined ? undefined : number(row, ['sizeBytes', 'size_bytes']),
     scanStatus: text(row, ['scanStatus', 'scan_status'], 'PENDING'),
     createdAt: text(row, ['createdAt', 'created_at'], '') || undefined,
+    structuredResult: (() => {
+      const raw = jsonColumn(value(row, 'structuredResult', 'structured_result'))
+      return raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined
+    })(),
   }))
   return {
     id: text(item, ['id']), code: text(item, ['code', 'taskNo', 'task_no']), title: text(item, ['title', 'name']),
@@ -795,23 +799,68 @@ function normalizeTask(item: JsonObject): ManagementTask {
       const raw = value(item, 'resultSnapshot', 'result_snapshot')
       return raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined
     })(),
+    sourceSnapshot: (() => {
+      const raw = jsonColumn(value(item, 'sourceSnapshot', 'source_snapshot'))
+      return raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined
+    })(),
     sourceType: text(item, ['sourceType', 'source_type'], 'MANUAL'),
     creationSource: text(item, ['creationSource', 'creation_source'], '') || undefined,
     sourceTitle: text(item, ['sourceTitle', 'source_title'], '') || undefined,
     description: text(item, ['description', 'requirement'], '') || undefined,
     dueAt: text(item, ['dueAt', 'due_at'], '') || undefined,
     version: number(item, ['version', 'lockVersion', 'row_version'], 0),
+    createdByAssignmentId: text(item, ['createdByAssignmentId', 'created_by_assignment_id'], '') || undefined,
     evaluationId: text(item, ['evaluationId', 'standardEvaluationId'], '') || undefined,
     timeline: value(item, 'timeline', 'transitions') ? normalizeTimeline(value(item, 'timeline', 'transitions')) : undefined,
     evidence,
   }
 }
 
-export async function createManagementTask(identity: ApiIdentity, input: Record<string, unknown>) {
+export async function createManagementTask(
+  identity: ApiIdentity,
+  input: Record<string, unknown>,
+  idempotencyKey: string = crypto.randomUUID(),
+) {
   return apiRequest<Record<string, unknown>>('/tasks', identity, {
     method: 'POST',
-    headers: { 'Idempotency-Key': crypto.randomUUID() },
+    headers: { 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(input),
+  })
+}
+
+export async function uploadTaskDispatchAttachment(
+  identity: ApiIdentity,
+  taskId: string,
+  assignmentId: string | undefined,
+  note: string,
+  file: File,
+) {
+  const uploadFile = await materializeFileForUpload(file)
+  const query = new URLSearchParams()
+  if (assignmentId) query.set('submittedByAssignmentId', assignmentId)
+  if (note.trim()) query.set('note', note.trim())
+  const form = new FormData()
+  form.append('file', uploadFile, uploadFile.name)
+  try {
+    return await apiRequest(`/tasks/${taskId}/dispatch-attachments/upload?${query.toString()}`, identity, {
+      method: 'POST', body: form,
+    })
+  } catch (reason) {
+    throw readableUploadError(reason, file.name)
+  }
+}
+
+export async function dispatchManagementTask(
+  identity: ApiIdentity,
+  taskId: string,
+  actorAssignmentId: string | undefined,
+  expectedVersion: number,
+  idempotencyKey: string,
+) {
+  return apiMutation(`/tasks/${taskId}/actions/dispatch`, identity, {
+    body: { actorAssignmentId: actorAssignmentId ?? null, payload: { source: 'CREATE_AND_DISPATCH' } },
+    expectedVersion,
+    idempotencyKey,
   })
 }
 

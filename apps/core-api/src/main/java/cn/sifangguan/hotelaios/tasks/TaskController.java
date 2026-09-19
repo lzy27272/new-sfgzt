@@ -74,6 +74,17 @@ public class TaskController {
         return service.uploadEvidence(taskId, submittedByAssignmentId, file);
     }
 
+    @PostMapping(value = "/{taskId}/dispatch-attachments/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @ResponseStatus(HttpStatus.CREATED)
+    public Map<String, Object> uploadDispatchAttachment(
+            @PathVariable UUID taskId,
+            @RequestParam(required = false) UUID submittedByAssignmentId,
+            @RequestParam(required = false) String note,
+            @RequestPart("file") MultipartFile file
+    ) {
+        return service.uploadDispatchAttachment(taskId, submittedByAssignmentId, note, file);
+    }
+
     @GetMapping("/{taskId}/evidence/{evidenceId}/content")
     public ResponseEntity<org.springframework.core.io.Resource> evidenceContent(
             @PathVariable UUID taskId,

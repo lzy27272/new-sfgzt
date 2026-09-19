@@ -391,9 +391,11 @@ export type ManagementTask = {
   targetOrgUnitId?: string
   standardVersionId?: string
   resultSnapshot?: Record<string, unknown>
+  sourceSnapshot?: Record<string, unknown>
   evaluationId?: string
   assigneeAssignmentId?: string
   reviewerAssignmentId?: string
+  createdByAssignmentId?: string
   timeline?: TaskTimelineItem[]
   evidence?: TaskEvidence[]
 }
@@ -408,6 +410,7 @@ export type TaskEvidence = {
   sizeBytes?: number
   scanStatus: string
   createdAt?: string
+  structuredResult?: Record<string, unknown>
 }
 
 export type TaskTimelineItem = {

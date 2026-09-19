@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { materializeFileForUpload, readableUploadError } from '../src/app/uploadFiles.ts'
+import {
+  materializeFileForUpload,
+  materializeSelectedFiles,
+  readableUploadError,
+  restoreReadableDraftFiles,
+} from '../src/app/uploadFiles.ts'
 
 test('restored draft files are materialized before a multipart upload', async () => {
   const source = new File([new Uint8Array([1, 2, 3, 4])], 'room-1208.jpg', {
@@ -39,4 +44,27 @@ test('opaque WebKit upload failures are converted into an actionable Chinese ret
 
   const serverError = new Error('图片像素尺寸过大')
   assert.equal(readableUploadError(serverError, 'image.jpg'), serverError)
+})
+
+test('fresh mobile picker files are copied before they are persisted as resumable drafts', async () => {
+  const temporary = new File([new Uint8Array([7, 8, 9])], 'mobile.jpg', { type: 'image/jpeg' })
+  const result = await materializeSelectedFiles([{ file: temporary, checkpointCode: 'ROOM' }])
+
+  assert.equal(result.rejected.length, 0)
+  assert.equal(result.accepted.length, 1)
+  assert.notEqual(result.accepted[0].file, temporary)
+  assert.equal(result.accepted[0].checkpointCode, 'ROOM')
+  assert.deepEqual(new Uint8Array(await result.accepted[0].file.arrayBuffer()), new Uint8Array([7, 8, 9]))
+})
+
+test('unreadable restored files are separated so the UI can remove only stale draft entries', async () => {
+  const valid = new File([new Uint8Array([1, 2])], 'valid.jpg', { type: 'image/jpeg' })
+  const stale = new File([new Uint8Array([3])], 'stale.jpg', { type: 'image/jpeg' })
+  Object.defineProperty(stale, 'arrayBuffer', { value: () => Promise.reject(new Error('expired handle')) })
+
+  const result = await restoreReadableDraftFiles([{ id: 'valid', file: valid }, { id: 'stale', file: stale }])
+
+  assert.deepEqual(result.accepted.map((entry) => entry.id), ['valid'])
+  assert.deepEqual(result.rejected.map((entry) => entry.entry.id), ['stale'])
+  assert.match(result.rejected[0].reason, /已无法从本机草稿读取/)
 })
