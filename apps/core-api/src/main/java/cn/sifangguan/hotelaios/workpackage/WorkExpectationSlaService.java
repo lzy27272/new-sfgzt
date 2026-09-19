@@ -280,12 +280,13 @@ public class WorkExpectationSlaService {
                     : List.of(new ReminderRecipient(source.managerAccountId(), source.managerAssignmentId()))
                     : executorRecipients(principal, source);
             for (ReminderRecipient target : recipients) {
-                moments.add(new ReminderMoment(code, kind, scheduledAt, target.accountId(), target.assignmentId()));
+                moments.add(new ReminderMoment(code, kind, scheduledAt, target.accountId(), target.assignmentId(),
+                        "DIRECT_MANAGER".equals(recipient)));
             }
             if ("DIRECT_MANAGER".equals(recipient)) {
                 for (var supervisor : supervisors.forWork(source.assignmentId(), source.targetOrgUnitId())) {
                     moments.add(new ReminderMoment(code, kind, scheduledAt,
-                            supervisor.accountId(), supervisor.assignmentId()));
+                            supervisor.accountId(), supervisor.assignmentId(), true));
                 }
             }
         }
@@ -358,7 +359,7 @@ public class WorkExpectationSlaService {
         if (scheduledAt == null) return;
         moments.add(new ReminderMoment(stage, stage,
                 scheduledAt,
-                accountId, assignmentId));
+                accountId, assignmentId, "ESCALATION".equals(stage)));
     }
 
     static OffsetDateTime relativeReminderTime(
@@ -421,7 +422,7 @@ public class WorkExpectationSlaService {
         }
         UUID notificationId = UUID.randomUUID();
         String title = reminderTitle(moment.kind(), source.itemName());
-        String content = reminderContent(moment.kind(), source);
+        String content = reminderContent(moment.supervision(), source);
         UUID storedNotificationId = jdbc.queryForObject("""
                 insert into notification
                     (id, tenant_id, recipient_account_id, recipient_assignment_id,
@@ -436,7 +437,7 @@ public class WorkExpectationSlaService {
                 .addValue("id", notificationId).addValue("accountId", moment.accountId())
                 .addValue("assignmentId", moment.assignmentId()).addValue("title", title)
                 .addValue("content", content).addValue("expectationId", source.id())
-                .addValue("notificationType", Set.of("ESCALATION", "PROGRESS").contains(moment.kind())
+                .addValue("notificationType", moment.supervision()
                         ? "WORK_EXPECTATION_SUPERVISION" : "WORK_EXPECTATION_REMINDER")
                 .addValue("idempotencyKey", "work-expectation:" + source.id() + ":" + moment.stage()),
                 UUID.class);
@@ -463,10 +464,9 @@ public class WorkExpectationSlaService {
         };
     }
 
-    private String reminderContent(String stage, ReminderSource source) {
+    private String reminderContent(boolean supervision, ReminderSource source) {
         String due = source.dueAt().atZoneSameInstant(reminderZone(source))
                 .format(DateTimeFormatter.ofPattern("MM-dd HH:mm"));
-        boolean supervision = Set.of("ESCALATION", "PROGRESS").contains(stage);
         String prefix = supervision
                 ? "请督办下属完成" : "请按模板完成";
         return prefix + source.itemName() + "，门店：" + source.orgName()
@@ -535,7 +535,8 @@ public class WorkExpectationSlaService {
             String kind,
             OffsetDateTime scheduledAt,
             UUID accountId,
-            UUID assignmentId
+            UUID assignmentId,
+            boolean supervision
     ) {
     }
 

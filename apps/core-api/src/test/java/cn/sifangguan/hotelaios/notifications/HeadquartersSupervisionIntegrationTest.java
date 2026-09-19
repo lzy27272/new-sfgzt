@@ -118,7 +118,9 @@ class HeadquartersSupervisionIntegrationTest {
         UUID headquartersWork = expectation(vpAssignment, headquarters);
         workSla.processTenantAsSystem(TENANT, 100, UUID.randomUUID());
         workSla.processTenantAsSystem(TENANT, 100, UUID.randomUUID());
-        assertThat(notificationCount(vp, formalWork, "WORK_EXPECTATION_SUPERVISION")).isOne();
+        // Two configured stages, each exactly once despite repeated runs and duplicate assignments.
+        assertThat(notificationCount(vp, formalWork, "WORK_EXPECTATION_SUPERVISION")).isEqualTo(2);
+        assertThat(notificationCount(vp, formalWork, "WORK_EXPECTATION_REMINDER")).isZero();
         assertThat(notificationCount(vp, testWork, "WORK_EXPECTATION_SUPERVISION")).isZero();
         assertThat(notificationCount(vp, headquartersWork, "WORK_EXPECTATION_SUPERVISION")).isZero();
 
@@ -215,7 +217,10 @@ class HeadquartersSupervisionIntegrationTest {
                   (id, tenant_id, work_package_version_id, item_code, name, item_type, period_type,
                    timezone_mode, due_local_time, reminder_policy)
                 values (?, ?, ?, 'VP_TEST', 'Supervision work', 'INSPECTION', 'DAY', 'TENANT', '00:00',
-                  '{"moments":[{"code":"VP_TEST","kind":"ESCALATION","localTime":"00:00","recipient":"DIRECT_MANAGER"}]}'::jsonb)
+                  '{"moments":[
+                    {"code":"VP_TEST","kind":"ESCALATION","localTime":"00:00","recipient":"DIRECT_MANAGER"},
+                    {"code":"VP_OVERDUE","kind":"OVERDUE","localTime":"00:00","recipient":"DIRECT_MANAGER"}
+                  ]}'::jsonb)
                 """, ITEM, TENANT, VERSION);
         jdbc.update("""
                 update work_package_version set lifecycle_status = 'PUBLISHED', content_hash = repeat('a',64),
