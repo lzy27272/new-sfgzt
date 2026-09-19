@@ -68,6 +68,7 @@ before(async () => {
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
+  window.location.hash = '#/'
 })
 
 after(async () => {
@@ -93,4 +94,14 @@ test('a federated session hides the cached workbench while identity is resolving
   assert.match(markup, /正在验证登录状态/u)
   assert.doesNotMatch(markup, /前台员工工作台/u)
   assert.doesNotMatch(markup, /class="shell"/)
+  assert.match(markup, /使用账号密码登录/u)
+})
+
+test('explicit manual recovery bypasses stale WeCom markers and renders usable credential fields', () => {
+  window.location.hash = '#/login'
+  sessionStorage.setItem(FEDERATED_SESSION_STORAGE_KEY, 'wecom')
+  const markup = renderToStaticMarkup(React.createElement(App))
+  assert.match(markup, /name="username"/)
+  assert.match(markup, /name="password"/)
+  assert.doesNotMatch(markup, /正在验证登录状态/u)
 })

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, demoFallbackEnabled, establishFederatedSession, hasAccessToken, login, logout } from './api/client'
 import { consumeLogoutEntry } from './app/logoutEntry'
+import { clearManualLogin, rememberManualLogin, requestsManualLogin } from './app/manualLogin'
 import {
   bootstrapAssignmentId,
   bootstrapAssignments,
@@ -1659,7 +1660,7 @@ function Notifications({ identity, permissions, routeParams, go }: { identity: R
   </section>
 }
 
-function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
+function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => void; onWecomLogin?: () => void }) {
   const [loginName, setLoginName] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string>()
@@ -1683,11 +1684,12 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
       </section>
       <section className="login-auth-panel">
         <form className="login-auth-card" aria-label="中台账号登录" aria-busy={busy} onSubmit={submit}>
-          <header><h2>账号登录</h2><p>请输入管理员分配的测试账号和初始密码。</p></header>
+          <header><h2>账号登录</h2><p>请输入中台账号和密码。未绑定企业微信的账号也可以在此登录。</p></header>
           <label>登录账号<input name="username" autoFocus autoComplete="username" disabled={busy} aria-invalid={Boolean(error)} aria-describedby={error ? 'login-error' : undefined} value={loginName} onChange={(event) => setLoginName(event.target.value)} placeholder="请输入登录账号" /></label>
           <label>登录密码<input name="password" type="password" autoComplete="current-password" disabled={busy} aria-invalid={Boolean(error)} aria-describedby={error ? 'login-error' : undefined} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入登录密码" /></label>
           {error && <div id="login-error" className="inline-error" role="alert" aria-live="polite">{error}</div>}
           <button className="primary login-auth-submit" disabled={busy || !loginName.trim() || !password}>{busy ? '正在验证…' : '登录中台'}</button>
+          {onWecomLogin && <button className="secondary" type="button" disabled={busy} onClick={onWecomLogin}>改用企业微信登录</button>}
           <small>内部测试系统 · 关键操作均记录账号、组织和时间</small>
         </form>
         {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
@@ -1714,8 +1716,8 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
           {!error && <div className="state-card"><div className="spinner" /><strong>正在读取身份与权限</strong></div>}
           {error && <>
             <button type="button" className="primary login-auth-submit" onClick={onRetry}>重新验证</button>
-            {onReturnToLogin && <button type="button" className="secondary" onClick={onReturnToLogin}>返回账号登录</button>}
           </>}
+          {onReturnToLogin && <button type="button" className="secondary" onClick={onReturnToLogin}>使用账号密码登录</button>}
         </div>
         {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
       </section>
@@ -1723,11 +1725,11 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
   </main>
 }
 
-function WeComSilentLoginRedirect() {
+function WeComSilentLoginRedirect({ onReturnToLogin }: { onReturnToLogin: () => void }) {
   useEffect(() => {
     window.location.replace(buildWeComSilentAuthUrl())
   }, [])
-  return <SessionBootstrapPage error={undefined} onRetry={() => window.location.replace(buildWeComSilentAuthUrl())} />
+  return <SessionBootstrapPage error={undefined} onRetry={() => window.location.replace(buildWeComSilentAuthUrl())} onReturnToLogin={onReturnToLogin} />
 }
 
 function ChangePasswordDialog({ identity, onClose, onChanged }: { identity: RoleContext; onClose: () => void; onChanged: () => void }) {
@@ -2044,25 +2046,40 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
 }
 
 export default function App() {
+  const [manualLogin, setManualLogin] = useState(() => {
+    if (initialWecomSessionBootstrap) clearManualLogin()
+    if (authMode !== 'dev-header' && consumeLogoutEntry(clearAccessToken)) {
+      rememberManualLogin()
+      window.history.replaceState(null, '', buildAppHashLocation('#/login', import.meta.env.BASE_URL))
+    }
+    return requestsManualLogin()
+  })
   const [authenticated, setAuthenticated] = useState(() => {
-    if (authMode !== 'dev-header' && consumeLogoutEntry(clearAccessToken)) return false
+    if (authMode !== 'dev-header' && manualLogin && !initialWecomSessionBootstrap) return false
     return authMode !== 'bearer' || initialWecomSessionBootstrap || hasAccessToken()
   })
   const [wecomTaskEntry, setWecomTaskEntry] = useState(initialWecomTaskEntry)
   const [wecomBindingEntry, setWecomBindingEntry] = useState(initialWecomBindingEntry)
   const completeWecomTaskEntry = useCallback(() => {
+    clearManualLogin()
+    setManualLogin(false)
     setWecomTaskEntry(undefined)
     setAuthenticated(true)
   }, [])
   const cancelWecomTaskEntry = useCallback(() => {
-    window.history.replaceState(null, '', buildAppHashLocation('#/', import.meta.env.BASE_URL))
+    clearAccessToken()
+    rememberManualLogin()
+    window.history.replaceState(null, '', buildAppHashLocation('#/login', import.meta.env.BASE_URL))
+    setManualLogin(true)
+    setAuthenticated(false)
     setWecomTaskEntry(undefined)
+    setWecomBindingEntry(undefined)
   }, [])
   useEffect(() => {
-    const expired = () => setAuthenticated(false)
+    const expired = () => cancelWecomTaskEntry()
     window.addEventListener('hotel-ai-os:auth-expired', expired)
     return () => window.removeEventListener('hotel-ai-os:auth-expired', expired)
-  }, [])
+  }, [cancelWecomTaskEntry])
   if (wecomTaskEntry) return <WecomTaskEntryPage
     entry={wecomTaskEntry}
     onAuthenticated={completeWecomTaskEntry}
@@ -2070,12 +2087,15 @@ export default function App() {
   />
   if (wecomBindingEntry) return <WecomBindingEnrollmentEntry
     entry={wecomBindingEntry}
-    onReturn={() => {
-      window.history.replaceState(null, '', buildAppHashLocation('#/', import.meta.env.BASE_URL))
-      setWecomBindingEntry(undefined)
-    }}
+    onReturn={cancelWecomTaskEntry}
   />
-  if (!authenticated && authMode === 'bearer' && isWeComBrowser()) return <WeComSilentLoginRedirect />
-  if (!authenticated) return <LoginPage onAuthenticated={() => setAuthenticated(true)} />
-  return <AuthenticatedApp onLogout={() => { void logout(); setAuthenticated(false) }} />
+  if (!authenticated && !manualLogin && authMode === 'bearer' && isWeComBrowser()) return <WeComSilentLoginRedirect onReturnToLogin={cancelWecomTaskEntry} />
+  if (!authenticated) return <LoginPage onAuthenticated={() => {
+    window.history.replaceState(null, '', buildAppHashLocation('#/workbench', import.meta.env.BASE_URL))
+    setAuthenticated(true)
+  }} onWecomLogin={isWeComBrowser() ? () => {
+    clearManualLogin()
+    window.location.replace(buildWeComSilentAuthUrl())
+  } : undefined} />
+  return <AuthenticatedApp onLogout={() => { void logout(); cancelWecomTaskEntry() }} />
 }

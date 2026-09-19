@@ -1026,7 +1026,8 @@ public class WorkPackageService {
                  and delegated_employee.id = delegated_assignment.employee_id
                 where x.tenant_id = :tenantId and x.id = :expectationId
                 """, params));
-        accessPolicy.requireOrgScope((UUID) result.get("target_org_unit_id"));
+        accessPolicy.requireOrgScopeOrOwnWork((UUID) result.get("target_org_unit_id"),
+                (UUID) result.get("position_assignment_id"));
         result.put("standards", jdbc.queryForList("""
                 select s.standard_version_id, s.usage_type, s.weight, sd.code as standard_code,
                        sv.version_no as standard_version_no, sv.title

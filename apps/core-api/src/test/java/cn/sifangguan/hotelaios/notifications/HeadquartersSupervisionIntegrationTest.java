@@ -3,6 +3,10 @@ package cn.sifangguan.hotelaios.notifications;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.security.EffectiveIdentityService;
+import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
+import cn.sifangguan.hotelaios.workdata.AttachmentService;
+import cn.sifangguan.hotelaios.workdata.WorkDataService;
+import cn.sifangguan.hotelaios.workdata.WorkDataModels;
 import cn.sifangguan.hotelaios.tasks.TaskService;
 import cn.sifangguan.hotelaios.workpackage.WorkExpectationSlaService;
 import cn.sifangguan.hotelaios.workpackage.WorkPackageService;
@@ -27,6 +31,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
@@ -38,6 +43,7 @@ class HeadquartersSupervisionIntegrationTest {
     private static final UUID MANAGER = UUID.fromString("19200000-0000-0000-0000-000000000001");
     private static final UUID ITEM = UUID.randomUUID();
     private static final UUID VERSION = UUID.randomUUID();
+    private static final UUID FORM_VERSION = UUID.randomUUID();
     private static final EmbeddedPostgres POSTGRES = startPostgres();
 
     @Autowired JdbcTemplate jdbc;
@@ -46,6 +52,8 @@ class HeadquartersSupervisionIntegrationTest {
     @Autowired WorkExpectationSlaService workSla;
     @Autowired TaskService tasks;
     @Autowired WorkPackageService work;
+    @Autowired WorkDataService records;
+    @Autowired AttachmentService attachments;
     @Autowired PlatformTransactionManager transactions;
     @Autowired ObjectMapper mapper;
 
@@ -145,6 +153,43 @@ class HeadquartersSupervisionIntegrationTest {
         try {
             JsonNode summary = mapper.valueToTree(work.teamWorkbenchSummary(LocalDate.now(ZoneId.of("Asia/Shanghai"))));
             assertThat(summary.path("hotels").findValuesAsText("id")).contains(HOTEL.toString()).doesNotContain(testHotel.toString());
+            // Headquarters affiliation is NOT a blanket scope grant. The active
+            // owner can read/complete their work without seeing their peers' work.
+            UUID ownRecord = draftRecord(vpAssignment, headquarters, headquartersWork);
+            UUID peerWork = expectation(groupManagerAssignment, headquarters);
+            UUID peerRecord = draftRecord(groupManagerAssignment, headquarters, peerWork);
+            UUID otherAssignmentWork = expectation(secondVpAssignment, headquarters);
+            assertThat(vpIdentity.orgScopes()).doesNotContain(headquarters, GROUP);
+            assertThat(work.expectationDetail(headquartersWork).get("id")).isEqualTo(headquartersWork);
+            assertThat(records.record(ownRecord).get("id")).isEqualTo(ownRecord);
+            assertThat(attachments.list(ownRecord)).isEmpty();
+            assertThatThrownBy(() -> work.expectationDetail(peerWork)).isInstanceOf(AccessDeniedException.class);
+            assertThatThrownBy(() -> work.expectationDetail(otherAssignmentWork)).isInstanceOf(AccessDeniedException.class);
+            assertThatThrownBy(() -> records.record(peerRecord)).isInstanceOf(AccessDeniedException.class);
+            assertThatThrownBy(() -> attachments.list(peerRecord)).isInstanceOf(AccessDeniedException.class);
+            var update = new WorkDataModels.UpdateDraft(mapper.createObjectNode(), "本人完成", null, null, null, 0);
+            // Scope ownership cannot create operation permissions. The default VP
+            // profile is read-only for these records; grant writing only in this
+            // isolated fixture to also exercise explicitly configured personal work.
+            assertThatThrownBy(() -> records.records()).isInstanceOf(AccessDeniedException.class);
+            assertThatThrownBy(() -> records.updateDraft(ownRecord, update)).isInstanceOf(AccessDeniedException.class);
+            jdbc.update("""
+                    insert into position_function_profile_permission (tenant_id, profile_version_id, permission_id)
+                    select v.tenant_id, v.id, permission.id
+                    from position_function_profile_version v
+                    join position_function_profile p on p.tenant_id = v.tenant_id and p.id = v.profile_id
+                    join position_definition d on d.tenant_id = p.tenant_id and d.id = p.position_id
+                    cross join permission
+                    where v.tenant_id = ? and d.code = 'GROUP_VICE_PRESIDENT'
+                      and v.lifecycle_status = 'PUBLISHED'
+                      and permission.code in ('work-record.read', 'work-record.submit')
+                    on conflict do nothing
+                    """, TENANT);
+            TenantContext.set(identities.resolve(TENANT, vp, UUID.randomUUID(), vpAssignment));
+            assertThat(records.records()).extracting(row -> row.get("id")).contains(ownRecord).doesNotContain(peerRecord);
+            assertThatThrownBy(() -> records.updateDraft(peerRecord, update)).isInstanceOf(AccessDeniedException.class);
+            assertThat(records.updateDraft(ownRecord, update).get("status")).isEqualTo("DRAFT");
+            assertThat(records.submitDraft(ownRecord, new WorkDataModels.SubmitDraft(1)).get("status")).isEqualTo("SUBMITTED");
         } finally { TenantContext.clear(); }
         assertThat(audience(managerIdentity, "not-granted.read").forWork(MANAGER, HOTEL)).isEmpty();
         jdbc.update("update user_account set status = 'DISABLED' where tenant_id = ? and id = ?", TENANT, vp);
@@ -202,6 +247,12 @@ class HeadquartersSupervisionIntegrationTest {
     }
 
     private void createWorkPackage() {
+        UUID form = UUID.randomUUID();
+        jdbc.update("insert into form_definition (id, tenant_id, code, name, form_type) values (?, ?, 'VP_SELF', 'Personal work fixture', 'DAILY_WORK')", form, TENANT);
+        jdbc.update("""
+                insert into form_version (id, tenant_id, form_id, version_no, lifecycle_status, json_schema, published_at)
+                values (?, ?, ?, 1, 'PUBLISHED', '{"type":"object","properties":{}}'::jsonb, now())
+                """, FORM_VERSION, TENANT, form);
         UUID definition = UUID.randomUUID();
         jdbc.update("""
                 insert into work_package_definition (id, tenant_id, code, name, position_id, owner_org_unit_id)
@@ -215,13 +266,13 @@ class HeadquartersSupervisionIntegrationTest {
         jdbc.update("""
                 insert into work_package_item
                   (id, tenant_id, work_package_version_id, item_code, name, item_type, period_type,
-                   timezone_mode, due_local_time, reminder_policy)
-                values (?, ?, ?, 'VP_TEST', 'Supervision work', 'INSPECTION', 'DAY', 'TENANT', '00:00',
+                   timezone_mode, due_local_time, form_version_id, reminder_policy)
+                values (?, ?, ?, 'VP_TEST', 'Supervision work', 'INSPECTION', 'DAY', 'TENANT', '00:00', ?,
                   '{"moments":[
                     {"code":"VP_TEST","kind":"ESCALATION","localTime":"00:00","recipient":"DIRECT_MANAGER"},
                     {"code":"VP_OVERDUE","kind":"OVERDUE","localTime":"00:00","recipient":"DIRECT_MANAGER"}
                   ]}'::jsonb)
-                """, ITEM, TENANT, VERSION);
+                """, ITEM, TENANT, VERSION, FORM_VERSION);
         jdbc.update("""
                 update work_package_version set lifecycle_status = 'PUBLISHED', content_hash = repeat('a',64),
                   effective_from = now() - interval '1 day', published_at = now()
@@ -242,6 +293,18 @@ class HeadquartersSupervisionIntegrationTest {
                 values (?, ?, 'ASSIGNEE', ?, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)
                 """, TENANT, task, assignee);
         return task;
+    }
+
+    private UUID draftRecord(UUID assignment, UUID target, UUID expectation) {
+        UUID record = UUID.randomUUID();
+        jdbc.update("""
+                insert into work_record (id, tenant_id, org_unit_id, employee_id, position_assignment_id,
+                  form_version_id, business_date, target_org_unit_id, work_package_version_id,
+                  work_package_item_id, work_expectation_id, record_kind, content_hash, occurred_at)
+                select ?, tenant_id, org_unit_id, employee_id, id, ?, current_date, ?, ?, ?, ?, 'SCHEDULED', repeat('a',64), now()
+                from employee_position_assignment where tenant_id = ? and id = ?
+                """, record, FORM_VERSION, target, VERSION, ITEM, expectation, TENANT, assignment);
+        return record;
     }
 
     private int notificationCount(UUID account, UUID source, String type) {

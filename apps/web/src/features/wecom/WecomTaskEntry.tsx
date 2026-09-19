@@ -42,6 +42,7 @@ export function WecomTaskEntryPage({ entry, onAuthenticated, onCancel }: Props) 
         <small>请勿转发包含一次性凭证的链接，也不要向任何人提供企业微信验证码。</small>
       </> : <>
         <div className="wecom-entry-progress"><div className="spinner" /><strong>正在建立安全会话</strong><span>请保持页面打开，无需输入中台密码。</span></div>
+        <button className="secondary wecom-entry-action" type="button" onClick={onCancel}>使用账号密码登录</button>
         <small>一次性凭证使用后立即失效；权限仍由中台组织、岗位和角色校验。</small>
       </>}
     </section>
