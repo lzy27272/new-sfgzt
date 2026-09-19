@@ -107,6 +107,9 @@ export function resolveNotificationNavigation(
     }
   }
   if (sourceType === 'WORK_EXPECTATION') {
+    if (type === 'WORK_EXPECTATION_SUPERVISION') {
+      return { view: 'workbench', params: { scope: 'all' }, actionLabel: '查看督办' }
+    }
     return {
       view: 'my-work',
       params: sourceId ? { expectationId: sourceId } : undefined,

@@ -471,6 +471,7 @@ dd { margin: 5px 0 0; color: #334f64; font-size: 10px; }
 .wecom-entry-progress strong { color: #345b73; font-size: 13px; }
 .wecom-entry-progress span { font-size: 10px; }
 .wecom-entry-action { width: 100%; min-height: 44px; }
+.wecom-entry-card a.wecom-entry-action { display: flex; align-items: center; justify-content: center; box-sizing: border-box; text-decoration: none; }
 
 .wecom-onboarding-shell { min-height: 100vh; color: #14334f; background: #f7f9fb; }
 .wecom-onboarding-brand { height: 104px; padding: 0 max(28px,calc((100vw - 520px)/2)); display: flex; align-items: center; gap: 17px; color: #fff; background: linear-gradient(116deg,#062f52,#003b62); }

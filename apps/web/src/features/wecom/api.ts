@@ -1,4 +1,5 @@
 import { ApiError, apiBase } from '../../api/client'
+import { withRequestDeadline } from '../../api/requestDeadline'
 
 const EXCHANGE_PATH = import.meta.env.VITE_WECOM_EXCHANGE_PATH ?? '/integrations/wecom/oauth/exchange'
 const exchangeRequests = new Map<string, Promise<WecomExchangeResult>>()
@@ -17,9 +18,10 @@ export type WecomExchangeResult = {
   returnTo?: string
 }
 
-async function performExchange(code: string): Promise<WecomExchangeResult> {
+async function performExchange(code: string, signal: AbortSignal): Promise<WecomExchangeResult> {
   const response = await fetch(`${apiBase}${EXCHANGE_PATH.startsWith('/') ? EXCHANGE_PATH : `/${EXCHANGE_PATH}`}`, {
     method: 'POST',
+    signal,
     credentials: 'include',
     cache: 'no-store',
     redirect: 'error',
@@ -60,7 +62,8 @@ async function performExchange(code: string): Promise<WecomExchangeResult> {
 export function exchangeWecomCode(code: string): Promise<WecomExchangeResult> {
   const pending = exchangeRequests.get(code)
   if (pending) return pending
-  const request = performExchange(code)
+  const request = withRequestDeadline((signal) => performExchange(code, signal),
+    '企微身份验证超时，请检查网络后重新通过企业微信验证。请勿重复使用旧的一次性凭证。')
   exchangeRequests.set(code, request)
   return request
 }

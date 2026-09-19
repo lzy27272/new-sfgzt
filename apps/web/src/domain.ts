@@ -164,13 +164,15 @@ export type WorkCompletionMetric = {
   completionRate: number
 }
 
-export type HotelWorkbenchMetric = {
+export type OrganizationWorkbenchMetric = {
   id: string
   name: string
   today: WorkCompletionMetric
   monthToDate: WorkCompletionMetric
   departments: DepartmentWorkbenchMetric[]
 }
+
+export type HotelWorkbenchMetric = OrganizationWorkbenchMetric
 
 export type DepartmentWorkbenchMetric = {
   id: string
@@ -196,6 +198,8 @@ export type WorkbenchSummary = {
   today: WorkCompletionMetric
   monthToDate: WorkCompletionMetric
   hotels: HotelWorkbenchMetric[]
+  /** Authorized non-hotel work, including group and headquarters assignments. */
+  organizations?: OrganizationWorkbenchMetric[]
 }
 
 export type EvidenceRequirement = {

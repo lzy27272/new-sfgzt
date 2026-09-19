@@ -255,6 +255,10 @@ export function RoleWorkbench({
   const work = useResource(`${identity.key}:role-workbench-work:${canReadTeam}:${canReadOwn}:${currentBusinessDate}`, () => canReadTeam
     ? loadTeamWork(identity, workQuery)
     : canReadOwn ? loadMyWork(identity, workQuery) : Promise.resolve({ data: [], source: 'api' as const }), [], 30_000)
+  // Hotel-management scope need not include the employee's headquarters org.
+  // Keep personal work on the existing ownership-checked API, without widening team scope.
+  const ownWork = useResource(`${identity.key}:role-workbench-own:${canReadTeam}:${canReadOwn}:${currentBusinessDate}`, () => canReadTeam && canReadOwn
+    ? loadMyWork(identity, workQuery) : Promise.resolve({ data: [], source: 'api' as const }), [], 30_000)
   const completion = useResource<WorkbenchSummary>(`${identity.key}:role-workbench-completion:${canReadTeam}:${currentBusinessDate}`, () => canReadTeam
     ? loadWorkbenchSummary(identity, currentBusinessDate)
     : Promise.resolve({ data: emptySummary(currentBusinessDate), source: 'api' as const }), emptySummary(currentBusinessDate), 60_000)
@@ -281,7 +285,8 @@ export function RoleWorkbench({
   const derivedHotels = useMemo(() => {
     const result = new Map<string, HotelRow>()
     scopedWork.forEach((item) => {
-      const id = hotelIdFor(item)
+      // Group and headquarters work must not be presented as a hotel.
+      const id = item.hotelOrgUnitId
       if (id) result.set(id, { id, name: item.hotelName ?? item.targetOrgName })
     })
     return [...result.values()]
@@ -294,7 +299,7 @@ export function RoleWorkbench({
   }, [derivedHotels, hotelDirectory.data])
   const allScopeDrilldown = routeParams.scope === 'all'
   const selectedHotel = allScopeDrilldown ? undefined : hotels.find((hotel) => hotel.id === routeParams.hotelId)
-    ?? ((executive || hotelManagementKeys.has(presentationKey)) ? hotels[0] : undefined)
+    ?? (hotelManagementKeys.has(presentationKey) ? hotels[0] : undefined)
   const selectedHotelItems = useMemo(() => selectedHotel
     ? scopedWork.filter((item) => hotelIdFor(item) === selectedHotel.id)
     : scopedWork, [scopedWork, selectedHotel])
@@ -317,34 +322,35 @@ export function RoleWorkbench({
   const selectedHotelAllItems = useMemo(() => selectedHotel
     ? work.data.filter((item) => hotelIdFor(item) === selectedHotel.id)
     : work.data, [selectedHotel, work.data])
-  const personalWork = useMemo(() => scopedWork.filter((item) => item.businessDate === currentBusinessDate
-    && (!identity.businessActorAssignmentId || item.assignmentId === identity.businessActorAssignmentId)), [currentBusinessDate, identity.businessActorAssignmentId, scopedWork])
+  const personalWork = useMemo(() => (canReadTeam ? ownWork.data : scopedWork).filter((item) => item.businessDate === currentBusinessDate
+    && (!identity.businessActorAssignmentId || item.assignmentId === identity.businessActorAssignmentId)), [canReadTeam, ownWork.data, currentBusinessDate, identity.businessActorAssignmentId, scopedWork])
   const completionData = completion.data.asOfDate === currentBusinessDate ? completion.data : emptySummary(currentBusinessDate)
   const completionLoading = completion.loading || completion.data.asOfDate !== currentBusinessDate
   const summaryHotel = selectedHotel ? completionData.hotels.find((hotel) => hotel.id === selectedHotel.id) : undefined
+  const summaryOrganizations = useMemo(() => [...completionData.hotels, ...(completionData.organizations ?? [])], [completionData.hotels, completionData.organizations])
   const departmentRows = useMemo<SummaryRow[]>(() => {
     if (summaryHotel?.departments.length) return summaryHotel.departments
     if (selectedHotel) return aggregate(selectedHotelAllItems, departmentLabel, currentBusinessDate)
-    const rows = completionData.hotels.flatMap((hotel) => hotel.departments.map((department) => ({
+    const rows = summaryOrganizations.flatMap((hotel) => hotel.departments.map((department) => ({
       ...department,
       id: `${hotel.id}:${department.id}`,
       name: `${hotel.name} · ${department.name}`,
     })))
     return rows.length ? rows : aggregate(work.data, departmentLabel, currentBusinessDate)
-  }, [completionData.hotels, currentBusinessDate, selectedHotel, selectedHotelAllItems, summaryHotel, work.data])
+  }, [summaryOrganizations, currentBusinessDate, selectedHotel, selectedHotelAllItems, summaryHotel, work.data])
   const employeeRows = useMemo<SummaryRow[]>(() => {
     if (summaryHotel?.departments.length) return summaryHotel.departments.flatMap((department) => department.employees.map((employee) => ({
       ...employee,
       name: `${employee.name}${employee.positionName ? ` · ${employee.positionName}` : ''}`,
     })))
     if (selectedHotel) return aggregate(selectedHotelAllItems, (item) => `${item.assigneeName}${item.positionName ? ` · ${item.positionName}` : ''}`, currentBusinessDate)
-    const rows = completionData.hotels.flatMap((hotel) => hotel.departments.flatMap((department) => department.employees.map((employee) => ({
+    const rows = summaryOrganizations.flatMap((hotel) => hotel.departments.flatMap((department) => department.employees.map((employee) => ({
       ...employee,
       id: `${hotel.id}:${employee.id}`,
       name: `${hotel.name} · ${department.name} · ${employee.name}${employee.positionName ? ` · ${employee.positionName}` : ''}`,
     }))))
     return rows.length ? rows : aggregate(work.data, (item) => `${item.assigneeName}${item.positionName ? ` · ${item.positionName}` : ''}`, currentBusinessDate)
-  }, [completionData.hotels, currentBusinessDate, selectedHotel, selectedHotelAllItems, summaryHotel, work.data])
+  }, [summaryOrganizations, currentBusinessDate, selectedHotel, selectedHotelAllItems, summaryHotel, work.data])
   const todayMetric = canReadTeam
     ? executive ? completionData.today : summaryHotel?.today ?? completionData.today
     : completionFromItems(work.data, false, currentBusinessDate)
@@ -480,7 +486,11 @@ export function RoleWorkbench({
       </section>}
 
       <section className="workbench-bottom-grid">
-        <article className="panel workbench-bottom-panel"><header><div><span className="panel-kicker">TODAY PERSONAL WORK</span><h2>今日个人工作</h2></div><button className="link-button" onClick={() => go('my-work')}>查看全部</button></header><WorkRows items={personalWork.slice(0, 6)} onSelect={setSelected} /></article>
+        <article className="panel workbench-bottom-panel"><header><div><span className="panel-kicker">TODAY PERSONAL WORK</span><h2>今日个人工作</h2></div><button className="link-button" onClick={() => go('my-work')}>查看全部</button></header>
+          {canReadTeam && ownWork.error ? <div className="inline-error" role="alert">{ownWork.error}<button type="button" onClick={() => void ownWork.reload()}>重新读取</button></div>
+            : canReadTeam && ownWork.loading ? <div role="status">正在读取个人工作…</div>
+              : <WorkRows items={personalWork.slice(0, 6)} onSelect={setSelected} />}
+        </article>
         <aside>
           {canReadNotices && <article className="panel workbench-bottom-panel"><header><div><span className="panel-kicker">MANAGEMENT ALERTS</span><h2>管理提醒</h2></div><button className="link-button" onClick={() => go('notifications')}>查看全部</button></header><NoticeList items={unreadNotices} permissions={permissions} go={go} /></article>}
           {canReadTasks && presentationKey !== 'GROUP_CHAIRMAN' && <article className="panel workbench-bottom-panel"><header><div><span className="panel-kicker">TASK PROGRESS</span><h2>执行任务</h2></div><button className="link-button" onClick={() => go('tasks')}>进入任务</button></header><ManagementTaskList items={activeTasks} go={go} /></article>}
@@ -492,7 +502,7 @@ export function RoleWorkbench({
         <SummaryTable title="部门员工统计" subtitle="当前部门及下级员工执行情况" rows={employeeRows} />
       </div>}
     </>}
-    {selected && <TeamWorkDrawer initial={selected} identity={identity} permissions={permissions} go={go} onClose={() => setSelected(undefined)} onChanged={() => { void work.reload(); if (canReadTeam) void completion.reload() }} />}
+    {selected && <TeamWorkDrawer initial={selected} identity={identity} permissions={permissions} go={go} onClose={() => setSelected(undefined)} onChanged={() => { void work.reload(); if (canReadTeam) { void completion.reload(); void ownWork.reload() } }} />}
     {creatingTask && canManageDispatch && <TaskCreateDialog
       identity={identity}
       permissions={permissions}

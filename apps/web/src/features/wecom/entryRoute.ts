@@ -3,6 +3,13 @@ const UNSAFE_CREDENTIAL_PARAMS = ['access_token', 'token', 'jwt', 'secret', 'cor
 const CODE_PATTERN = /^[A-Za-z0-9._~-]{16,512}$/
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DAILY_REPORT_PATH_PATTERN = /^\/daily-reports\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
+const LOGIN_ERRORS: Record<string, string> = {
+  MEMBER_UNBOUND: '当前企业微信成员尚未绑定有效中台账号。已有中台账号的员工请联系管理员发起该账号的企微绑定；无需重复注册账号。',
+  ACCOUNT_UNAVAILABLE: '中台账号或任职当前不可用，请联系管理员检查账号启用状态、任职及岗位配置。',
+  ASSIGNMENT_INACTIVE: '企微绑定的默认任职已失效，请联系管理员重新确认有效任职后再登录。',
+  SESSION_INVALID: '本次企微身份验证已失效，请点击“重新通过企业微信验证”重新进入。',
+  VERIFICATION_FAILED: '企微身份验证暂未完成，请重新验证；如仍失败，请联系管理员检查账号绑定及企微连接。',
+}
 
 export type WecomTaskEntry = {
   code?: string
@@ -44,18 +51,30 @@ export function consumeWecomTaskEntry(location: Location = window.location): Wec
 
   const params = url.searchParams
   const code = params.get('exchange_code')?.trim() || undefined
+  const errorCode = params.get('error_code')
   const unsafeParam = UNSAFE_CREDENTIAL_PARAMS.find((key) => params.has(key))
 
   window.history.replaceState(null, '', `${url.pathname}${url.hash}`)
 
   if (unsafeParam) {
     cachedEntry = { securityError: '链接包含禁止出现在地址栏中的敏感凭据，系统已拒绝使用并清除。请从企微重新打开任务。' }
+  } else if ([...params.keys()].some((key) => !['exchange_code', 'error_code'].includes(key))
+    || params.getAll('exchange_code').length > 1 || params.getAll('error_code').length > 1
+    || (params.has('exchange_code') && params.has('error_code'))) {
+    cachedEntry = { securityError: '企微登录链接包含重复或非预期参数，请从企业微信重新验证。' }
+  } else if (errorCode) {
+    cachedEntry = { securityError: Object.hasOwn(LOGIN_ERRORS, errorCode) ? LOGIN_ERRORS[errorCode] : LOGIN_ERRORS.VERIFICATION_FAILED }
   } else if (!code || !CODE_PATTERN.test(code)) {
     cachedEntry = { securityError: '企微一次性登录凭证缺失或格式无效。凭证可能已过期，请返回企微重新打开任务。' }
   } else {
     cachedEntry = { code }
   }
   return cachedEntry
+}
+
+export function wecomLoginRestartPath(): string {
+  // Fixed same-origin OAuth entry, never reuse a consumed credential or trust a return URL from the address bar.
+  return '/api/v1/integrations/wecom/oauth/start?' + new URLSearchParams({ returnTo: '#/workbench' })
 }
 
 export function buildTaskDeepLink(taskId: string): string {

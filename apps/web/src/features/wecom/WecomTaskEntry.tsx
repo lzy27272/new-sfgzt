@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { establishFederatedSession } from '../../api/client'
 import { product } from '../../product'
 import { exchangeWecomCode } from './api'
-import { buildAppHashLocation, safeTaskDeepLink, type WecomTaskEntry } from './entryRoute'
+import { buildAppHashLocation, safeTaskDeepLink, wecomLoginRestartPath, type WecomTaskEntry } from './entryRoute'
 
 type Props = {
   entry: WecomTaskEntry
@@ -37,6 +37,7 @@ export function WecomTaskEntryPage({ entry, onAuthenticated, onCancel }: Props) 
       <header><span className="panel-kicker">企业微信安全入口</span><h2>{error ? '无法安全打开中台' : '正在验证身份'}</h2><p>{error ? '系统已停止登录和页面跳转。' : '验证成功后将直接进入对应的中台页面。'}</p></header>
       {error ? <>
         <div className="inline-error">{error}</div>
+        <a className="primary wecom-entry-action" href={wecomLoginRestartPath()}>重新通过企业微信验证</a>
         <button className="secondary wecom-entry-action" type="button" onClick={onCancel}>返回中台登录</button>
         <small>请勿转发包含一次性凭证的链接，也不要向任何人提供企业微信验证码。</small>
       </> : <>

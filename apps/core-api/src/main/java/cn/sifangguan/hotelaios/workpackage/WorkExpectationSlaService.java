@@ -1,5 +1,6 @@
 package cn.sifangguan.hotelaios.workpackage;
 
+import cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
@@ -38,6 +39,7 @@ public class WorkExpectationSlaService {
     private final TenantSystemAccountResolver systemAccountResolver;
     private final ObjectMapper objectMapper;
     private final WorkPackageService workPackageService;
+    private final StoreManagerSupervisorResolver supervisorResolver;
 
     public WorkExpectationSlaService(
             NamedParameterJdbcTemplate jdbc,
@@ -46,7 +48,8 @@ public class WorkExpectationSlaService {
             AuditWriter auditWriter,
             TenantSystemAccountResolver systemAccountResolver,
             ObjectMapper objectMapper,
-            WorkPackageService workPackageService
+            WorkPackageService workPackageService,
+            StoreManagerSupervisorResolver supervisorResolver
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -55,6 +58,7 @@ public class WorkExpectationSlaService {
         this.systemAccountResolver = systemAccountResolver;
         this.objectMapper = objectMapper;
         this.workPackageService = workPackageService;
+        this.supervisorResolver = supervisorResolver;
     }
 
     @Transactional
@@ -178,6 +182,7 @@ public class WorkExpectationSlaService {
     }
 
     private void enqueueDueReminders(TenantPrincipal principal, OffsetDateTime processingTime) {
+        var supervisors = supervisorResolver.load(principal, "work-record.team-read");
         List<ReminderSource> sources = jdbc.query("""
                 select x.id, x.status, x.business_date, x.available_at, x.due_at, x.position_assignment_id,
                        x.target_org_unit_id, i.name as item_name, i.reminder_policy::text,
@@ -227,7 +232,7 @@ public class WorkExpectationSlaService {
             JsonNode policy = readPolicy(source.reminderPolicy());
             List<ReminderMoment> moments = new ArrayList<>();
             if (policy.path("moments").isArray()) {
-                addConfiguredMoments(principal, source, policy, moments);
+                addConfiguredMoments(principal, source, policy, moments, supervisors);
             } else {
                 addMoment(moments, policy, "preOpenMinutes", "PRE_OPEN",
                         source.availableAt(), true, source.executorAccountId(), source.assignmentId());
@@ -239,6 +244,10 @@ public class WorkExpectationSlaService {
                         source.dueAt(), false, source.executorAccountId(), source.assignmentId());
                 addMoment(moments, policy, "escalationMinutes", "ESCALATION",
                         source.dueAt(), false, source.managerAccountId(), source.managerAssignmentId());
+                for (var supervisor : supervisors.forWork(source.assignmentId(), source.targetOrgUnitId())) {
+                    addMoment(moments, policy, "escalationMinutes", "ESCALATION", source.dueAt(), false,
+                            supervisor.accountId(), supervisor.assignmentId());
+                }
             }
             for (ReminderMoment moment : moments) {
                 if (!processingTime.isBefore(moment.scheduledAt())
@@ -253,7 +262,8 @@ public class WorkExpectationSlaService {
             TenantPrincipal principal,
             ReminderSource source,
             JsonNode policy,
-            List<ReminderMoment> moments
+            List<ReminderMoment> moments,
+            StoreManagerSupervisorResolver.Audience supervisors
     ) {
         for (JsonNode configured : policy.path("moments")) {
             String code = configured.path("code").asText("").trim().toUpperCase();
@@ -271,6 +281,12 @@ public class WorkExpectationSlaService {
                     : executorRecipients(principal, source);
             for (ReminderRecipient target : recipients) {
                 moments.add(new ReminderMoment(code, kind, scheduledAt, target.accountId(), target.assignmentId()));
+            }
+            if ("DIRECT_MANAGER".equals(recipient)) {
+                for (var supervisor : supervisors.forWork(source.assignmentId(), source.targetOrgUnitId())) {
+                    moments.add(new ReminderMoment(code, kind, scheduledAt,
+                            supervisor.accountId(), supervisor.assignmentId()));
+                }
             }
         }
     }
@@ -411,7 +427,7 @@ public class WorkExpectationSlaService {
                     (id, tenant_id, recipient_account_id, recipient_assignment_id,
                      notification_type, title, content, source_type, source_id, idempotency_key)
                 values (:id, :tenantId, :accountId, :assignmentId,
-                        'WORK_EXPECTATION_REMINDER', :title, :content,
+                        :notificationType, :title, :content,
                         'WORK_EXPECTATION', :expectationId, :idempotencyKey)
                 on conflict (tenant_id, recipient_account_id, idempotency_key)
                 do update set title = excluded.title
@@ -420,6 +436,8 @@ public class WorkExpectationSlaService {
                 .addValue("id", notificationId).addValue("accountId", moment.accountId())
                 .addValue("assignmentId", moment.assignmentId()).addValue("title", title)
                 .addValue("content", content).addValue("expectationId", source.id())
+                .addValue("notificationType", Set.of("ESCALATION", "PROGRESS").contains(moment.kind())
+                        ? "WORK_EXPECTATION_SUPERVISION" : "WORK_EXPECTATION_REMINDER")
                 .addValue("idempotencyKey", "work-expectation:" + source.id() + ":" + moment.stage()),
                 UUID.class);
         jdbc.update("""
@@ -446,11 +464,13 @@ public class WorkExpectationSlaService {
     }
 
     private String reminderContent(String stage, ReminderSource source) {
-        String due = source.dueAt().format(DateTimeFormatter.ofPattern("MM-dd HH:mm"));
-        String prefix = Set.of("ESCALATION", "PROGRESS").contains(stage)
+        String due = source.dueAt().atZoneSameInstant(reminderZone(source))
+                .format(DateTimeFormatter.ofPattern("MM-dd HH:mm"));
+        boolean supervision = Set.of("ESCALATION", "PROGRESS").contains(stage);
+        String prefix = supervision
                 ? "请督办下属完成" : "请按模板完成";
         return prefix + source.itemName() + "，门店：" + source.orgName()
-                + "，截止：" + due + "。点击消息进入事项并上传证据。";
+                + "，截止：" + due + (supervision ? "。点击消息进入工作台查看下属工作并督办。" : "。点击消息进入事项并上传证据。");
     }
 
     private JsonNode readPolicy(String json) {

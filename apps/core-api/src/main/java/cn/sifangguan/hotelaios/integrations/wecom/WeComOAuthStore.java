@@ -101,7 +101,8 @@ public class WeComOAuthStore {
     @Transactional
     public void fail(UUID attemptId, RuntimeException exception) {
         prepare();
-        String error = exception.getClass().getSimpleName();
+        String error = exception instanceof WeComLoginException failure
+                ? failure.reason().name() : exception.getClass().getSimpleName();
         jdbc.update("""
                 update wecom_oauth_attempt
                 set status = 'FAILED', last_error = :error, updated_at = now()

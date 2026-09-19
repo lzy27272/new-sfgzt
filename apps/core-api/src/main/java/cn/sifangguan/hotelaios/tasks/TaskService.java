@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.tasks;
 
 import cn.sifangguan.hotelaios.notifications.NotificationService;
+import cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
@@ -52,6 +53,7 @@ public class TaskService {
     private final TenantSystemAccountResolver systemAccountResolver;
     private final AttachmentService attachmentService;
     private final TaskTargetPolicy taskTargetPolicy;
+    private final StoreManagerSupervisorResolver supervisorResolver;
     private final long defaultEscalationDelayHours;
 
     public TaskService(
@@ -63,6 +65,7 @@ public class TaskService {
             TenantSystemAccountResolver systemAccountResolver,
             AttachmentService attachmentService,
             TaskTargetPolicy taskTargetPolicy,
+            StoreManagerSupervisorResolver supervisorResolver,
             @Value("${app.tasks.default-escalation-delay-hours:48}") long defaultEscalationDelayHours
     ) {
         this.jdbc = jdbc;
@@ -73,6 +76,7 @@ public class TaskService {
         this.systemAccountResolver = systemAccountResolver;
         this.attachmentService = attachmentService;
         this.taskTargetPolicy = taskTargetPolicy;
+        this.supervisorResolver = supervisorResolver;
         this.defaultEscalationDelayHours = Math.max(0, defaultEscalationDelayHours);
     }
 
@@ -503,9 +507,10 @@ public class TaskService {
                 set sla_status = 'OVERDUE', row_version = t.row_version + 1
                 from candidates c
                 where t.tenant_id = :tenantId and t.id = c.id
-                returning t.id, t.title, t.lifecycle_status, t.row_version
+                returning t.id, t.title, t.lifecycle_status, t.row_version, t.org_unit_id
                 """, base(principal).addValue("batchLimit", batchLimit));
         int notifications = 0;
+        var supervisors = overdue.isEmpty() ? null : supervisorResolver.load(principal, "task.read");
         for (Map<String, Object> row : overdue) {
             UUID taskId = (UUID) row.get("id");
             jdbc.update("""
@@ -527,6 +532,14 @@ public class TaskService {
                 notificationService.createForAssignment(reviewer, "TASK_OVERDUE", "任务已逾期",
                         String.valueOf(row.get("title")), "TASK", taskId, "task-overdue:" + taskId);
                 notifications++;
+            }
+            UUID executor = participantAssignment(principal, taskId, "ASSIGNEE");
+            if (executor != null) {
+                for (var supervisor : supervisors.forWork(executor, (UUID) row.get("org_unit_id"))) {
+                    notificationService.createForAssignment(supervisor.assignmentId(), "TASK_OVERDUE", "店长任务已逾期",
+                            String.valueOf(row.get("title")), "TASK", taskId, "task-overdue:" + taskId);
+                    notifications++;
+                }
             }
         }
         int cancelledEscalations = jdbc.update("""

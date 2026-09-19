@@ -68,9 +68,12 @@ test('workbench headline metrics open status details with matching data scope', 
   assert.match(workbench, /点击查看 ›/)
 })
 
-test('executive workbench keeps the hotel portfolio and opens the first hotel detail by default', () => {
+test('executive workbench includes headquarters staff without defaulting to only the first hotel', () => {
   assert.match(workbench, /\{executive && <section className="workbench-portfolio panel">/)
-  assert.match(workbench, /\(executive \|\| hotelManagementKeys\.has\(presentationKey\)\) \? hotels\[0\]/)
+  assert.match(workbench, /hotelManagementKeys\.has\(presentationKey\) \? hotels\[0\]/)
+  assert.doesNotMatch(workbench, /\(executive \|\| hotelManagementKeys/)
+  assert.match(workbench, /completionData\.organizations \?\? \[\]/)
+  assert.match(workbench, /const id = item\.hotelOrgUnitId/)
   assert.match(workbench, /部门工作统计/)
   assert.match(workbench, /部门员工工作统计/)
   assert.match(workbench, /<h3>工作任务<\/h3>/)

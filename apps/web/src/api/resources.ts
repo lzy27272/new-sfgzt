@@ -1,4 +1,5 @@
 import { apiBlob, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
+import { withRequestDeadline } from './requestDeadline'
 import { dashboardApiPaths } from '../app/dashboardContract'
 import { materializeFileForUpload, readableUploadError } from '../app/uploadFiles'
 import type {
@@ -65,7 +66,10 @@ export async function loadIdentity(identity: ApiIdentity, fallback: IdentitySnap
   return withFallback(async () => {
     // Bootstrap must not reuse the demo/default assignment. The server resolves
     // the real account first and returns its valid assignments for selection.
-    const raw = object(await apiRequest<unknown>('/iam/me', { ...identity, businessActorAssignmentId: undefined }))
+    const raw = object(await withRequestDeadline(
+      (signal) => apiRequest<unknown>('/iam/me', { ...identity, businessActorAssignmentId: undefined }, { signal }),
+      '身份与权限读取超时，请检查网络后点击“重新验证”；系统未放开任何账号权限。',
+    ))
     const account = object(raw.account)
     const employee = object(raw.employee)
     const assignments = asList<JsonObject>(value(raw, 'positionAssignments', 'assignments'))
@@ -383,6 +387,30 @@ function demoWorkbenchSummary(): WorkbenchSummary {
   }
 }
 
+function normalizeWorkbenchOrganizations(payload: unknown, fallbackName: string) {
+  return asList<JsonObject>(payload).map((hotel) => ({
+    id: text(hotel, ['id']),
+    name: text(hotel, ['name'], fallbackName),
+    today: normalizeCompletionMetric(hotel.today),
+    monthToDate: normalizeCompletionMetric(value(hotel, 'monthToDate', 'month_to_date')),
+    departments: asList<JsonObject>(hotel.departments).map((department) => ({
+      id: text(department, ['id']),
+      name: text(department, ['name'], '未归属部门'),
+      today: normalizeCompletionMetric(department.today),
+      monthToDate: normalizeCompletionMetric(value(department, 'monthToDate', 'month_to_date')),
+      employees: asList<JsonObject>(department.employees).map((employee) => ({
+        id: text(employee, ['id']),
+        assignmentId: text(employee, ['assignmentId', 'assignment_id']),
+        employeeId: text(employee, ['employeeId', 'employee_id']),
+        name: text(employee, ['name'], '未命名员工'),
+        positionName: text(employee, ['positionName', 'position_name']),
+        today: normalizeCompletionMetric(employee.today),
+        monthToDate: normalizeCompletionMetric(value(employee, 'monthToDate', 'month_to_date')),
+      })),
+    })),
+  }))
+}
+
 export async function loadWorkbenchSummary(identity: ApiIdentity, date?: string) {
   return withFallback(async () => {
     const query = date ? `?businessDate=${encodeURIComponent(date)}` : ''
@@ -392,27 +420,8 @@ export async function loadWorkbenchSummary(identity: ApiIdentity, date?: string)
       monthStart: text(payload, ['monthStart', 'month_start'], ''),
       today: normalizeCompletionMetric(payload.today),
       monthToDate: normalizeCompletionMetric(value(payload, 'monthToDate', 'month_to_date')),
-      hotels: asList<JsonObject>(payload.hotels).map((hotel) => ({
-        id: text(hotel, ['id']),
-        name: text(hotel, ['name'], '授权门店'),
-        today: normalizeCompletionMetric(hotel.today),
-        monthToDate: normalizeCompletionMetric(value(hotel, 'monthToDate', 'month_to_date')),
-        departments: asList<JsonObject>(hotel.departments).map((department) => ({
-          id: text(department, ['id']),
-          name: text(department, ['name'], '未归属部门'),
-          today: normalizeCompletionMetric(department.today),
-          monthToDate: normalizeCompletionMetric(value(department, 'monthToDate', 'month_to_date')),
-          employees: asList<JsonObject>(department.employees).map((employee) => ({
-            id: text(employee, ['id']),
-            assignmentId: text(employee, ['assignmentId', 'assignment_id']),
-            employeeId: text(employee, ['employeeId', 'employee_id']),
-            name: text(employee, ['name'], '未命名员工'),
-            positionName: text(employee, ['positionName', 'position_name']),
-            today: normalizeCompletionMetric(employee.today),
-            monthToDate: normalizeCompletionMetric(value(employee, 'monthToDate', 'month_to_date')),
-          })),
-        })),
-      })),
+      hotels: normalizeWorkbenchOrganizations(payload.hotels, '授权门店'),
+      organizations: normalizeWorkbenchOrganizations(payload.organizations, '集团及总部'),
     } satisfies WorkbenchSummary
   }, async () => demoWorkbenchSummary())
 }
