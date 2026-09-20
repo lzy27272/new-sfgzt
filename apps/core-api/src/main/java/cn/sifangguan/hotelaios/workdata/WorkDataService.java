@@ -159,15 +159,23 @@ public class WorkDataService {
     public List<Map<String, Object>> records() {
         TenantPrincipal principal = prepare();
         accessPolicy.requirePermission("work-record.read");
-        if (!principal.hasTenantScope() && principal.orgScopes().isEmpty()) {
+        if (!principal.hasTenantScope() && principal.orgScopes().isEmpty() && principal.assignmentIds().isEmpty()) {
             return List.of();
         }
         MapSqlParameterSource params = base(principal);
         String visibility = "";
         if (!principal.hasTenantScope()) {
-            params.addValue("scopeIds", principal.orgScopes());
-            visibility = " and exists (select 1 from org_unit_closure vis where vis.tenant_id = w.tenant_id "
-                    + "and vis.descendant_id = w.target_org_unit_id and vis.ancestor_id in (:scopeIds))";
+            List<String> visibleWork = new ArrayList<>();
+            if (!principal.orgScopes().isEmpty()) {
+                params.addValue("scopeIds", principal.orgScopes());
+                visibleWork.add("exists (select 1 from org_unit_closure vis where vis.tenant_id = w.tenant_id "
+                        + "and vis.descendant_id = w.target_org_unit_id and vis.ancestor_id in (:scopeIds))");
+            }
+            if (!principal.assignmentIds().isEmpty()) {
+                params.addValue("ownAssignmentIds", principal.assignmentIds());
+                visibleWork.add("w.position_assignment_id in (:ownAssignmentIds)");
+            }
+            visibility = " and (" + String.join(" or ", visibleWork) + ")";
         }
         return jdbc.queryForList("""
                 select w.id, w.business_date, w.status, w.record_kind, w.payload, w.occurred_at,
@@ -211,7 +219,8 @@ public class WorkDataService {
                 left join work_package_item i on i.tenant_id = w.tenant_id and i.id = w.work_package_item_id
                 where w.tenant_id = :tenantId and w.id = :recordId
                 """, params));
-        accessPolicy.requireOrgScope((UUID) result.get("target_org_unit_id"));
+        accessPolicy.requireOrgScopeOrOwnWork((UUID) result.get("target_org_unit_id"),
+                (UUID) result.get("position_assignment_id"));
         result.put("attachments", jdbc.queryForList("""
                 select id, object_key, original_name, media_type, size_bytes, sha256, scan_status,
                        capture_source, checkpoint_code, captured_at_client, received_at,
@@ -1464,7 +1473,7 @@ public class WorkDataService {
     }
 
     private void authorizeRecordMutation(TenantPrincipal principal, RecordAccess record) {
-        accessPolicy.requireOrgScope(record.targetOrgUnitId());
+        accessPolicy.requireOrgScopeOrOwnWork(record.targetOrgUnitId(), record.assignmentId());
         if (!principal.assignmentIds().contains(record.assignmentId())) {
             accessPolicy.requirePermission("work-record.submit-for-other");
         }

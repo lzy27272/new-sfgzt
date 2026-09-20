@@ -45,6 +45,15 @@ public class AccessPolicy {
         orgScopeResolver.requireAccess(principal(), orgUnitId);
     }
 
+    /** Personal work remains accessible without granting access to everyone at headquarters.
+     * The assignment must come from a tenant-filtered persisted work record, never a request claim.
+     * Callers must still require the operation permission; reviews continue to require org scope.
+     */
+    public void requireOrgScopeOrOwnWork(UUID orgUnitId, UUID persistedAssignmentId) {
+        if (persistedAssignmentId != null && principal().assignmentIds().contains(persistedAssignmentId)) return;
+        requireOrgScope(orgUnitId);
+    }
+
     public void requireActiveAssignment(UUID assignmentId) {
         if (!principal().assignmentIds().contains(assignmentId)) {
             throw new AccessDeniedException("任职无效或不属于当前账号");

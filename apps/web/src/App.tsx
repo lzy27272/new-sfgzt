@@ -5,6 +5,7 @@ import { useScopedResource } from './shared/useScopedResource'
 import { WorkUsageFields } from './features/storeResources/WorkUsageFields'
 import { UsageEvidenceSummary } from './features/storeResources/WorkUsagePanel'
 import { loadUsageCatalogue, supportsWorkUsage, usageInput, usagePayload, usageValidation, type UsageCatalogue } from './features/storeResources/workUsage'
+import { clearManualLogin, rememberManualLogin, requestsManualLogin } from './app/manualLogin'
 import {
   bootstrapAssignmentId,
   bootstrapAssignments,
@@ -13,6 +14,7 @@ import {
   canUseStoredAcceptanceRole,
 } from './app/authBootstrap'
 import { validateImageEvidence } from './app/imageEvidence'
+import { materializeSelectedFiles, restoreReadableDraftFiles } from './app/uploadFiles'
 import {
   addWorkRecordSupplement,
   createWorkRecordDraft,
@@ -73,7 +75,6 @@ import {
   type AppRouteId,
 } from './app/routeConfig'
 import {
-  applyPublishedModuleVisibility,
   isRouteAllowedByRoleDefaults,
   resolveDailyReportsTarget,
   resolveFullAccountPresentationRole,
@@ -81,6 +82,7 @@ import {
   shouldUseRoleDefaultsFallback,
 } from './app/rolePresentationPolicy'
 import { buildNavigationCenters, canOpenStoreResources, navigationCenterForSection } from './app/navigationModel'
+import { navigation, visibleNavigationForContext } from './app/navigationAccess'
 import { CenterFeatureNavigation, MainCenterNavigation } from './shared/CenterNavigation'
 import { resolveNotificationNavigation } from './app/notificationNavigation'
 import { useHashRoute } from './app/useHashRoute'
@@ -92,6 +94,7 @@ import { WecomTaskEntryPage } from './features/wecom/WecomTaskEntry'
 import { buildAppHashLocation, consumeWecomSessionBootstrap, consumeWecomTaskEntry } from './features/wecom/entryRoute'
 import { consumeWecomBindingEntry } from './features/wecom/bindingEntryRoute'
 import { WecomBindingEnrollmentEntry } from './features/wecom/WecomBindingEnrollmentEntry'
+import { buildWeComSilentAuthUrl, isWeComBrowser } from './features/wecom/silentAuth'
 import {
   buildResumableDraftKey,
   fromStoredDraftFile,
@@ -128,31 +131,6 @@ const DataRetentionAdministration = lazy(() => import('./features/dataRetention/
 const StoreResourceFeature = lazy(() => import('./features/storeResources/StoreResourceRoutes').then((module) => ({ default: module.StoreResourceRoutes })))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
-
-const navigation: Array<{ id: AppRouteId; sectionId?: string; label: string; icon: string; group?: string; permissions?: string[]; administratorOnly?: boolean }> = [
-  { id: 'workbench', label: '角色工作台', icon: '⌂' },
-  { id: 'hotel-dashboard', label: '门店工作台', icon: '▤', permissions: ['dashboard.hotel'] },
-  { id: 'operations-dashboard', label: '多门店工作台', icon: '▥', permissions: ['dashboard.operations'] },
-  { id: 'investments', label: '投资测算', icon: '¥', group: '投资决策', permissions: [permissionCodes.investment.read] },
-  { id: 'work-packages', label: '岗位工作模板', icon: '▦', group: '标准与工作', permissions: ['work-package.read', 'work-package.manage', 'standard.read'] },
-  { id: 'my-work', label: '我的工作', icon: '✓', permissions: ['work-record.read', 'work-record.submit', 'work.submit'] },
-  { id: 'team-work', label: '团队工作', icon: '◎', permissions: [permissionCodes.workRecord.readTeam, 'work-record.review'] },
-  { id: 'daily-reports-my', sectionId: 'daily-reports', label: '日报中心', icon: '▣', group: '日报与运营', permissions: [permissionCodes.dailyReport.readOwn, permissionCodes.dailyReport.submit, permissionCodes.dailyReport.readTeam] },
-  { id: 'daily-operations', label: '日运营中心', icon: '◫', permissions: [permissionCodes.dailyOperations.readHotel, permissionCodes.dailyOperations.readCrossHotel] },
-  { id: 'kpi-center', sectionId: 'kpi', label: 'KPI绩效中心', icon: '◎', group: '行政人事', permissions: [permissionCodes.kpi.scorecardReadOwn, permissionCodes.kpi.scorecardReadTeam, permissionCodes.kpi.scorecardReadAll, permissionCodes.kpi.templateRead] },
-  { id: 'rules', label: '企业规则中心', icon: '◇', group: '管理闭环', permissions: ['rule.read', 'rule.manage'] },
-  { id: 'tasks', label: '任务中心', icon: '↗', permissions: ['task.read', 'task.act', 'task.review', permissionCodes.executiveTask.read, permissionCodes.executiveTask.assign] },
-  { id: 'evaluations', label: '标准评价', icon: '★', permissions: ['evaluation.read', 'evaluation.manual-review'] },
-  { id: 'notifications', label: '通知中心', icon: '◉', permissions: ['notification.read'] },
-  { id: 'templates', label: '集团模板配置', icon: '▧', group: '系统配置', permissions: ['template.manage'] },
-  { id: 'daily-report-templates', label: '日报模板中心', icon: '▤', permissions: [permissionCodes.dailyReportTemplate.read, permissionCodes.dailyReportTemplate.edit, permissionCodes.dailyReportTemplate.publish] },
-  { id: 'organization', label: '组织与权限', icon: '⚙', group: '系统配置', permissions: ['org.manage', 'position-profile.read'] },
-  { id: 'store-resources', label: '库存与固定资产', icon: '库', group: '系统配置', permissions: [permissionCodes.storeResource.read] },
-  { id: 'data-retention', label: '数据留存策略', icon: '◷', group: '系统配置', administratorOnly: true },
-  { id: 'wecom-webhooks', label: '企业微信 Webhook', icon: '◉', group: '系统配置', permissions: ['org.manage'] },
-  { id: 'wecom-onboarding', label: '企业微信入职审核', icon: '人', group: '系统配置', permissions: [permissionCodes.wecomBinding.read] },
-  { id: 'wecom-bindings', label: '企微绑定与异常', icon: '◎', permissions: [permissionCodes.wecomBinding.read] },
-]
 
 const roleStorageKey = 'hotel-ai-os-role:v1'
 const statusText: Record<string, string> = {
@@ -596,14 +574,19 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
     setMessage(undefined)
     try {
       const result = await validateImageEvidence(entries)
-      if (result.accepted.length) appendAttachments(result.accepted.map((entry) => ({
+      const materialized = await materializeSelectedFiles(result.accepted)
+      if (materialized.accepted.length) appendAttachments(materialized.accepted.map((entry) => ({
         ...entry,
         draftFileId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       })))
-      if (result.rejected.length) {
-        const first = result.rejected[0]
-        const remaining = result.rejected.length - 1
-        setMessage(`${first.entry.file.name}：${first.reason}${remaining ? `；另有 ${remaining} 张照片未加入` : ''}`)
+      const rejected = [
+        ...result.rejected.map((entry) => ({ fileName: entry.entry.file.name, reason: entry.reason })),
+        ...materialized.rejected.map((entry) => ({ fileName: entry.entry.file.name, reason: entry.reason })),
+      ]
+      if (rejected.length) {
+        const first = rejected[0]
+        const remaining = rejected.length - 1
+        setMessage(`${first.fileName}：${first.reason}${remaining ? `；另有 ${remaining} 个附件未加入` : ''}`)
       }
     } finally {
       setValidatingAttachments(false)
@@ -693,16 +676,36 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
         setPayload(serverForm.payload)
         formDraftRef.current = serverForm
       }
-      const restoredFiles = (localFiles ?? [])
+      const storedFiles = (localFiles ?? [])
         .filter((entry): entry is StoredWorkEvidence => isStoredDraftFile(entry)
           && ['CAMERA', 'FILE_PICKER'].includes(entry.captureSource))
         .map(storedToWorkEvidence)
+      const restored = await restoreReadableDraftFiles(storedFiles)
+      if (!active) return
+      const restoredFiles = restored.accepted
       setAttachments(restoredFiles)
       filesDraftRef.current = restoredFiles.map(workEvidenceToStored)
+      // Rewrite every restored entry, including readable legacy entries, so
+      // IndexedDB keeps the self-contained Blob instead of an expiring mobile
+      // picker handle. This makes the repair durable across the next reload.
+      if (storedFiles.length) {
+        try {
+          await (filesDraftRef.current.length
+            ? writeResumableDraft(filesDraftKey, filesDraftRef.current)
+            : removeResumableDraft(filesDraftKey))
+        } catch {
+          setMessage('无法清理已失效的本机附件，请重新打开后手动移除。')
+        }
+      }
+      const removedDraftNotice = restored.rejected.length
+        ? `已自动移除 ${restored.rejected.length} 个无法读取的旧附件，请重新拍摄或选择。`
+        : ''
       if (inheritedOwnerDraft) {
-        setDraftNotice('原执行人的草稿已保留；你将以受托人身份新建工作记录。')
+        setDraftNotice(`原执行人的草稿已保留；你将以受托人身份新建工作记录。${removedDraftNotice ? ` ${removedDraftNotice}` : ''}`)
       } else if (!localConflictsWithServer && ((localForm?.schemaVersion === 1 && hasWorkRecordDraftContent(localForm)) || restoredFiles.length) && !serverLocked) {
-        setDraftNotice(`已恢复上次未完成的内容${restoredFiles.length ? `和 ${restoredFiles.length} 个待上传附件` : ''}。`)
+        setDraftNotice(`已恢复上次未完成的内容${restoredFiles.length ? `和 ${restoredFiles.length} 个待上传附件` : ''}。${removedDraftNotice ? ` ${removedDraftNotice}` : ''}`)
+      } else if (removedDraftNotice) {
+        setDraftNotice(removedDraftNotice)
       } else if (loadError) {
         setMessage(loadError instanceof Error ? loadError.message : '工作记录加载失败')
       }
@@ -1353,6 +1356,12 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
   const taskDraftStorageReadyRef = useRef(false)
   const isAssignee = Boolean(identity.businessActorAssignmentId && identity.businessActorAssignmentId === task.assigneeAssignmentId)
   const isReviewer = Boolean(identity.businessActorAssignmentId && identity.businessActorAssignmentId === task.reviewerAssignmentId)
+  const dispatchReferenceEvidence = task.evidence?.filter((evidence) => evidence.structuredResult?.purpose === 'DISPATCH_REFERENCE') ?? []
+  const executionEvidence = task.evidence?.filter((evidence) => evidence.structuredResult?.purpose !== 'DISPATCH_REFERENCE') ?? []
+  const evidenceReferenceNote = dispatchReferenceEvidence.find((evidence) => typeof evidence.structuredResult?.note === 'string')?.structuredResult?.note
+  const dispatchReferenceNote: string | undefined = typeof task.sourceSnapshot?.dispatchReferenceNote === 'string'
+    ? task.sourceSnapshot.dispatchReferenceNote
+    : typeof evidenceReferenceNote === 'string' ? evidenceReferenceNote : undefined
   const canEditEvidence = Boolean(identity.businessActorAssignmentId && identity.businessActorAssignmentId === task.assigneeAssignmentId && ['IN_PROGRESS', 'REWORK'].includes(task.status))
   const allowedActions = (actionsByStatus[task.status] ?? []).filter((action) => {
     if (task.status === 'RESULT_SUBMITTED' && task.standardVersionId) return false
@@ -1368,16 +1377,30 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
     void Promise.all([
       readResumableDraft<TaskFormDraft>(taskFormDraftKey),
       readResumableDraft<StoredDraftFile[]>(taskFilesDraftKey),
-    ]).then(([storedForm, storedFiles]) => {
+    ]).then(async ([storedForm, storedFiles]) => {
       if (!active) return
-      const restoredFiles = (storedFiles ?? [])
+      const pendingFiles = (storedFiles ?? [])
         .filter(isStoredDraftFile)
         .map((stored) => ({ draftFileId: stored.id, file: fromStoredDraftFile(stored) }))
+      const restored = await restoreReadableDraftFiles(pendingFiles)
+      if (!active) return
+      const restoredFiles = restored.accepted
       if (storedForm?.schemaVersion === 1) setRemark(storedForm.remark)
       setEvidenceFiles(restoredFiles)
       taskFilesDraftRef.current = restoredFiles.map((entry) => toStoredDraftFile(entry.file, entry.draftFileId))
-      if (storedForm?.remark || restoredFiles.length) {
-          setDraftNotice(`已恢复上次未完成的处理说明${restoredFiles.length ? `和 ${restoredFiles.length} 个待上传附件` : ''}。`)
+      // Migrate readable legacy task drafts to self-contained Blobs as well as
+      // removing entries whose temporary picker handles have already expired.
+      if (pendingFiles.length) {
+        try {
+          await (taskFilesDraftRef.current.length
+            ? writeResumableDraft(taskFilesDraftKey, taskFilesDraftRef.current)
+            : removeResumableDraft(taskFilesDraftKey))
+        } catch {
+          setError('无法清理已失效的本机附件，请重新打开后手动移除。')
+        }
+      }
+      if (storedForm?.remark || restoredFiles.length || restored.rejected.length) {
+          setDraftNotice(`已恢复上次未完成的处理说明${restoredFiles.length ? `和 ${restoredFiles.length} 个待上传附件` : ''}。${restored.rejected.length ? ` 已自动移除 ${restored.rejected.length} 个无法读取的旧附件，请重新拍摄或选择。` : ''}`)
       }
       taskDraftStorageReadyRef.current = true
       setDraftHydrated(true)
@@ -1474,7 +1497,8 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
     setError(undefined)
     try {
       const result = await validateImageEvidence(files.slice(0, 10).map((file) => ({ file })))
-      const accepted = result.accepted.map((entry) => ({
+      const materialized = await materializeSelectedFiles(result.accepted)
+      const accepted = materialized.accepted.map((entry) => ({
         draftFileId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         file: entry.file,
       }))
@@ -1492,10 +1516,14 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
         if (accepted.length > available) setError(`任务最多暂存 10 个待上传附件，本次仅加入 ${available} 个。`)
         return next
       })
-      if (result.rejected.length) {
-        const first = result.rejected[0]
-        const remaining = result.rejected.length - 1
-        setError(`${first.entry.file.name}：${first.reason}${remaining ? `；另有 ${remaining} 张照片未加入` : ''}`)
+      const rejected = [
+        ...result.rejected.map((entry) => ({ fileName: entry.entry.file.name, reason: entry.reason })),
+        ...materialized.rejected.map((entry) => ({ fileName: entry.entry.file.name, reason: entry.reason })),
+      ]
+      if (rejected.length) {
+        const first = rejected[0]
+        const remaining = rejected.length - 1
+        setError(`${first.fileName}：${first.reason}${remaining ? `；另有 ${remaining} 个附件未加入` : ''}`)
       }
     } finally {
       setValidatingEvidence(false)
@@ -1523,7 +1551,8 @@ function TaskDetail({ initial, identity, permissions, onClose, onChanged }: { in
     <div className="drawer-body"><div className="task-summary"><span><small>任务状态</small><Status value={task.status} /></span><span><small>SLA状态</small><Status value={task.slaStatus} /></span><span><small>优先级</small><Status value={task.priority} /></span></div>
       <dl><div><dt>目标组织</dt><dd>{task.targetOrgName}</dd></div><div><dt>负责人</dt><dd>{task.assigneeName}</dd></div><div><dt>验收人</dt><dd>{task.reviewerName}</dd></div><div><dt>截止时间</dt><dd>{formatDate(task.dueAt)}</dd></div><div><dt>来源</dt><dd>{task.creationSource ? label(task.creationSource) : task.sourceTitle ?? label(task.sourceType)}</dd></div></dl>
       <section className="detail-section"><h3>执行要求</h3><p>{task.description ?? '任务来源已记录，执行结果需提交结构化说明和证据。'}</p></section>
-      <section className="detail-section"><h3>执行证据</h3>{draftNotice && <div className="inline-success">{draftNotice}</div>}{task.evidence?.length ? <div className="attachment-list">{task.evidence.map((evidence) => { const evidenceName = evidence.originalName || label(evidence.evidenceType); return <span className="evidence-chip" key={evidence.id}><button className="secondary" disabled={!evidence.objectKey} onClick={() => void previewEvidence(evidence.id, evidenceName, evidence.mediaType)}>{evidenceName} · {evidence.scanStatus}</button>{canEditEvidence && evidence.submittedByAssignmentId === identity.businessActorAssignmentId && <button className="text-action danger" disabled={busy === `delete:${evidence.id}`} onClick={() => void removeEvidence(evidence.id)}>删除</button>}</span> })}</div> : <p className="muted">尚未上传图片或文档证据。</p>}{canEditEvidence && <div className="evidence-uploader"><input type="file" multiple disabled={validatingEvidence || !!busy} accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx" onChange={(event) => { void selectEvidenceFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = '' }} /><button className="secondary" disabled={!!busy || validatingEvidence || !evidenceFiles.length} onClick={() => void uploadEvidence()}>{validatingEvidence ? '校验图片中…' : busy === 'upload-evidence' ? '上传中…' : `上传证据${evidenceFiles.length ? `（${evidenceFiles.length}）` : ''}`}</button><small>照片支持横拍或竖拍；支持 JPG、PNG、PDF、Word、Excel，单文件不超过20MB。选中的文件会先保存在本机草稿，切出后可继续。</small></div>}{!!evidenceFiles.length && <div className="inline-warning">还有 {evidenceFiles.length} 个证据仅保存在本机，上传成功前不能提交执行结果。</div>}{error && <div className="inline-error">{error}</div>}</section>
+      {(dispatchReferenceNote || dispatchReferenceEvidence.length > 0) && <section className="detail-section"><h3>下达参考</h3>{dispatchReferenceNote && <p>{String(dispatchReferenceNote)}</p>}{dispatchReferenceEvidence.length > 0 && <div className="attachment-list">{dispatchReferenceEvidence.map((evidence) => { const evidenceName = evidence.originalName || '参考图片'; return <span className="evidence-chip" key={evidence.id}><button className="secondary" disabled={!evidence.objectKey} onClick={() => void previewEvidence(evidence.id, evidenceName, evidence.mediaType)}>{evidenceName} · 查看参考</button></span> })}</div>}</section>}
+      <section className="detail-section"><h3>执行证据</h3>{draftNotice && <div className="inline-success">{draftNotice}</div>}{executionEvidence.length ? <div className="attachment-list">{executionEvidence.map((evidence) => { const evidenceName = evidence.originalName || label(evidence.evidenceType); return <span className="evidence-chip" key={evidence.id}><button className="secondary" disabled={!evidence.objectKey} onClick={() => void previewEvidence(evidence.id, evidenceName, evidence.mediaType)}>{evidenceName} · {evidence.scanStatus}</button>{canEditEvidence && evidence.submittedByAssignmentId === identity.businessActorAssignmentId && <button className="text-action danger" disabled={busy === `delete:${evidence.id}`} onClick={() => void removeEvidence(evidence.id)}>删除</button>}</span> })}</div> : <p className="muted">尚未上传图片或文档证据。</p>}{canEditEvidence && <div className="evidence-uploader"><input type="file" multiple disabled={validatingEvidence || !!busy} accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx" onChange={(event) => { void selectEvidenceFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = '' }} /><button className="secondary" disabled={!!busy || validatingEvidence || !evidenceFiles.length} onClick={() => void uploadEvidence()}>{validatingEvidence ? '校验图片中…' : busy === 'upload-evidence' ? '上传中…' : `上传证据${evidenceFiles.length ? `（${evidenceFiles.length}）` : ''}`}</button><small>照片支持横拍或竖拍；支持 JPG、PNG、PDF、Word、Excel，单文件不超过20MB。选中的文件会先保存在本机草稿，切出后可继续。</small></div>}{!!evidenceFiles.length && <div className="inline-warning">还有 {evidenceFiles.length} 个证据仅保存在本机，上传成功前不能提交执行结果。</div>}{error && <div className="inline-error">{error}</div>}</section>
       {!!allowedActions.length && <section className="action-box"><label>处理说明<textarea rows={3} value={remark} onChange={(event) => setRemark(event.target.value)} placeholder="填写执行结果、验收意见或返工原因" /></label><div>{allowedActions.map((action) => <button className={action.tone === 'danger' ? 'danger-button' : 'primary'} disabled={!!busy || !remark.trim() || (action.command === 'submit-result' && evidenceFiles.length > 0)} onClick={() => run(action.command)} key={action.command}>{busy === action.command ? '处理中…' : action.label}</button>)}</div></section>}
       {task.status === 'RESULT_SUBMITTED' && task.standardVersionId && isReviewer && permissions.includes('evaluation.manual-review') && <section className="action-box"><h3>任务结果标准评价</h3><p className="muted">系统使用任务创建时冻结的标准版本评价执行结果；评价完成后任务进入待验收状态。</p>{error && <div className="inline-error">{error}</div>}<div><button className="primary" disabled={!!busy} onClick={evaluateResult}>{busy === 'evaluate-result' ? '评价中…' : '按绑定标准评价结果'}</button></div></section>}
       <section className="detail-section"><h3>不可变时间线</h3><div className="timeline">{task.timeline?.length ? task.timeline.map((item) => <div key={item.id}><i /><span><strong>{label(item.toStatus)}</strong><small>{item.actorName} · {formatDate(item.occurredAt)}</small>{item.remark && <p>{item.remark}</p>}</span></div>) : <p className="muted">暂无流转记录。</p>}</div></section>
@@ -1654,7 +1683,7 @@ function Notifications({ identity, permissions, routeParams, go }: { identity: R
   </section>
 }
 
-function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
+function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => void; onWecomLogin?: () => void }) {
   const [loginName, setLoginName] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string>()
@@ -1678,11 +1707,12 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) {
       </section>
       <section className="login-auth-panel">
         <form className="login-auth-card" aria-label="中台账号登录" aria-busy={busy} onSubmit={submit}>
-          <header><h2>账号登录</h2><p>请输入管理员分配的测试账号和初始密码。</p></header>
+          <header><h2>账号登录</h2><p>请输入中台账号和密码。未绑定企业微信的账号也可以在此登录。</p></header>
           <label>登录账号<input name="username" autoFocus autoComplete="username" disabled={busy} aria-invalid={Boolean(error)} aria-describedby={error ? 'login-error' : undefined} value={loginName} onChange={(event) => setLoginName(event.target.value)} placeholder="请输入登录账号" /></label>
           <label>登录密码<input name="password" type="password" autoComplete="current-password" disabled={busy} aria-invalid={Boolean(error)} aria-describedby={error ? 'login-error' : undefined} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入登录密码" /></label>
           {error && <div id="login-error" className="inline-error" role="alert" aria-live="polite">{error}</div>}
           <button className="primary login-auth-submit" disabled={busy || !loginName.trim() || !password}>{busy ? '正在验证…' : '登录中台'}</button>
+          {onWecomLogin && <button className="secondary" type="button" disabled={busy} onClick={onWecomLogin}>改用企业微信登录</button>}
           <small>内部测试系统 · 关键操作均记录账号、组织和时间</small>
         </form>
         {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
@@ -1709,13 +1739,20 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
           {!error && <div className="state-card"><div className="spinner" /><strong>正在读取身份与权限</strong></div>}
           {error && <>
             <button type="button" className="primary login-auth-submit" onClick={onRetry}>重新验证</button>
-            {onReturnToLogin && <button type="button" className="secondary" onClick={onReturnToLogin}>返回账号登录</button>}
           </>}
+          {onReturnToLogin && <button type="button" className="secondary" onClick={onReturnToLogin}>使用账号密码登录</button>}
         </div>
         {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
       </section>
     </div>
   </main>
+}
+
+function WeComSilentLoginRedirect({ onReturnToLogin }: { onReturnToLogin: () => void }) {
+  useEffect(() => {
+    window.location.replace(buildWeComSilentAuthUrl())
+  }, [])
+  return <SessionBootstrapPage error={undefined} onRetry={() => window.location.replace(buildWeComSilentAuthUrl())} onReturnToLogin={onReturnToLogin} />
 }
 
 function ChangePasswordDialog({ identity, onClose, onChanged }: { identity: RoleContext; onClose: () => void; onChanged: () => void }) {
@@ -1870,35 +1907,15 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const pilotDemoMode = demoFallbackEnabled && me.source === 'demo'
   const isChairmanContext = presentationRoleCode === 'GROUP_CHAIRMAN'
   const executiveTasksEnabled = me.data.capabilities.groupManagement.executiveTasksEnabled
-  const permissionVisibleNavigation = useMemo(() => navigation.filter((item) => {
-    if (item.administratorOnly && !isDataRetentionAdministrator) return false
-    if (['hotel-dashboard', 'operations-dashboard'].includes(item.id)) return false
-    if (['rules', 'work-packages'].includes(item.id) && !isPlatformAdmin) return false
-    if (item.id === 'my-work' && !activeIdentity.businessActorAssignmentId) return false
-    if (item.id === 'tasks' && isChairmanContext) {
-      return executiveTasksEnabled && Boolean(activeIdentity.businessActorAssignmentId) &&
-        (activePermissions.includes('*') || activePermissions.includes(permissionCodes.executiveTask.read) || activePermissions.includes(permissionCodes.executiveTask.assign))
-    }
-    return !item.permissions?.length ||
-      (demoFallbackEnabled && me.source === 'demo' && !isDailyFeatureRoute(item.id) && !isInvestmentFeatureRoute(item.id)) ||
-      activePermissions.includes('*') ||
-      item.permissions.some((permission) => activePermissions.includes(permission))
-  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.source])
-  const publishedModuleNavigation = useMemo(
-    () => applyPublishedModuleVisibility(
-      permissionVisibleNavigation,
-      activePermissions,
-      presentationRoleCode,
-    ),
-    [activePermissions, permissionVisibleNavigation, presentationRoleCode],
-  )
-  const visibleNavigation = useMemo(() => {
-    if (!isDataRetentionAdministrator || publishedModuleNavigation.some((item) => item.id === 'data-retention')) {
-      return publishedModuleNavigation
-    }
-    const visibleIds = new Set(publishedModuleNavigation.map((item) => item.id))
-    return navigation.filter((item) => visibleIds.has(item.id) || item.id === 'data-retention')
-  }, [isDataRetentionAdministrator, publishedModuleNavigation])
+  const visibleNavigation = useMemo(() => visibleNavigationForContext({
+    permissions: activePermissions,
+    roleCode: presentationRoleCode,
+    hasAssignment: Boolean(activeIdentity.businessActorAssignmentId),
+    executiveTasksEnabled,
+    isPlatformAdmin,
+    isDataRetentionAdministrator,
+    demo: demoFallbackEnabled && me.source === 'demo',
+  }), [activeIdentity.businessActorAssignmentId, activePermissions, executiveTasksEnabled, isDataRetentionAdministrator, isPlatformAdmin, me.source, presentationRoleCode])
   const navigationCenters = useMemo(() => buildNavigationCenters(visibleNavigation, activeIdentity.label), [visibleNavigation, activeIdentity.label])
   const activeCenterId = navigationCenterForSection(sectionId, routeParams)
   const activeCenter = navigationCenters.find((center) => center.id === activeCenterId)
@@ -2052,25 +2069,40 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
 }
 
 export default function App() {
+  const [manualLogin, setManualLogin] = useState(() => {
+    if (initialWecomSessionBootstrap) clearManualLogin()
+    if (authMode !== 'dev-header' && consumeLogoutEntry(clearAccessToken)) {
+      rememberManualLogin()
+      window.history.replaceState(null, '', buildAppHashLocation('#/login', import.meta.env.BASE_URL))
+    }
+    return requestsManualLogin()
+  })
   const [authenticated, setAuthenticated] = useState(() => {
-    if (authMode !== 'dev-header' && consumeLogoutEntry(clearAccessToken)) return false
+    if (authMode !== 'dev-header' && manualLogin && !initialWecomSessionBootstrap) return false
     return authMode !== 'bearer' || initialWecomSessionBootstrap || hasAccessToken()
   })
   const [wecomTaskEntry, setWecomTaskEntry] = useState(initialWecomTaskEntry)
   const [wecomBindingEntry, setWecomBindingEntry] = useState(initialWecomBindingEntry)
   const completeWecomTaskEntry = useCallback(() => {
+    clearManualLogin()
+    setManualLogin(false)
     setWecomTaskEntry(undefined)
     setAuthenticated(true)
   }, [])
   const cancelWecomTaskEntry = useCallback(() => {
-    window.history.replaceState(null, '', buildAppHashLocation('#/', import.meta.env.BASE_URL))
+    clearAccessToken()
+    rememberManualLogin()
+    window.history.replaceState(null, '', buildAppHashLocation('#/login', import.meta.env.BASE_URL))
+    setManualLogin(true)
+    setAuthenticated(false)
     setWecomTaskEntry(undefined)
+    setWecomBindingEntry(undefined)
   }, [])
   useEffect(() => {
-    const expired = () => setAuthenticated(false)
+    const expired = () => cancelWecomTaskEntry()
     window.addEventListener('hotel-ai-os:auth-expired', expired)
     return () => window.removeEventListener('hotel-ai-os:auth-expired', expired)
-  }, [])
+  }, [cancelWecomTaskEntry])
   if (wecomTaskEntry) return <WecomTaskEntryPage
     entry={wecomTaskEntry}
     onAuthenticated={completeWecomTaskEntry}
@@ -2078,11 +2110,15 @@ export default function App() {
   />
   if (wecomBindingEntry) return <WecomBindingEnrollmentEntry
     entry={wecomBindingEntry}
-    onReturn={() => {
-      window.history.replaceState(null, '', buildAppHashLocation('#/', import.meta.env.BASE_URL))
-      setWecomBindingEntry(undefined)
-    }}
+    onReturn={cancelWecomTaskEntry}
   />
-  if (!authenticated) return <LoginPage onAuthenticated={() => setAuthenticated(true)} />
-  return <AuthenticatedApp onLogout={() => { void logout(); setAuthenticated(false) }} />
+  if (!authenticated && !manualLogin && authMode === 'bearer' && isWeComBrowser()) return <WeComSilentLoginRedirect onReturnToLogin={cancelWecomTaskEntry} />
+  if (!authenticated) return <LoginPage onAuthenticated={() => {
+    window.history.replaceState(null, '', buildAppHashLocation('#/workbench', import.meta.env.BASE_URL))
+    setAuthenticated(true)
+  }} onWecomLogin={isWeComBrowser() ? () => {
+    clearManualLogin()
+    window.location.replace(buildWeComSilentAuthUrl())
+  } : undefined} />
+  return <AuthenticatedApp onLogout={() => { void logout(); cancelWecomTaskEntry() }} />
 }

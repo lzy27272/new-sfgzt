@@ -1,4 +1,5 @@
-import { apiBlob, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
+import { apiBlob, apiMutation, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
+import { withRequestDeadline } from './requestDeadline'
 import { dashboardApiPaths } from '../app/dashboardContract'
 import { camelizeKeysDeep } from '../features/shared/featureApi'
 import type { UsageDetail } from '../features/storeResources/workUsage'
@@ -67,7 +68,10 @@ export async function loadIdentity(identity: ApiIdentity, fallback: IdentitySnap
   return withFallback(async () => {
     // Bootstrap must not reuse the demo/default assignment. The server resolves
     // the real account first and returns its valid assignments for selection.
-    const raw = object(await apiRequest<unknown>('/iam/me', { ...identity, businessActorAssignmentId: undefined }))
+    const raw = object(await withRequestDeadline(
+      (signal) => apiRequest<unknown>('/iam/me', { ...identity, businessActorAssignmentId: undefined }, { signal }),
+      '身份与权限读取超时，请检查网络后点击“重新验证”；系统未放开任何账号权限。',
+    ))
     const account = object(raw.account)
     const employee = object(raw.employee)
     const assignments = asList<JsonObject>(value(raw, 'positionAssignments', 'assignments'))
@@ -387,6 +391,30 @@ function demoWorkbenchSummary(): WorkbenchSummary {
   }
 }
 
+function normalizeWorkbenchOrganizations(payload: unknown, fallbackName: string) {
+  return asList<JsonObject>(payload).map((hotel) => ({
+    id: text(hotel, ['id']),
+    name: text(hotel, ['name'], fallbackName),
+    today: normalizeCompletionMetric(hotel.today),
+    monthToDate: normalizeCompletionMetric(value(hotel, 'monthToDate', 'month_to_date')),
+    departments: asList<JsonObject>(hotel.departments).map((department) => ({
+      id: text(department, ['id']),
+      name: text(department, ['name'], '未归属部门'),
+      today: normalizeCompletionMetric(department.today),
+      monthToDate: normalizeCompletionMetric(value(department, 'monthToDate', 'month_to_date')),
+      employees: asList<JsonObject>(department.employees).map((employee) => ({
+        id: text(employee, ['id']),
+        assignmentId: text(employee, ['assignmentId', 'assignment_id']),
+        employeeId: text(employee, ['employeeId', 'employee_id']),
+        name: text(employee, ['name'], '未命名员工'),
+        positionName: text(employee, ['positionName', 'position_name']),
+        today: normalizeCompletionMetric(employee.today),
+        monthToDate: normalizeCompletionMetric(value(employee, 'monthToDate', 'month_to_date')),
+      })),
+    })),
+  }))
+}
+
 export async function loadWorkbenchSummary(identity: ApiIdentity, date?: string) {
   return withFallback(async () => {
     const query = date ? `?businessDate=${encodeURIComponent(date)}` : ''
@@ -396,27 +424,8 @@ export async function loadWorkbenchSummary(identity: ApiIdentity, date?: string)
       monthStart: text(payload, ['monthStart', 'month_start'], ''),
       today: normalizeCompletionMetric(payload.today),
       monthToDate: normalizeCompletionMetric(value(payload, 'monthToDate', 'month_to_date')),
-      hotels: asList<JsonObject>(payload.hotels).map((hotel) => ({
-        id: text(hotel, ['id']),
-        name: text(hotel, ['name'], '授权门店'),
-        today: normalizeCompletionMetric(hotel.today),
-        monthToDate: normalizeCompletionMetric(value(hotel, 'monthToDate', 'month_to_date')),
-        departments: asList<JsonObject>(hotel.departments).map((department) => ({
-          id: text(department, ['id']),
-          name: text(department, ['name'], '未归属部门'),
-          today: normalizeCompletionMetric(department.today),
-          monthToDate: normalizeCompletionMetric(value(department, 'monthToDate', 'month_to_date')),
-          employees: asList<JsonObject>(department.employees).map((employee) => ({
-            id: text(employee, ['id']),
-            assignmentId: text(employee, ['assignmentId', 'assignment_id']),
-            employeeId: text(employee, ['employeeId', 'employee_id']),
-            name: text(employee, ['name'], '未命名员工'),
-            positionName: text(employee, ['positionName', 'position_name']),
-            today: normalizeCompletionMetric(employee.today),
-            monthToDate: normalizeCompletionMetric(value(employee, 'monthToDate', 'month_to_date')),
-          })),
-        })),
-      })),
+      hotels: normalizeWorkbenchOrganizations(payload.hotels, '授权门店'),
+      organizations: normalizeWorkbenchOrganizations(payload.organizations, '集团及总部'),
     } satisfies WorkbenchSummary
   }, async () => demoWorkbenchSummary())
 }
@@ -777,6 +786,10 @@ function normalizeTask(item: JsonObject): ManagementTask {
     sizeBytes: value(row, 'sizeBytes', 'size_bytes') === undefined ? undefined : number(row, ['sizeBytes', 'size_bytes']),
     scanStatus: text(row, ['scanStatus', 'scan_status'], 'PENDING'),
     createdAt: text(row, ['createdAt', 'created_at'], '') || undefined,
+    structuredResult: (() => {
+      const raw = jsonColumn(value(row, 'structuredResult', 'structured_result'))
+      return raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined
+    })(),
   }))
   return {
     id: text(item, ['id']), code: text(item, ['code', 'taskNo', 'task_no']), title: text(item, ['title', 'name']),
@@ -792,23 +805,68 @@ function normalizeTask(item: JsonObject): ManagementTask {
       const raw = value(item, 'resultSnapshot', 'result_snapshot')
       return raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined
     })(),
+    sourceSnapshot: (() => {
+      const raw = jsonColumn(value(item, 'sourceSnapshot', 'source_snapshot'))
+      return raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined
+    })(),
     sourceType: text(item, ['sourceType', 'source_type'], 'MANUAL'),
     creationSource: text(item, ['creationSource', 'creation_source'], '') || undefined,
     sourceTitle: text(item, ['sourceTitle', 'source_title'], '') || undefined,
     description: text(item, ['description', 'requirement'], '') || undefined,
     dueAt: text(item, ['dueAt', 'due_at'], '') || undefined,
     version: number(item, ['version', 'lockVersion', 'row_version'], 0),
+    createdByAssignmentId: text(item, ['createdByAssignmentId', 'created_by_assignment_id'], '') || undefined,
     evaluationId: text(item, ['evaluationId', 'standardEvaluationId'], '') || undefined,
     timeline: value(item, 'timeline', 'transitions') ? normalizeTimeline(value(item, 'timeline', 'transitions')) : undefined,
     evidence,
   }
 }
 
-export async function createManagementTask(identity: ApiIdentity, input: Record<string, unknown>) {
+export async function createManagementTask(
+  identity: ApiIdentity,
+  input: Record<string, unknown>,
+  idempotencyKey: string = crypto.randomUUID(),
+) {
   return apiRequest<Record<string, unknown>>('/tasks', identity, {
     method: 'POST',
-    headers: { 'Idempotency-Key': crypto.randomUUID() },
+    headers: { 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(input),
+  })
+}
+
+export async function uploadTaskDispatchAttachment(
+  identity: ApiIdentity,
+  taskId: string,
+  assignmentId: string | undefined,
+  note: string,
+  file: File,
+) {
+  const uploadFile = await materializeFileForUpload(file)
+  const query = new URLSearchParams()
+  if (assignmentId) query.set('submittedByAssignmentId', assignmentId)
+  if (note.trim()) query.set('note', note.trim())
+  const form = new FormData()
+  form.append('file', uploadFile, uploadFile.name)
+  try {
+    return await apiRequest(`/tasks/${taskId}/dispatch-attachments/upload?${query.toString()}`, identity, {
+      method: 'POST', body: form,
+    })
+  } catch (reason) {
+    throw readableUploadError(reason, file.name)
+  }
+}
+
+export async function dispatchManagementTask(
+  identity: ApiIdentity,
+  taskId: string,
+  actorAssignmentId: string | undefined,
+  expectedVersion: number,
+  idempotencyKey: string,
+) {
+  return apiMutation(`/tasks/${taskId}/actions/dispatch`, identity, {
+    body: { actorAssignmentId: actorAssignmentId ?? null, payload: { source: 'CREATE_AND_DISPATCH' } },
+    expectedVersion,
+    idempotencyKey,
   })
 }
 

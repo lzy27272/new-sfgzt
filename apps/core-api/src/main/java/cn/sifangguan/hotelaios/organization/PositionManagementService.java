@@ -3,6 +3,7 @@ package cn.sifangguan.hotelaios.organization;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
+import cn.sifangguan.hotelaios.shared.features.GroupManagementFeatureGate;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,19 +48,22 @@ public class PositionManagementService {
     private final AccessPolicy accessPolicy;
     private final AuditWriter auditWriter;
     private final ObjectMapper objectMapper;
+    private final GroupManagementFeatureGate featureGate;
 
     public PositionManagementService(
             NamedParameterJdbcTemplate jdbc,
             TenantDatabaseContext databaseContext,
             AccessPolicy accessPolicy,
             AuditWriter auditWriter,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            GroupManagementFeatureGate featureGate
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
         this.auditWriter = auditWriter;
         this.objectMapper = objectMapper;
+        this.featureGate = featureGate;
     }
 
     @Transactional(readOnly = true)
@@ -128,6 +132,50 @@ public class PositionManagementService {
                         && permissionAllowedForPosition(position, rs.getString("code")),
                 permissionRestrictionReason(position, rs.getString("code"))
         ));
+    }
+
+    @Transactional(readOnly = true)
+    public PositionManagementModels.ProfileContext profileContext(UUID positionId) {
+        accessPolicy.requirePermission("position-profile.read");
+        TenantPrincipal principal = prepare();
+        PositionLock position = positionId == null
+                ? null : requirePosition(principal, positionId, false, false);
+        List<PositionManagementModels.PermissionOption> retained = position == null
+                ? List.of() : retainedPermissions(principal, positionId);
+        return new PositionManagementModels.ProfileContext(
+                position == null ? "CUSTOM" : position.roleCode(),
+                AUTHORIZATION_SCOPES.stream().sorted(Comparator.comparingInt(SCOPE_RANK::get)).toList(),
+                retained,
+                retained.isEmpty() ? null : "该岗位包含系统保留权限，不能开放员工自选；请由有权审核员分配任职",
+                featureGate.workPlansEnabled(principal.tenantId()),
+                featureGate.executiveTasksEnabled(principal.tenantId())
+        );
+    }
+
+    private List<PositionManagementModels.PermissionOption> retainedPermissions(
+            TenantPrincipal principal, UUID positionId
+    ) {
+        return jdbc.query("""
+                select permission.code, coalesce(nullif(permission.description, ''), permission.code) as label,
+                       permission.function_category
+                from position_function_profile profile
+                join role_permission grant_item
+                  on grant_item.tenant_id = profile.tenant_id and grant_item.role_id = profile.default_role_id
+                join permission on permission.id = grant_item.permission_id
+                where profile.tenant_id = :tenantId and profile.position_id = :positionId
+                  and profile.scope_type = 'GROUP' and permission.delegable_to_position = false
+                order by permission.code
+                """, base(principal).addValue("positionId", positionId),
+                (rs, rowNum) -> new PositionManagementModels.PermissionOption(
+                        rs.getString("code"), rs.getString("label"), rs.getString("function_category"),
+                        false, "系统保留权限，不由岗位功能草稿增删；实际生效以账号和任职授权为准"
+                ));
+    }
+
+    private void requireSelfSelectionAllowed(TenantPrincipal principal, UUID positionId, boolean selectable) {
+        if (selectable && !retainedPermissions(principal, positionId).isEmpty()) {
+            throw new IllegalArgumentException("该岗位包含系统保留权限，不能开放员工自选；请由有权审核员分配任职");
+        }
     }
 
     @Transactional
@@ -607,6 +655,7 @@ public class PositionManagementService {
         TenantPrincipal principal = prepareForManagement();
         PositionLock position = lockPosition(principal, positionId, false);
         String authorizationScope = normalizeScope(request.authorizationScopeType());
+        requireSelfSelectionAllowed(principal, positionId, request.wecomSelfSelectable());
         Set<String> permissions = requireDelegablePermissions(request.permissionCodes());
         requirePositionPermissionBoundaries(position.positionCode(), position.roleCode(), permissions);
         ProfileLock profile = hotelId == null
@@ -669,6 +718,7 @@ public class PositionManagementService {
                 : lockHotelProfile(principal, positionId, hotelId);
         VersionLock draft = lockDraft(principal, profile.id());
         requireExpected(draft.rowVersion(), request.expectedProfileVersion());
+        requireSelfSelectionAllowed(principal, positionId, draft.wecomSelfSelectable());
         Set<String> selected = permissionsForVersion(principal, draft.id());
         requirePositionPermissionBoundaries(position.positionCode(), position.roleCode(), selected);
 

@@ -4,6 +4,7 @@ import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.PilotPasswordHasher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -45,7 +48,10 @@ import static cn.sifangguan.hotelaios.integrations.wecom.WeComDirectoryOnboardin
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -74,6 +80,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
     private WeComDirectoryOnboardingAdministrationService service;
     private WeComDirectoryOnboardingService employeeService;
     private WeComDirectoryEventProcessor eventProcessor;
+    private AccessPolicy accessPolicy;
 
     @BeforeAll
     static void migrateDatabase() {
@@ -102,7 +109,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         TenantPrincipal principal = new TenantPrincipal(
                 TENANT, CEO, "CEO", Set.of("CEO"), Set.of("wecom-binding.approve"),
                 Set.of(), Set.of(), true, UUID.randomUUID());
-        AccessPolicy accessPolicy = mock(AccessPolicy.class);
+        accessPolicy = mock(AccessPolicy.class);
         when(accessPolicy.principal()).thenReturn(principal);
 
         properties = mock(WeComDirectoryProperties.class);
@@ -509,6 +516,232 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                  and employee_item.id = assignment.employee_id
                 where employee_item.account_id = ? and assignment.status = 'ACTIVE'
                 """, approved.accountId())).isEqualTo(GROUP_HEADQUARTERS);
+    }
+
+    @Test
+    void assignmentPermissionIsRecheckedWhenApprovingAfterOptionsWereLoaded() {
+        useReviewerPermissions(Set.of("wecom-onboarding.review", "org.manage"));
+        UUID candidateId = insertPendingHeadquartersCandidate(null);
+        UUID positionId = positionId("GROUP_GENERAL_MANAGER");
+        assertThat(inTransaction(() -> service.reviewOptions(candidateId)).positions())
+                .extracting(WeComDirectoryOnboardingModels.ReviewAssignmentOption::positionId)
+                .contains(positionId);
+
+        useReviewerPermissions(Set.of("wecom-onboarding.review"));
+        Counts before = identityCounts();
+        ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "permission revoked", false, GROUP_HEADQUARTERS, positionId)));
+
+        assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
+        assertThat(response.accountId()).isNull();
+        assertThat(identityCounts()).isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GROUP_CHAIRMAN", "GROUP_GENERAL_MANAGER", "GROUP_VICE_PRESIDENT",
+            "HR_ADMINISTRATION", "HR_ADMINISTRATION_SUPERVISOR"})
+    void assignmentManagerCanReviewAndAssignEveryPublishedHeadquartersRole(String positionCode) {
+        useReviewerPermissions(Set.of("wecom-onboarding.review", "org.manage"));
+        UUID candidateId = insertPendingHeadquartersCandidate(null);
+        UUID positionId = positionId(positionCode);
+        var options = inTransaction(() -> service.reviewOptions(candidateId));
+        assertThat(options.positions())
+                .extracting(WeComDirectoryOnboardingModels.ReviewAssignmentOption::name)
+                .contains("集团董事长", "集团总经理", "集团副总", "行政人事", "行政人事主管")
+                .doesNotContain("区域经理", "前台员工");
+        assertThat(options.positions()).allSatisfy(option ->
+                assertThat(option.orgUnitId()).isEqualTo(GROUP_HEADQUARTERS));
+
+        var expectedGrant = jdbc.queryForMap("""
+                select profile.default_role_id, version.authorization_scope_type
+                from position_function_profile profile
+                join position_function_profile_version version
+                  on version.tenant_id = profile.tenant_id and version.profile_id = profile.id
+                 and version.lifecycle_status = 'PUBLISHED'
+                where profile.tenant_id = ? and profile.position_id = ? and profile.scope_type = 'GROUP'
+                """, TENANT, positionId);
+        ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "headquarters assignment reviewed", false,
+                        GROUP_HEADQUARTERS, positionId)));
+
+        assertThat(response.status()).isEqualTo("APPROVED");
+        var scopeType = expectedGrant.get("authorization_scope_type");
+        assertThat(jdbc.queryForMap("""
+                select assignment.position_id, assignment.org_unit_id,
+                       grant_item.role_id, grant_item.scope_type, grant_item.scope_org_unit_id
+                from employee_position_assignment assignment
+                join role_assignment grant_item
+                  on grant_item.tenant_id = assignment.tenant_id
+                 and grant_item.source_assignment_id = assignment.id
+                where grant_item.tenant_id = ? and grant_item.account_id = ?
+                """, TENANT, response.accountId()))
+                .containsEntry("position_id", positionId)
+                .containsEntry("org_unit_id", GROUP_HEADQUARTERS)
+                .containsEntry("role_id", expectedGrant.get("default_role_id"))
+                .containsEntry("scope_type", scopeType)
+                .containsEntry("scope_org_unit_id",
+                        Set.of("ORG_UNIT", "ORG_TREE").contains(scopeType) ? GROUP_HEADQUARTERS : null);
+        assertThat(jdbc.queryForMap("""
+                select status, preferred_assignment_id is not null as has_assignment
+                from wecom_user_binding where tenant_id = ? and account_id = ?
+                """, TENANT, response.accountId()))
+                .containsEntry("status", "ACTIVE")
+                .containsEntry("has_assignment", true);
+        verify(accessPolicy, atLeastOnce()).requireOrgScope(GROUP_HEADQUARTERS);
+
+        Counts after = identityCounts();
+        assertThat(inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "repeated approval", false, GROUP_HEADQUARTERS, positionId)))
+                .accountId()).isEqualTo(response.accountId());
+        assertThat(identityCounts()).isEqualTo(after);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GROUP_CHAIRMAN", "GROUP_GENERAL_MANAGER",
+            "HR_ADMINISTRATION", "HR_ADMINISTRATION_SUPERVISOR"})
+    void ordinaryReviewerCannotForgeAProtectedHeadquartersAssignment(String positionCode) {
+        useReviewerPermissions(Set.of("wecom-onboarding.review"));
+        UUID candidateId = insertPendingHeadquartersCandidate(null);
+        UUID positionId = positionId(positionCode);
+        assertThat(inTransaction(() -> service.reviewOptions(candidateId)).positions())
+                .extracting(WeComDirectoryOnboardingModels.ReviewAssignmentOption::positionId)
+                .doesNotContain(positionId);
+        Counts before = identityCounts();
+
+        ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "forged protected assignment", false,
+                        GROUP_HEADQUARTERS, positionId)));
+
+        assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
+        assertThat(response.accountId()).isNull();
+        assertThat(identityCounts()).isEqualTo(before);
+    }
+
+    @Test
+    void assignmentManagerCannotBypassEmployeeSelfSelectionRestrictions() {
+        useReviewerPermissions(Set.of("wecom-onboarding.review", "org.manage"));
+        UUID candidateId = insertPendingHeadquartersCandidate(positionId("GROUP_GENERAL_MANAGER"));
+        Counts before = identityCounts();
+
+        ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "employee selected a protected position", false)));
+
+        assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
+        assertThat(response.accountId()).isNull();
+        assertThat(identityCounts()).isEqualTo(before);
+    }
+
+    @Test
+    void wildcardAdministratorCanReviewAndAssignAHeadquartersPosition() {
+        useReviewerPermissions(Set.of("*"));
+        UUID candidateId = insertPendingHeadquartersCandidate(null);
+        UUID positionId = positionId("HR_ADMINISTRATION");
+        assertThat(inTransaction(() -> service.reviewOptions(candidateId)).positions())
+                .extracting(WeComDirectoryOnboardingModels.ReviewAssignmentOption::positionId)
+                .contains(positionId);
+        assertThat(inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "administrator assignment", false,
+                        GROUP_HEADQUARTERS, positionId))).status()).isEqualTo("APPROVED");
+    }
+
+    @Test
+    void assignmentManagementPermissionDoesNotReplaceOnboardingReviewPermission() {
+        useReviewerPermissions(Set.of("org.manage"));
+        doCallRealMethod().when(accessPolicy)
+                .requireAnyPermission("wecom-binding.approve", "wecom-onboarding.review");
+        UUID candidateId = insertPendingHeadquartersCandidate(null);
+        UUID positionId = positionId("GROUP_CHAIRMAN");
+        Counts before = identityCounts();
+
+        assertThatThrownBy(() -> inTransaction(() -> service.reviewOptions(candidateId)))
+                .isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "no review permission", false, GROUP_HEADQUARTERS, positionId))))
+                .isInstanceOf(AccessDeniedException.class);
+        assertThat(identityCounts()).isEqualTo(before);
+    }
+
+    @Test
+    void assignmentManagerStillNeedsHeadquartersOrganizationScope() {
+        useReviewerPermissions(Set.of("wecom-onboarding.review", "org.manage"));
+        UUID candidateId = insertPendingHeadquartersCandidate(null);
+        UUID positionId = positionId("GROUP_CHAIRMAN");
+        doThrow(new AccessDeniedException("目标组织不在当前账号的有效数据范围内"))
+                .when(accessPolicy).requireOrgScope(GROUP_HEADQUARTERS);
+        Counts before = identityCounts();
+
+        assertThatThrownBy(() -> inTransaction(() -> service.reviewOptions(candidateId)))
+                .isInstanceOf(AccessDeniedException.class);
+        assertThatThrownBy(() -> inTransaction(() -> service.approve(candidateId,
+                new DecisionRequest(0, "outside scope", false, GROUP_HEADQUARTERS, positionId))))
+                .isInstanceOf(AccessDeniedException.class);
+        assertThat(identityCounts()).isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"INACTIVE", "DRAFT", "DELETED"})
+    void assignmentManagerCannotUseAHeadquartersPositionThatBecameUnavailable(String unavailableState) {
+        useReviewerPermissions(Set.of("wecom-onboarding.review", "org.manage"));
+        UUID candidateId = insertPendingHeadquartersCandidate(null);
+        UUID positionId = positionId("GROUP_CHAIRMAN");
+        assertThat(inTransaction(() -> service.reviewOptions(candidateId)).positions())
+                .extracting(WeComDirectoryOnboardingModels.ReviewAssignmentOption::positionId)
+                .contains(positionId);
+
+        new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+            transaction.setRollbackOnly();
+            if ("DRAFT".equals(unavailableState)) {
+                jdbc.update("""
+                        update position_function_profile_version version
+                        set lifecycle_status = 'DRAFT', published_at = null, published_by = null
+                        from position_function_profile profile
+                        where version.tenant_id = profile.tenant_id and version.profile_id = profile.id
+                          and profile.tenant_id = ? and profile.position_id = ?
+                          and profile.scope_type = 'GROUP' and version.lifecycle_status = 'PUBLISHED'
+                        """, TENANT, positionId);
+            } else if ("DELETED".equals(unavailableState)) {
+                jdbc.update("""
+                        update position_definition
+                        set deleted_at = now(), deleted_by = ?, deletion_batch_id = ?
+                        where id = ?
+                        """, CEO, UUID.randomUUID(), positionId);
+            } else {
+                jdbc.update("update position_definition set status = 'INACTIVE' where id = ?", positionId);
+            }
+            assertThat(service.reviewOptions(candidateId).positions())
+                    .extracting(WeComDirectoryOnboardingModels.ReviewAssignmentOption::positionId)
+                    .doesNotContain(positionId);
+            Counts before = identityCounts();
+            ApprovalResponse response = service.approve(candidateId,
+                    new DecisionRequest(0, "position became unavailable", false,
+                            GROUP_HEADQUARTERS, positionId));
+            assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
+            assertThat(response.accountId()).isNull();
+            assertThat(identityCounts()).isEqualTo(before);
+        });
+    }
+
+    @Test
+    void assignmentManagementDoesNotBroadenStoreReviewOrAllowStorePositionsAtHeadquarters() {
+        useReviewerPermissions(Set.of("wecom-onboarding.review", "org.manage"));
+        UUID headquartersCandidate = insertPendingHeadquartersCandidate(null);
+        Counts before = identityCounts();
+        assertThat(inTransaction(() -> service.approve(headquartersCandidate,
+                new DecisionRequest(0, "store position at headquarters", false,
+                        GROUP_HEADQUARTERS, FRONT_POSITION))).status()).isEqualTo("PENDING_APPROVAL");
+        assertThat(identityCounts()).isEqualTo(before);
+
+        UUID storeCandidate = UUID.randomUUID();
+        insertCandidate(storeCandidate, "store-review-" + storeCandidate, "NEW_MEMBER", null, null,
+                "PENDING_APPROVAL", null, FRONT_DEPARTMENT, null);
+        UUID protectedStorePosition = positionId("OTA_OPERATION_MANAGER");
+        assertThat(inTransaction(() -> service.reviewOptions(storeCandidate)).positions())
+                .extracting(WeComDirectoryOnboardingModels.ReviewAssignmentOption::positionId)
+                .doesNotContain(protectedStorePosition);
+        assertThat(inTransaction(() -> service.approve(storeCandidate,
+                new DecisionRequest(0, "protected store role unchanged", false,
+                        FRONT_DEPARTMENT, protectedStorePosition))).status()).isEqualTo("PENDING_APPROVAL");
+        assertThat(identityCounts()).isEqualTo(before);
     }
 
     @Test
@@ -1954,6 +2187,24 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 where corp_id = ? and user_id_fingerprint = ?
                   and onboarding_kind = 'NEW_MEMBER' and status = 'WAITING_PROFILE'
                 """, Integer.class, CORP_ID, codec.fingerprint(userId))).isOne();
+    }
+
+    private void useReviewerPermissions(Set<String> permissions) {
+        when(accessPolicy.principal()).thenReturn(new TenantPrincipal(
+                TENANT, CEO, "CEO", Set.of("CEO"), permissions,
+                Set.of(), Set.of(), true, UUID.randomUUID()));
+    }
+
+    private UUID insertPendingHeadquartersCandidate(UUID positionId) {
+        UUID candidateId = UUID.randomUUID();
+        insertCandidate(candidateId, "headquarters-review-" + candidateId, "NEW_MEMBER", null, null,
+                "PENDING_APPROVAL", null, GROUP_HEADQUARTERS, positionId);
+        return candidateId;
+    }
+
+    private UUID positionId(String code) {
+        return jdbc.queryForObject("select id from position_definition where tenant_id = ? and code = ?",
+                UUID.class, TENANT, code);
     }
 
     private void publishSelectableProfile(UUID positionId) {

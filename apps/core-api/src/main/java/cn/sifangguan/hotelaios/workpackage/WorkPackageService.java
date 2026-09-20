@@ -633,7 +633,8 @@ public class WorkPackageService {
                        assignment.id as assignment_id,
                        employee_row.id as employee_id,
                        employee_row.name as employee_name,
-                       position.name as position_name
+                       position.name as position_name,
+                       target_org.id as target_org_id, target_org.name as target_org_name
                 from work_expectation x
                 join employee_position_assignment assignment
                   on assignment.tenant_id = x.tenant_id
@@ -644,6 +645,8 @@ public class WorkPackageService {
                 join position_definition position
                   on position.tenant_id = assignment.tenant_id
                  and position.id = assignment.position_id
+                join org_unit target_org
+                  on target_org.tenant_id = x.tenant_id and target_org.id = x.target_org_unit_id
                 left join lateral (
                     select min(w.submitted_at) as submitted_at
                     from work_record w
@@ -691,11 +694,14 @@ public class WorkPackageService {
                         rs.getObject("assignment_id", UUID.class),
                         rs.getObject("employee_id", UUID.class),
                         rs.getString("employee_name"),
-                        rs.getString("position_name")));
+                        rs.getString("position_name"),
+                        rs.getObject("target_org_id", UUID.class),
+                        rs.getString("target_org_name")));
 
         WorkbenchMetric totalToday = new WorkbenchMetric();
         WorkbenchMetric totalMonth = new WorkbenchMetric();
         Map<UUID, HotelWorkbenchMetric> hotelMetrics = new LinkedHashMap<>();
+        Map<UUID, HotelWorkbenchMetric> organizationMetrics = new LinkedHashMap<>();
         for (WorkbenchMetricRow row : rows) {
             totalMonth.add(row, cutoff);
             if (asOfDate.equals(row.businessDate())) {
@@ -705,6 +711,10 @@ public class WorkPackageService {
                 HotelWorkbenchMetric hotel = hotelMetrics.computeIfAbsent(row.hotelOrgUnitId(),
                         ignored -> new HotelWorkbenchMetric(row.hotelOrgUnitId(), row.hotelName()));
                 hotel.add(row, cutoff, asOfDate.equals(row.businessDate()));
+            } else {
+                HotelWorkbenchMetric organization = organizationMetrics.computeIfAbsent(row.targetOrgUnitId(),
+                        ignored -> new HotelWorkbenchMetric(row.targetOrgUnitId(), row.targetOrgName()));
+                organization.add(row, cutoff, asOfDate.equals(row.businessDate()));
             }
         }
         List<Map<String, Object>> hotels = hotelMetrics.values().stream()
@@ -722,7 +732,10 @@ public class WorkPackageService {
                 "monthStart", monthStart,
                 "today", totalToday.toResponse(),
                 "monthToDate", totalMonth.toResponse(),
-                "hotels", hotels);
+                "hotels", hotels,
+                "organizations", organizationMetrics.values().stream()
+                        .sorted(Comparator.comparing(HotelWorkbenchMetric::name, Comparator.nullsLast(String::compareTo)))
+                        .map(HotelWorkbenchMetric::toResponse).toList());
     }
 
     @Transactional(readOnly = true)
@@ -1013,7 +1026,8 @@ public class WorkPackageService {
                  and delegated_employee.id = delegated_assignment.employee_id
                 where x.tenant_id = :tenantId and x.id = :expectationId
                 """, params));
-        accessPolicy.requireOrgScope((UUID) result.get("target_org_unit_id"));
+        accessPolicy.requireOrgScopeOrOwnWork((UUID) result.get("target_org_unit_id"),
+                (UUID) result.get("position_assignment_id"));
         result.put("standards", jdbc.queryForList("""
                 select s.standard_version_id, s.usage_type, s.weight, sd.code as standard_code,
                        sv.version_no as standard_version_no, sv.title
@@ -2286,7 +2300,9 @@ public class WorkPackageService {
             UUID assignmentId,
             UUID employeeId,
             String employeeName,
-            String positionName
+            String positionName,
+            UUID targetOrgUnitId,
+            String targetOrgName
     ) {
     }
 
@@ -2356,7 +2372,7 @@ public class WorkPackageService {
                     ? id + ":hotel-management"
                     : row.departmentOrgUnitId().toString();
             String departmentName = row.departmentName() == null || row.departmentName().isBlank()
-                    ? "门店管理"
+                    ? row.hotelOrgUnitId() == null ? "集团及总部工作" : "门店管理"
                     : row.departmentName();
             DepartmentWorkbenchMetric department = departments.computeIfAbsent(departmentId,
                     ignored -> new DepartmentWorkbenchMetric(departmentId, departmentName));

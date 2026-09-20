@@ -71,7 +71,7 @@ public class WeComDeliveryWorker {
                         sha256(properties.corpId() + ":" + endpoint).getBytes(StandardCharsets.US_ASCII))) {
                     throw new IllegalStateException("WeCom delivery endpoint binding changed");
                 }
-                URI deepLink = oauthStartLink(delivery.sourceType(), delivery.sourceId());
+                URI deepLink = oauthStartLink(delivery.sourceType(), delivery.sourceId(), delivery.notificationType());
                 String externalMessageId = groupDelivery
                         ? apiClient.sendApplicationChatTaskLink(delivery.chatId(), delivery.title(), delivery.content(), deepLink)
                         : apiClient.sendApplicationTaskLink(delivery.userId(), delivery.title(), delivery.content(), deepLink);
@@ -181,7 +181,7 @@ public class WeComDeliveryWorker {
             prepare();
             List<Delivery> rows = jdbc.query("""
                     select d.id, d.attempt_count, d.recipient_endpoint_hash,
-                           n.title, n.content, n.source_type, n.source_id,
+                           n.title, n.content, n.source_type, n.source_id, n.notification_type,
                            ub.wecom_user_id, chat.chat_id
                     from notification_delivery d
                     join notification n on n.tenant_id = d.tenant_id and n.id = d.notification_id
@@ -256,7 +256,7 @@ public class WeComDeliveryWorker {
                     (rs, rowNum) -> new Delivery(
                             rs.getObject("id", UUID.class), rs.getInt("attempt_count"),
                             rs.getString("title"), rs.getString("content"),
-                            rs.getString("source_type"), rs.getObject("source_id", UUID.class),
+                            rs.getString("source_type"), rs.getObject("source_id", UUID.class), rs.getString("notification_type"),
                             rs.getString("recipient_endpoint_hash"),
                             rs.getString("wecom_user_id"),
                             rs.getString("chat_id")));
@@ -302,9 +302,9 @@ public class WeComDeliveryWorker {
         });
     }
 
-    private URI oauthStartLink(String sourceType, UUID sourceId) {
+    private URI oauthStartLink(String sourceType, UUID sourceId, String notificationType) {
         URI callback = properties.oauthCallbackUrl();
-        String returnTo = returnToFor(sourceType, sourceId);
+        String returnTo = returnToFor(sourceType, sourceId, notificationType);
         URI start = UriComponentsBuilder.newInstance().scheme(callback.getScheme()).host(callback.getHost())
                 .port(callback.getPort()).path("/api/v1/integrations/wecom/oauth/start")
                 .queryParam("returnTo", returnTo)
@@ -313,8 +313,17 @@ public class WeComDeliveryWorker {
     }
 
     static String returnToFor(String sourceType, UUID sourceId) {
+        return returnToFor(sourceType, sourceId, null);
+    }
+
+    static String returnToFor(String sourceType, UUID sourceId, String notificationType) {
         if (sourceId == null) {
             throw new IllegalArgumentException("WeCom notification source id is required");
+        }
+        if (("WORK_EXPECTATION".equals(sourceType) && "WORK_EXPECTATION_SUPERVISION".equals(notificationType))
+                || ("TASK".equals(sourceType) && ("TASK_OVERDUE".equals(notificationType)
+                    || "TASK_ESCALATED".equals(notificationType)))) {
+            return "#/workbench";
         }
         return switch (sourceType) {
             case "TASK" -> "#/tasks?view=mine&taskId=" + sourceId;
@@ -347,6 +356,6 @@ public class WeComDeliveryWorker {
     private record PendingNotification(UUID notificationId, UUID accountId, String sourceType,
                                        String userId, String chatId) { }
     private record Delivery(UUID id, int attemptCount, String title, String content,
-                            String sourceType, UUID sourceId,
+                            String sourceType, UUID sourceId, String notificationType,
                             String endpointHash, String userId, String chatId) { }
 }

@@ -100,6 +100,16 @@ public final class PositionManagementModels {
     ) {
     }
 
+    public record ProfileContext(
+            String roleCode,
+            List<String> authorizationScopeTypes,
+            List<PermissionOption> retainedPermissions,
+            String selfSelectionBlockedReason,
+            boolean workPlansEnabled,
+            boolean executiveTasksEnabled
+    ) {
+    }
+
     public record ImpactPreview(
             UUID positionId,
             String operation,

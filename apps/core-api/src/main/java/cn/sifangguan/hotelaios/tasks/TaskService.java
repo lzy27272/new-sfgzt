@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.tasks;
 
 import cn.sifangguan.hotelaios.notifications.NotificationService;
+import cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
@@ -52,6 +53,7 @@ public class TaskService {
     private final TenantSystemAccountResolver systemAccountResolver;
     private final AttachmentService attachmentService;
     private final TaskTargetPolicy taskTargetPolicy;
+    private final StoreManagerSupervisorResolver supervisorResolver;
     private final long defaultEscalationDelayHours;
 
     public TaskService(
@@ -63,6 +65,7 @@ public class TaskService {
             TenantSystemAccountResolver systemAccountResolver,
             AttachmentService attachmentService,
             TaskTargetPolicy taskTargetPolicy,
+            StoreManagerSupervisorResolver supervisorResolver,
             @Value("${app.tasks.default-escalation-delay-hours:48}") long defaultEscalationDelayHours
     ) {
         this.jdbc = jdbc;
@@ -73,6 +76,7 @@ public class TaskService {
         this.systemAccountResolver = systemAccountResolver;
         this.attachmentService = attachmentService;
         this.taskTargetPolicy = taskTargetPolicy;
+        this.supervisorResolver = supervisorResolver;
         this.defaultEscalationDelayHours = Math.max(0, defaultEscalationDelayHours);
     }
 
@@ -218,6 +222,17 @@ public class TaskService {
                 request.standardVersionId(), request.workRecordId(), request.title(), request.description(),
                 request.priority(), request.dueAt(), request.sourceSnapshot());
         UUID id = createTask(spec, idempotencyKey, CreationSource.MANUAL);
+        if (request.creatorAssignmentId() != null) {
+            requireActorAssignment(principal, request.creatorAssignmentId());
+            jdbc.update("""
+                    update management_task
+                    set created_by_assignment_id = coalesce(created_by_assignment_id, :creatorAssignmentId)
+                    where tenant_id = :tenantId and id = :taskId and created_by = :actorId
+                    """, base(principal)
+                    .addValue("taskId", id)
+                    .addValue("actorId", principal.actorId())
+                    .addValue("creatorAssignmentId", request.creatorAssignmentId()));
+        }
         if (Boolean.TRUE.equals(request.dispatchNow())) {
             accessPolicy.requirePermission("task.dispatch");
             Map<String, Object> row = taskRow(principal, id, true);
@@ -328,6 +343,10 @@ public class TaskService {
         if (!Set.of("IN_PROGRESS", "REWORK", "RESULT_SUBMITTED").contains(task.get("lifecycle_status"))) {
             throw new IllegalArgumentException("当前任务状态不允许追加执行证据");
         }
+        if (request.structuredResult() != null
+                && "DISPATCH_REFERENCE".equals(request.structuredResult().path("purpose").asText())) {
+            throw new AccessDeniedException("执行人不能将执行证据标记为下达参考资料");
+        }
         requireTaskEvidenceCapacity(principal, taskId);
         UUID id = UUID.randomUUID();
         JsonNode structured = request.structuredResult() == null ? JsonNodeFactory.instance.objectNode() : request.structuredResult();
@@ -393,6 +412,73 @@ public class TaskService {
                 "{\"taskId\":\"" + taskId + "\",\"sha256\":\"" + stored.sha256() + "\"}");
         return Map.of("id", evidenceId, "taskId", taskId, "originalName", stored.originalName(),
                 "mediaType", stored.mediaType(), "sizeBytes", stored.sizeBytes(), "scanStatus", stored.scanStatus());
+    }
+
+    @Transactional
+    public Map<String, Object> uploadDispatchAttachment(
+            UUID taskId, UUID submittedByAssignmentId, String note, MultipartFile file
+    ) {
+        accessPolicy.requirePermission("task.dispatch");
+        TenantPrincipal principal = prepare();
+        rejectChairmanBusinessActor(principal);
+        requireVisible(principal, taskId);
+        if (submittedByAssignmentId != null) {
+            requireActorAssignment(principal, submittedByAssignmentId);
+        } else if (!principal.hasTenantScope()) {
+            throw new AccessDeniedException("下达任务的附件必须指定当前有效任职");
+        }
+        Map<String, Object> task = taskRow(principal, taskId, true);
+        if (!"PROPOSED".equals(task.get("lifecycle_status"))) {
+            throw new IllegalArgumentException("只有待派发任务可以补充下达参考图片");
+        }
+        if (!principal.actorId().equals(task.get("created_by"))) {
+            throw new AccessDeniedException("只有任务创建人可以上传下达参考图片");
+        }
+        UUID creatorAssignmentId = (UUID) task.get("created_by_assignment_id");
+        if (creatorAssignmentId != null && !creatorAssignmentId.equals(submittedByAssignmentId)) {
+            throw new AccessDeniedException("当前任职与任务创建任职不一致");
+        }
+        requireDispatchReferenceCapacity(principal, taskId);
+
+        UUID evidenceId = UUID.randomUUID();
+        String original = file == null || file.getOriginalFilename() == null ? "attachment" : file.getOriginalFilename();
+        String safeName = original.replaceAll("[^a-zA-Z0-9._-]", "_");
+        String objectKey = principal.tenantId() + "/tasks/" + taskId + "/dispatch/" + evidenceId + "-" + safeName;
+        AttachmentService.StoredObject stored = attachmentService.storeObject(objectKey, file);
+        ObjectNode structured = JsonNodeFactory.instance.objectNode().put("purpose", "DISPATCH_REFERENCE");
+        String normalizedNote = note == null ? "" : note.trim();
+        if (!normalizedNote.isEmpty()) {
+            structured.put("note", normalizedNote.substring(0, Math.min(normalizedNote.length(), 500)));
+        }
+        try {
+            String evidenceType = stored.mediaType().startsWith("image/") ? "IMAGE" : "FILE";
+            jdbc.update("""
+                    insert into task_evidence
+                        (id, tenant_id, task_id, submitted_by_assignment_id, evidence_type, object_key,
+                         original_name, media_type, size_bytes, sha256, structured_result, scan_status)
+                    values (:id, :tenantId, :taskId, :assignmentId, :type, :objectKey,
+                            :originalName, :mediaType, :sizeBytes, :sha256, cast(:structured as jsonb), :scanStatus)
+                    """, base(principal).addValue("id", evidenceId).addValue("taskId", taskId)
+                    .addValue("assignmentId", submittedByAssignmentId).addValue("type", evidenceType)
+                    .addValue("objectKey", stored.objectKey()).addValue("originalName", stored.originalName())
+                    .addValue("mediaType", stored.mediaType()).addValue("sizeBytes", stored.sizeBytes())
+                    .addValue("sha256", stored.sha256()).addValue("structured", structured.toString())
+                    .addValue("scanStatus", stored.scanStatus()));
+        } catch (RuntimeException exception) {
+            attachmentService.removeStoredObject(stored.objectKey());
+            throw exception;
+        }
+        auditWriter.record("TASK_DISPATCH_ATTACHMENT_UPLOADED", "TASK_EVIDENCE", evidenceId,
+                "{\"taskId\":\"" + taskId + "\",\"sha256\":\"" + stored.sha256() + "\"}");
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", evidenceId);
+        result.put("taskId", taskId);
+        result.put("originalName", stored.originalName());
+        result.put("mediaType", stored.mediaType());
+        result.put("sizeBytes", stored.sizeBytes());
+        result.put("scanStatus", stored.scanStatus());
+        result.put("structuredResult", structured);
+        return result;
     }
 
     @Transactional(readOnly = true)
@@ -503,9 +589,10 @@ public class TaskService {
                 set sla_status = 'OVERDUE', row_version = t.row_version + 1
                 from candidates c
                 where t.tenant_id = :tenantId and t.id = c.id
-                returning t.id, t.title, t.lifecycle_status, t.row_version
+                returning t.id, t.title, t.lifecycle_status, t.row_version, t.org_unit_id
                 """, base(principal).addValue("batchLimit", batchLimit));
         int notifications = 0;
+        var supervisors = overdue.isEmpty() ? null : supervisorResolver.load(principal, "task.read");
         for (Map<String, Object> row : overdue) {
             UUID taskId = (UUID) row.get("id");
             jdbc.update("""
@@ -527,6 +614,14 @@ public class TaskService {
                 notificationService.createForAssignment(reviewer, "TASK_OVERDUE", "任务已逾期",
                         String.valueOf(row.get("title")), "TASK", taskId, "task-overdue:" + taskId);
                 notifications++;
+            }
+            UUID executor = participantAssignment(principal, taskId, "ASSIGNEE");
+            if (executor != null) {
+                for (var supervisor : supervisors.forWork(executor, (UUID) row.get("org_unit_id"))) {
+                    notificationService.createForAssignment(supervisor.assignmentId(), "TASK_OVERDUE", "店长任务已逾期",
+                            String.valueOf(row.get("title")), "TASK", taskId, "task-overdue:" + taskId);
+                    notifications++;
+                }
             }
         }
         int cancelledEscalations = jdbc.update("""
@@ -804,7 +899,8 @@ public class TaskService {
                        end as max_attachments,
                        (select count(*) from task_evidence evidence
                         where evidence.tenant_id = task.tenant_id and evidence.task_id = task.id
-                          and evidence.scan_status <> 'REJECTED') as evidence_count
+                          and evidence.scan_status <> 'REJECTED'
+                          and coalesce(evidence.structured_result ->> 'purpose', 'EXECUTION') <> 'DISPATCH_REFERENCE') as evidence_count
                 from management_task task
                 where task.tenant_id = :tenantId and task.id = :taskId
                 """, base(principal).addValue("taskId", taskId));
@@ -812,6 +908,18 @@ public class TaskService {
         int evidenceCount = ((Number) policy.get("evidence_count")).intValue();
         if (evidenceCount >= maxAttachments) {
             throw new IllegalArgumentException("任务证据数量已达到模板上限" + maxAttachments + "个");
+        }
+    }
+
+    private void requireDispatchReferenceCapacity(TenantPrincipal principal, UUID taskId) {
+        Integer count = jdbc.queryForObject("""
+                select count(*) from task_evidence
+                where tenant_id = :tenantId and task_id = :taskId
+                  and scan_status <> 'REJECTED'
+                  and structured_result ->> 'purpose' = 'DISPATCH_REFERENCE'
+                """, base(principal).addValue("taskId", taskId), Integer.class);
+        if (count != null && count >= 10) {
+            throw new IllegalArgumentException("下达参考图片最多上传10个");
         }
     }
 
@@ -834,7 +942,8 @@ public class TaskService {
                        end as max_attachments,
                        (select count(*) from task_evidence evidence
                         where evidence.tenant_id = task.tenant_id and evidence.task_id = task.id
-                          and evidence.scan_status <> 'REJECTED') as evidence_count
+                          and evidence.scan_status <> 'REJECTED'
+                          and coalesce(evidence.structured_result ->> 'purpose', 'EXECUTION') <> 'DISPATCH_REFERENCE') as evidence_count
                 from management_task task
                 where task.tenant_id = :tenantId and task.id = :taskId
                 """, base(principal).addValue("taskId", taskId));

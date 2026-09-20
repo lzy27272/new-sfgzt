@@ -196,6 +196,11 @@ public class WeComDirectoryOnboardingAdministrationService {
         if (!Set.of("PENDING_APPROVAL", "CONFLICT").contains(candidate.status())) {
             throw new IllegalArgumentException("当前状态不允许分配岗位");
         }
+        boolean canManageAssignments = "GROUP".equals(candidate.unitType())
+                && canManageAssignments(principal);
+        if (canManageAssignments) {
+            accessPolicy.requireOrgScope(candidate.hotelId());
+        }
         List<ReviewAssignmentOption> positions = jdbc.query("""
                 select position.id, position.name
                 from position_definition position
@@ -219,17 +224,19 @@ public class WeComDirectoryOnboardingAdministrationService {
                  and hotel_version.lifecycle_status = 'PUBLISHED'
                 where position.tenant_id = :tenantId and position.status = 'ACTIVE'
                   and position.deleted_at is null and position.permanently_deleted_at is null
-                  and coalesce(hotel_version.authorization_scope_type,
+                  and (:canManageAssignments or (
+                      coalesce(hotel_version.authorization_scope_type,
                                group_version.authorization_scope_type) <> 'TENANT'
-                  and not exists (
-                      select 1
-                      from role_permission role_grant
-                      join permission protected_permission
-                        on protected_permission.id = role_grant.permission_id
-                      where role_grant.tenant_id = group_profile.tenant_id
-                        and role_grant.role_id = group_profile.default_role_id
-                        and protected_permission.delegable_to_position = false
-                  )
+                      and not exists (
+                          select 1
+                          from role_permission role_grant
+                          join permission protected_permission
+                            on protected_permission.id = role_grant.permission_id
+                          where role_grant.tenant_id = group_profile.tenant_id
+                            and role_grant.role_id = group_profile.default_role_id
+                            and protected_permission.delegable_to_position = false
+                      )
+                  ))
                   and (
                     (:organizationType = 'GROUP'
                      and position.job_family = 'GROUP_MANAGEMENT')
@@ -245,7 +252,8 @@ public class WeComDirectoryOnboardingAdministrationService {
                   )
                 order by position.name, position.id
                 """, base(principal).addValue("hotelId", candidate.hotelId())
-                        .addValue("organizationType", candidate.unitType()), (rs, rowNum) ->
+                        .addValue("organizationType", candidate.unitType())
+                        .addValue("canManageAssignments", canManageAssignments), (rs, rowNum) ->
                 new ReviewAssignmentOption(
                         candidate.hotelId(), rs.getObject("id", UUID.class), rs.getString("name")));
         return new ReviewOptions(candidate.id(), candidate.hotelId(), candidate.hotelName(), positions);
@@ -533,8 +541,14 @@ public class WeComDirectoryOnboardingAdministrationService {
             assignmentPositionId = request.positionId();
         }
 
+        // Match the authority needed by the normal employee assignment editor.
+        // Only an explicit reviewer assignment may use it, never employee self-selection.
+        boolean canManageAssignments = reviewerAssignedPosition && canManageAssignments(principal);
+        if (canManageAssignments) {
+            accessPolicy.requireOrgScope(assignmentOrgUnitId);
+        }
         PositionGrant grant = resolvePositionGrant(
-                principal, assignmentOrgUnitId, assignmentPositionId);
+                principal, assignmentOrgUnitId, assignmentPositionId, canManageAssignments);
         if (grant == null) {
             long version = markFailure(principal, candidate,
                     "POSITION_ROLE_NOT_CONFIGURED");
@@ -749,6 +763,7 @@ public class WeComDirectoryOnboardingAdministrationService {
         audit.put("bindingTransferred", transfer != null);
         audit.put("bindingStatus", resultingBindingStatus);
         audit.put("reviewerAssignedPosition", reviewerAssignedPosition);
+        audit.put("assignmentManagementAuthorized", canManageAssignments);
         audit.put("orgUnitId", assignmentOrgUnitId);
         audit.put("positionId", assignmentPositionId);
         if (transfer != null) {
@@ -1115,7 +1130,7 @@ public class WeComDirectoryOnboardingAdministrationService {
     }
 
     private PositionGrant resolvePositionGrant(
-            TenantPrincipal principal, UUID orgUnitId, UUID positionId
+            TenantPrincipal principal, UUID orgUnitId, UUID positionId, boolean canManageAssignments
     ) {
         List<PositionGrant> rows = jdbc.query("""
                 select group_profile.default_role_id,
@@ -1123,7 +1138,8 @@ public class WeComDirectoryOnboardingAdministrationService {
                                 group_version.authorization_scope_type) as authorization_scope_type,
                        coalesce(hotel_version.wecom_self_selectable,
                                 group_version.wecom_self_selectable) as wecom_self_selectable,
-                       (coalesce(hotel_version.authorization_scope_type,
+                       ((assignment_org.unit_type = 'GROUP' and :canManageAssignments)
+                        or (coalesce(hotel_version.authorization_scope_type,
                                  group_version.authorization_scope_type) <> 'TENANT'
                         and not exists (
                           select 1
@@ -1133,7 +1149,7 @@ public class WeComDirectoryOnboardingAdministrationService {
                           where role_grant.tenant_id = group_profile.tenant_id
                             and role_grant.role_id = group_profile.default_role_id
                             and protected_permission.delegable_to_position = false
-                        )) as reviewer_assignable
+                        ))) as reviewer_assignable
                 from org_unit assignment_org
                 left join lateral (
                     select ancestor.id
@@ -1176,16 +1192,18 @@ public class WeComDirectoryOnboardingAdministrationService {
                   and (
                     (assignment_org.unit_type = 'GROUP'
                      and position.job_family = 'GROUP_MANAGEMENT'
-                     and group_version.authorization_scope_type <> 'TENANT'
-                     and not exists (
-                       select 1
-                       from role_permission protected_grant
-                       join permission protected_permission
-                         on protected_permission.id = protected_grant.permission_id
-                       where protected_grant.tenant_id = group_profile.tenant_id
-                         and protected_grant.role_id = group_profile.default_role_id
-                         and protected_permission.delegable_to_position = false
-                     ))
+                     and (:canManageAssignments or (
+                         group_version.authorization_scope_type <> 'TENANT'
+                         and not exists (
+                           select 1
+                           from role_permission protected_grant
+                           join permission protected_permission
+                             on protected_permission.id = protected_grant.permission_id
+                           where protected_grant.tenant_id = group_profile.tenant_id
+                             and protected_grant.role_id = group_profile.default_role_id
+                             and protected_permission.delegable_to_position = false
+                         )
+                     )))
                     or
                     (assignment_org.unit_type in ('HOTEL', 'DEPARTMENT')
                      and hotel.id is not null
@@ -1198,7 +1216,8 @@ public class WeComDirectoryOnboardingAdministrationService {
                   )
                 for update of assignment_org, position, group_profile, group_version
                 """, base(principal).addValue("orgUnitId", orgUnitId)
-                .addValue("positionId", positionId), (rs, rowNum) -> new PositionGrant(
+                .addValue("positionId", positionId)
+                .addValue("canManageAssignments", canManageAssignments), (rs, rowNum) -> new PositionGrant(
                 rs.getObject("default_role_id", UUID.class),
                 rs.getString("authorization_scope_type"),
                 rs.getBoolean("wecom_self_selectable"),
@@ -1344,6 +1363,10 @@ public class WeComDirectoryOnboardingAdministrationService {
     private TenantPrincipal prepareAny(String... permissions) {
         accessPolicy.requireAnyPermission(permissions);
         return prepareTenant(accessPolicy.principal());
+    }
+
+    private static boolean canManageAssignments(TenantPrincipal principal) {
+        return principal.hasPermission("org.manage") || principal.hasPermission("*");
     }
 
     private TenantPrincipal prepareTenant(TenantPrincipal principal) {

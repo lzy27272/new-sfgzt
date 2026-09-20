@@ -1,9 +1,10 @@
 -- 客房服务员事件型日清：对客服务记录、客诉报备可在同一营业日重复提交，
 -- 每条记录独立保留证据，并在岗位日报中按当日全部记录汇总。
 
--- Production migrations run as a NOBYPASSRLS owner on a fresh connection.
--- Establish the tenant context before reading or cloning any tenant-owned row.
-SELECT set_config('app.tenant_id', '10000000-0000-0000-0000-000000000001', false);
+-- A production upgrade starts with a fresh NOBYPASSRLS owner connection.
+-- Scope this tenant-specific seed to this transaction without disabling RLS
+-- or depending on session context left by earlier migrations.
+SELECT set_config('app.tenant_id', '10000000-0000-0000-0000-000000000001', true);
 
 ALTER TABLE work_record
     ADD COLUMN series_entry_no INTEGER NOT NULL DEFAULT 1,
@@ -166,7 +167,7 @@ VALUES
 ((md5('V62:item:HKA_COMPLAINT_EVENT'))::uuid,
  '10000000-0000-0000-0000-000000000001',(md5('V62:wpv:HK_ATTENDANT'))::uuid,
  'HKA_COMPLAINT_EVENT','客诉报备',
- '每次客诉独立填写房号、客诉内容和初步处理情况；同一营业日可重复提交。',
+ '每次客诉独立填写房号或发生区域、客诉内容和初步处理情况；同一营业日可重复提交。',
  'EVENT_RECORD',(md5('V62:form-version:PILOT-V62-HKA-COMPLAINT-EVENT'))::uuid,
  6,true,'DAY','HOTEL',TIME '00:00',TIME '18:00',TIME '18:00',0,
  ARRAY[1,2,3,4,5,6,7]::smallint[],'INCLUDE',false,'ASSIGNMENT_ORG','MANUAL',

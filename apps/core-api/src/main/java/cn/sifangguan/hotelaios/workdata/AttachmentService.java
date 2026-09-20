@@ -416,7 +416,7 @@ public class AttachmentService {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission("work-record.read", "work-record.review", "work-record.team-read");
         RecordTarget record = recordTarget(principal, workRecordId);
-        accessPolicy.requireOrgScope(record.targetOrgUnitId());
+        accessPolicy.requireOrgScopeOrOwnWork(record.targetOrgUnitId(), record.assignmentId());
         return jdbc.queryForList("""
                 select id, work_record_id, object_key, original_name, media_type, size_bytes,
                        sha256, scan_status, capture_source, checkpoint_code, captured_at_client,
@@ -443,12 +443,13 @@ public class AttachmentService {
         accessPolicy.requireAnyPermission("work-record.read", "work-record.review", "work-record.team-read");
         Map<String, Object> attachment = jdbc.queryForMap("""
                 select a.object_key, a.original_name, a.media_type, a.size_bytes, a.scan_status,
-                       w.target_org_unit_id
+                       w.target_org_unit_id, w.position_assignment_id
                 from attachment a
                 join work_record w on w.tenant_id = a.tenant_id and w.id = a.work_record_id
                 where a.tenant_id = :tenantId and a.id = :attachmentId
                 """, base(principal).addValue("attachmentId", attachmentId));
-        accessPolicy.requireOrgScope((UUID) attachment.get("target_org_unit_id"));
+        accessPolicy.requireOrgScopeOrOwnWork((UUID) attachment.get("target_org_unit_id"),
+                (UUID) attachment.get("position_assignment_id"));
         if (!malwareScanner.canDownload(String.valueOf(attachment.get("scan_status")))) {
             throw new IllegalArgumentException("附件尚未通过安全扫描，禁止下载");
         }
@@ -727,7 +728,7 @@ public class AttachmentService {
     }
 
     private void requireOwnerOrDelegatedSubmit(TenantPrincipal principal, RecordTarget record) {
-        accessPolicy.requireOrgScope(record.targetOrgUnitId());
+        accessPolicy.requireOrgScopeOrOwnWork(record.targetOrgUnitId(), record.assignmentId());
         if (!principal.assignmentIds().contains(record.assignmentId())) {
             accessPolicy.requirePermission("work-record.submit-for-other");
         }

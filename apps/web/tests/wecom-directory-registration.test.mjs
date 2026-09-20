@@ -130,10 +130,17 @@ test('registration supports group headquarters while protected group roles stay 
   assert.match(entry, /选择组织/)
   assert.match(entry, /请选择集团总部或门店/)
   assert.match(entry, /item\.unitType === 'GROUP' \? '集团总部'/)
-  assert.match(entry, /集团受保护岗位不能通过入职审核授予/)
+  assert.match(entry, /集团受保护岗位不能自行申请，需由具备任职管理权限的管理员审核分配/)
   assert.match(onboardingService, /position\.job_family = 'GROUP_MANAGEMENT'/)
   assert.match(onboardingService, /authorization_scope_type <> 'TENANT'/)
   assert.match(onboardingService, /protected_permission\.delegable_to_position = false/)
+})
+
+test('review assignment keeps the server-provided options and explains management authority', () => {
+  assert.match(onboardingAdministration, /reviewOptions\?\.positions\.map/)
+  assert.match(onboardingAdministration, /总部受保护岗位须由具备任职管理权限的管理员分配/)
+  assert.match(onboardingAdministration, /普通审核员仍受原有权限限制/)
+  assert.doesNotMatch(onboardingAdministration, /租户级或不可委派的受保护岗位仍需在组织与权限中直接分配/)
 })
 
 test('hotel-direct positions do not repeat the hotel name in the position selector', () => {

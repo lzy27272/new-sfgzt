@@ -268,6 +268,55 @@ class PositionManagementIntegrationTest {
     }
 
     @Test
+    void profileContextExplainsSystemBoundariesWithoutChangingPublishedGrants() throws Exception {
+        UUID hrPositionId = jdbc.queryForObject("""
+                select id from position_definition
+                where tenant_id = ?::uuid and code = 'HR_ADMINISTRATION_SUPERVISOR'
+                """, UUID.class, TENANT);
+        long before = jdbc.queryForObject("select count(*) from role_permission", Long.class);
+        JsonNode context = json(getJson(
+                "/api/v1/org/positions/profile-context?positionId=" + hrPositionId, 200).andReturn());
+        assertThat(context.path("roleCode").asText()).isEqualTo("HR_ADMINISTRATION_SUPERVISOR");
+        assertThat(context.path("authorizationScopeTypes").toString())
+                .isEqualTo("[\"SELF\",\"ORG_UNIT\",\"ORG_TREE\",\"ASSIGNED_HOTELS\",\"TENANT\"]");
+        assertThat(context.path("selfSelectionBlockedReason").asText()).contains("不能开放员工自选");
+        assertThat(context.path("retainedPermissions").findValuesAsText("permissionCode"))
+                .contains("wecom-binding.read").doesNotContain("task.read");
+        context.path("retainedPermissions").forEach(option ->
+                assertThat(option.path("delegable").asBoolean()).isFalse());
+        assertThat(context.path("executiveTasksEnabled").asBoolean()).isFalse();
+        assertThat(context.path("workPlansEnabled").asBoolean()).isFalse();
+        assertThat(jdbc.queryForObject("select count(*) from role_permission", Long.class)).isEqualTo(before);
+
+        JsonNode generic = json(getJson("/api/v1/org/positions/profile-context", 200).andReturn());
+        assertThat(generic.path("roleCode").asText()).isEqualTo("CUSTOM");
+        assertThat(generic.path("retainedPermissions")).isEmpty();
+        assertThat(generic.hasNonNull("selfSelectionBlockedReason")).isFalse();
+    }
+
+    @Test
+    void profileContextRequiresReadPermissionAndTenantVisiblePosition() throws Exception {
+        getAs("/api/v1/org/positions/profile-context", FRONT_ACCOUNT, 403);
+        getJson("/api/v1/org/positions/profile-context?positionId=" + UUID.randomUUID(), 404);
+    }
+
+    @Test
+    void protectedSelfSelectionReturnsActionableValidationInsteadOfDatabaseError() throws Exception {
+        UUID hrPositionId = jdbc.queryForObject("""
+                select id from position_definition
+                where tenant_id = ?::uuid and code = 'HR_ADMINISTRATION_SUPERVISOR'
+                """, UUID.class, TENANT);
+        String versionsPath = "/api/v1/org/positions/" + hrPositionId + "/profile/versions";
+        JsonNode before = json(getJson(versionsPath, 200).andReturn());
+        JsonNode error = json(putJson("/api/v1/org/positions/" + hrPositionId + "/profile/draft", """
+                {"expectedProfileVersion":0,"permissionCodes":["ui.module.workbench"],
+                 "authorizationScopeType":"ORG_UNIT","wecomSelfSelectable":true}
+                """, 400));
+        assertThat(error.path("detail").asText()).contains("不能开放员工自选");
+        assertThat(json(getJson(versionsPath, 200).andReturn())).isEqualTo(before);
+    }
+
+    @Test
     void recycleRestoreAndPermanentDeletePreserveAssignmentHistory() throws Exception {
         JsonNode created = json(postJson("/api/v1/org/positions", """
                 {"name":"回收站岗位","appliesToAllHotels":true,"applicableHotelIds":[],
