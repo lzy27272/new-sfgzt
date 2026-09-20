@@ -59,6 +59,7 @@ try {
     if ($hostFingerprint -cne [string]$connection.serverHostKeyFingerprint) {
         throw '固定的服务器身份指纹校验失败。'
     }
+    Clear-BackupPullIncoming $root
 
     $manifestIncomingName = 'control/manifest-' + [guid]::NewGuid().ToString('N') + '.incoming.json'
     $manifestIncoming = Join-Path $root ($manifestIncomingName.Replace('/', '\'))
@@ -70,6 +71,7 @@ try {
     $downloads = New-Object Collections.Generic.List[object]
     $verified = @{}
     $requiredBytes = [long]0
+    $downloadOrdinal = 0
     foreach ($entry in $entries) {
         $relative = [string]$entry.path
         $destination = Join-Path (Join-Path $root 'data') ($relative.Replace('/', '\'))
@@ -84,7 +86,8 @@ try {
             }
         }
         if ($isValid) { $verified[$relative] = $true; continue }
-        $incomingName = 'incoming/' + [string]$entry.sha256 + '.part'
+        $downloadOrdinal++
+        $incomingName = New-BackupIncomingName $downloadOrdinal ([string]$entry.sha256)
         $incomingPath = Join-Path $root ($incomingName.Replace('/', '\'))
         if (Test-Path -LiteralPath $incomingPath) { Remove-Item -LiteralPath $incomingPath -Force }
         $downloads.Add([pscustomobject]@{
