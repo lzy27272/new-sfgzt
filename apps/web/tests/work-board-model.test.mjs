@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { dateRange, boardQuery, validDate, rate, isLateSubmitted, withBoardParams, selectTeamRecordId } from '../src/features/workbench/workBoardModel.ts'
+import { dateRange, boardQuery, validDate, rate, isLateSubmitted, withBoardParams, selectTeamRecordId, personalWorkLabel } from '../src/features/workbench/workBoardModel.ts'
 import { currentAssignment, groupPersonnel, personnelScope } from '../src/features/organization/personnelDirectoryModel.ts'
+
+test('personal board distinguishes own shared and delegated items without expanding visibility', () => {
+  assert.equal(personalWorkLabel({ assignmentId: 'own' }, 'own'), '我的岗位工作')
+  assert.equal(personalWorkLabel({ assignmentId: 'manager' }, 'own'), '本岗位可执行的共享工作')
+  assert.equal(personalWorkLabel({ assignmentId: 'manager', delegateAssignmentId: 'own' }, 'own'), '转交给我的工作')
+  assert.equal(personalWorkLabel({ assignmentId: 'manager' }), '')
+})
 
 test('week begins Monday and crosses month/year correctly', () => {
   assert.deepEqual(dateRange('week', '2026-01-01'), { from: '2025-12-29', to: '2026-01-04' })

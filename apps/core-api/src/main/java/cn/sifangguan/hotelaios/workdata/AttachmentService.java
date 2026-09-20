@@ -4,6 +4,7 @@ import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkVisibilityPolicy;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Value;
@@ -55,6 +56,7 @@ public class AttachmentService {
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy accessPolicy;
+    private final WorkVisibilityPolicy workVisibility;
     private final AuditWriter auditWriter;
     private final AttachmentMalwareScanner malwareScanner;
     private final Path storageRoot;
@@ -64,6 +66,7 @@ public class AttachmentService {
             NamedParameterJdbcTemplate jdbc,
             TenantDatabaseContext databaseContext,
             AccessPolicy accessPolicy,
+            WorkVisibilityPolicy workVisibility,
             AuditWriter auditWriter,
             AttachmentMalwareScanner malwareScanner,
             @Value("${app.attachments.root:var/attachments}") String storageRoot,
@@ -72,6 +75,7 @@ public class AttachmentService {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
+        this.workVisibility = workVisibility;
         this.auditWriter = auditWriter;
         this.malwareScanner = malwareScanner;
         this.storageRoot = Path.of(storageRoot).toAbsolutePath().normalize();
@@ -416,7 +420,7 @@ public class AttachmentService {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission("work-record.read", "work-record.review", "work-record.team-read");
         RecordTarget record = recordTarget(principal, workRecordId);
-        accessPolicy.requireOrgScopeOrOwnWork(record.targetOrgUnitId(), record.assignmentId());
+        workVisibility.requireRecord(principal, workRecordId);
         return jdbc.queryForList("""
                 select id, work_record_id, object_key, original_name, media_type, size_bytes,
                        sha256, scan_status, capture_source, checkpoint_code, captured_at_client,
@@ -442,14 +446,13 @@ public class AttachmentService {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission("work-record.read", "work-record.review", "work-record.team-read");
         Map<String, Object> attachment = jdbc.queryForMap("""
-                select a.object_key, a.original_name, a.media_type, a.size_bytes, a.scan_status,
+                select a.work_record_id, a.object_key, a.original_name, a.media_type, a.size_bytes, a.scan_status,
                        w.target_org_unit_id, w.position_assignment_id
                 from attachment a
                 join work_record w on w.tenant_id = a.tenant_id and w.id = a.work_record_id
                 where a.tenant_id = :tenantId and a.id = :attachmentId
                 """, base(principal).addValue("attachmentId", attachmentId));
-        accessPolicy.requireOrgScopeOrOwnWork((UUID) attachment.get("target_org_unit_id"),
-                (UUID) attachment.get("position_assignment_id"));
+        workVisibility.requireRecord(principal, (UUID) attachment.get("work_record_id"));
         if (!malwareScanner.canDownload(String.valueOf(attachment.get("scan_status")))) {
             throw new IllegalArgumentException("附件尚未通过安全扫描，禁止下载");
         }

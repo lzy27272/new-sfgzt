@@ -10,7 +10,7 @@ import { useResource } from '../../useResource'
 import { resolveTaskDispatchMode } from '../tasks/taskDispatchAccess'
 import { OwnDailyReportShortcut, TeamDailyReportShortcut } from './DailyReportShortcuts'
 import { WorkBoardPanel, WorkDateToolbar, WorkQueueAlerts, useWorkBoard } from './WorkBoard'
-import { boardLabels, emptyMetric, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
+import { boardLabels, emptyMetric, personalWorkLabel, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
 export { isLateSubmitted } from './workBoardModel'
 
 function allows(granted: string[], permission: string) { return granted.includes('*') || granted.includes(permission) }
@@ -100,7 +100,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
         data={own.data} loading={own.loading} error={own.error} onSelect={openOwn} onAll={() => openOwn()} onRetry={own.reload}>
         {own.data.upcomingItems.length > 0 && <div className="wb-upcoming"><h3>最近到期的个人工作</h3>{own.data.upcomingItems.map(item =>
           <button className="wb-compact-row" key={item.id} onClick={() => go('my-work', { ...dateParams, expectationId: item.id })}>
-            <span>{item.title}<small>截止 {item.dueAt ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(item.dueAt)) : '—'}</small></span><b>去完成 ›</b>
+            <span>{item.title}<small>{personalWorkLabel(item, identity.businessActorAssignmentId)}</small><small>截止 {item.dueAt ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(item.dueAt)) : '—'}</small></span><b>去完成 ›</b>
           </button>)}</div>}
       </WorkBoardPanel>}
     </div>

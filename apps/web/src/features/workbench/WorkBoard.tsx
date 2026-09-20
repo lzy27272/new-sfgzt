@@ -3,7 +3,7 @@ import type { NavigationParams, RoleContext, RouteParams, WorkExpectation } from
 import { useResource } from '../../useResource'
 import { loadWorkBoard } from './workBoardApi'
 import {
-  boardLabels, boardQuery, dateRange, emptyBoard, isLateSubmitted, localBusinessDate, rate, validDate,
+  boardLabels, boardQuery, dateRange, emptyBoard, isLateSubmitted, localBusinessDate, personalWorkLabel, rate, validDate,
   type BoardMetric, type BoardStatus, type DateMode, type WorkBoard,
 } from './workBoardModel'
 import './workBoard.css'
@@ -111,8 +111,8 @@ function dateTime(value?: string) {
     timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   }).format(date)
 }
-export function WorkBoardList({ data, loading, error, params, onChange, onOpen, onRetry, own = false }: {
-  data: WorkBoard; loading: boolean; error?: string; params: RouteParams; own?: boolean
+export function WorkBoardList({ data, loading, error, params, onChange, onOpen, onRetry, own = false, assignmentId }: {
+  data: WorkBoard; loading: boolean; error?: string; params: RouteParams; own?: boolean; assignmentId?: string
   onChange: (patch: NavigationParams) => void; onOpen: (item: WorkExpectation) => void; onRetry: () => void
 }) {
   const query = boardQuery(params, data.businessDate || undefined)
@@ -138,7 +138,7 @@ export function WorkBoardList({ data, loading, error, params, onChange, onOpen, 
         <thead><tr><th>工作名称</th><th>负责人 / 岗位</th><th>工作归属日 / 截止</th><th>提交时间</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>{data.items.map(item => <tr key={item.id}>
           <td><strong>{item.title}</strong><small>{item.hotelName || item.targetOrgName} · {item.departmentName || '直属岗位'}</small></td>
-          <td>{item.assigneeName}<small>{item.positionName}</small></td>
+          <td>{own && assignmentId ? personalWorkLabel(item, assignmentId) : item.assigneeName}<small>{item.positionName}</small></td>
           <td>{item.businessDate}<small>截止 {dateTime(item.dueAt)}</small></td>
           <td>{dateTime(item.latestSubmittedAt)}</td>
           <td><span className={'wb-badge ' + (item.boardStatus || 'PENDING').toLowerCase()}>{boardLabels[item.boardStatus || 'PENDING']}</span>

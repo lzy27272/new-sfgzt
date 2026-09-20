@@ -1,5 +1,11 @@
 import type { RouteParams, NavigationParams, WorkExpectation } from '../../domain.ts'
 
+export function personalWorkLabel(item: WorkExpectation, assignmentId?: string) {
+  if (!assignmentId) return ''
+  if (item.delegateAssignmentId === assignmentId) return '转交给我的工作'
+  return item.assignmentId === assignmentId ? '我的岗位工作' : '本岗位可执行的共享工作'
+}
+
 export function selectTeamRecordId(expectation: WorkExpectation, selectedId?: string) {
   const records = expectation.records ?? []
   if (selectedId) {

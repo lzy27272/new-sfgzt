@@ -1,6 +1,8 @@
 package cn.sifangguan.hotelaios.organization;
 
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
+import cn.sifangguan.hotelaios.workpackage.OperationalDailyAllocationService;
+import cn.sifangguan.hotelaios.workpackage.WorkPackageService;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
@@ -30,6 +32,8 @@ public class OrganizationService {
     private final PilotPasswordHasher passwordHasher;
     private final AuditWriter auditWriter;
     private final ObjectMapper objectMapper;
+    private final OperationalDailyAllocationService operationalAllocations;
+    private final WorkPackageService workPackages;
 
     public OrganizationService(
             NamedParameterJdbcTemplate jdbc,
@@ -37,7 +41,9 @@ public class OrganizationService {
             AccessPolicy accessPolicy,
             PilotPasswordHasher passwordHasher,
             AuditWriter auditWriter,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            OperationalDailyAllocationService operationalAllocations,
+            WorkPackageService workPackages
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -45,6 +51,8 @@ public class OrganizationService {
         this.passwordHasher = passwordHasher;
         this.auditWriter = auditWriter;
         this.objectMapper = objectMapper;
+        this.operationalAllocations = operationalAllocations;
+        this.workPackages = workPackages;
     }
 
     @Transactional(readOnly = true)
@@ -605,137 +613,10 @@ public class OrganizationService {
                         + "\",\"effectiveFrom\":\"" + effectiveDate + "\"}");
     }
 
-    /**
-     * Reconciles the release-owned operational daily package for one assignment.
-     * Allocations start no earlier than the next business date, are always owned
-     * by the closest HOTEL ancestor, and select the store's explicit assistant
-     * mode/facility configuration.
-     */
+    /** Existing assignment edits change future schedules; new activations are provisioned immediately. */
     private void reconcileOperationalDailyAllocation(TenantPrincipal principal, UUID assignmentId) {
-        LocalDate databaseToday = jdbc.queryForObject(
-                "select current_date", base(principal), LocalDate.class);
-        if (databaseToday == null) throw new IllegalStateException("无法读取数据库营业日期");
-        LocalDate effectiveDate = databaseToday.plusDays(1);
-        MapSqlParameterSource params = base(principal)
-                .addValue("assignmentId", assignmentId)
-                .addValue("today", databaseToday)
-                .addValue("effectiveDate", effectiveDate)
-                .addValue("actorId", principal.actorId());
-
-        jdbc.update("""
-                update work_package_allocation allocation
-                set status = case when allocation.valid_from > :today then 'REVOKED'
-                                  else allocation.status end,
-                    valid_to = case when allocation.valid_from <= :today then :today
-                                    else allocation.valid_to end,
-                    updated_at = now()
-                from work_package_version version
-                join work_package_definition definition
-                  on definition.tenant_id = version.tenant_id
-                 and definition.id = version.work_package_definition_id
-                where allocation.tenant_id = :tenantId
-                  and allocation.position_assignment_id = :assignmentId
-                  and allocation.work_package_version_id = version.id
-                  and allocation.allocation_source = 'SYSTEM'
-                  and allocation.status = 'ACTIVE'
-                  and definition.code in (
-                    'WP-PILOT-GM-DAILY','WP-PILOT-AGM-DAILY',
-                    'WP-PILOT-FO-SUPERVISOR-DAILY','WP-PILOT-SERVICE-STEWARD-DAILY',
-                    'WP-PILOT-FRONT-DAILY','WP-PILOT-HK-SUPERVISOR-DAILY',
-                    'WP-PILOT-HK-ATTENDANT-DAILY','WP-PILOT-NIGHT-ATTENDANT-DAILY',
-                    'WP-PILOT-BREAKFAST-LEAD-DAILY'
-                  )
-                  and (allocation.valid_to is null or allocation.valid_to >= :today)
-                """, params);
-
-        jdbc.update("""
-                insert into work_package_allocation
-                    (id,tenant_id,work_package_version_id,position_assignment_id,
-                     target_org_unit_id,allocation_source,valid_from,valid_to,status,allocated_by)
-                select gen_random_uuid(), assignment.tenant_id, selected_version.id, assignment.id,
-                       hotel_config.hotel_org_unit_id, 'SYSTEM',
-                       greatest(:effectiveDate, assignment.valid_from), assignment.valid_to,
-                       'ACTIVE', :actorId
-                from employee_position_assignment assignment
-                join position_definition position
-                  on position.tenant_id = assignment.tenant_id
-                 and position.id = assignment.position_id
-                join employee employee_row
-                  on employee_row.tenant_id = assignment.tenant_id
-                 and employee_row.id = assignment.employee_id
-                join user_account account
-                  on account.tenant_id = employee_row.tenant_id
-                 and account.id = employee_row.account_id
-                join lateral (
-                    select profile.org_unit_id as hotel_org_unit_id,
-                           profile.assistant_work_template_mode,
-                           coalesce(
-                             (profile.operational_feature_flags ->> 'breakfastArea')::boolean,
-                             profile.breakfast_service_enabled
-                           ) as breakfast_area_enabled
-                    from org_unit_closure scope
-                    join hotel_profile profile
-                      on profile.tenant_id = scope.tenant_id
-                     and profile.org_unit_id = scope.ancestor_id
-                    where scope.tenant_id = assignment.tenant_id
-                      and scope.descendant_id = assignment.org_unit_id
-                    order by scope.depth asc
-                    limit 1
-                ) hotel_config on true
-                join lateral (
-                    select version.id
-                    from work_package_definition definition
-                    join work_package_version version
-                      on version.tenant_id = definition.tenant_id
-                     and version.work_package_definition_id = definition.id
-                    where definition.tenant_id = assignment.tenant_id
-                      and definition.code = case position.code
-                        when 'GENERAL_MANAGER' then 'WP-PILOT-GM-DAILY'
-                        when 'ASSISTANT_GENERAL_MANAGER' then 'WP-PILOT-AGM-DAILY'
-                        when 'FRONT_OFFICE_SUPERVISOR' then 'WP-PILOT-FO-SUPERVISOR-DAILY'
-                        when 'SERVICE_STEWARD' then 'WP-PILOT-SERVICE-STEWARD-DAILY'
-                        when 'FRONT_DESK' then 'WP-PILOT-FRONT-DAILY'
-                        when 'HOUSEKEEPING_SUPERVISOR' then 'WP-PILOT-HK-SUPERVISOR-DAILY'
-                        when 'HOUSEKEEPING_ATTENDANT' then 'WP-PILOT-HK-ATTENDANT-DAILY'
-                        when 'NIGHT_SERVICE_ATTENDANT' then 'WP-PILOT-NIGHT-ATTENDANT-DAILY'
-                        when 'BREAKFAST_AREA_LEAD' then 'WP-PILOT-BREAKFAST-LEAD-DAILY'
-                        else null end
-                      and version.lifecycle_status = 'PUBLISHED'
-                      and version.effective_from is not null
-                      and version.effective_from::date <= greatest(:effectiveDate, assignment.valid_from)
-                      and (version.effective_to is null
-                           or version.effective_to::date >= greatest(:effectiveDate, assignment.valid_from))
-                      and (
-                        position.code <> 'ASSISTANT_GENERAL_MANAGER'
-                        or exists (
-                          select 1 from work_package_item item
-                          where item.tenant_id = version.tenant_id
-                            and item.work_package_version_id = version.id
-                            and item.applicability_policy ->> 'assistantWorkTemplateMode'
-                                = hotel_config.assistant_work_template_mode
-                        )
-                      )
-                    order by version.version_no desc
-                    limit 1
-                ) selected_version on true
-                where assignment.tenant_id = :tenantId
-                  and assignment.id = :assignmentId
-                  and assignment.status = 'ACTIVE'
-                  and position.status = 'ACTIVE'
-                  and position.deleted_at is null and position.permanently_deleted_at is null
-                  and employee_row.employment_status = 'ACTIVE' and employee_row.deleted_at is null
-                  and account.status = 'ACTIVE'
-                  and (assignment.valid_to is null
-                       or assignment.valid_to >= greatest(:effectiveDate, assignment.valid_from))
-                  and (position.code <> 'FRONT_OFFICE_SUPERVISOR'
-                       or hotel_config.assistant_work_template_mode = 'WITH_FRONT_OFFICE_SUPERVISOR')
-                  and (position.code <> 'BREAKFAST_AREA_LEAD'
-                       or hotel_config.breakfast_area_enabled)
-                on conflict (tenant_id,work_package_version_id,position_assignment_id,
-                             target_org_unit_id,valid_from)
-                do update set status = 'ACTIVE', valid_to = excluded.valid_to,
-                              allocated_by = excluded.allocated_by, updated_at = now()
-                """, params);
+        LocalDate today = jdbc.queryForObject("select current_date", base(principal), LocalDate.class);
+        operationalAllocations.reconcile(principal, assignmentId, today.plusDays(1));
     }
 
     @Transactional
@@ -1498,7 +1379,7 @@ public class OrganizationService {
                      :actorId, 'POSITION_ASSIGNMENT', :id)
                 """, parameters);
         replaceAssignmentHotelScope(principal, id, responsibleHotelIds);
-        reconcileOperationalDailyAllocation(principal, id);
+        workPackages.initializeOperationalAssignment(id);
         if (!primary) {
             ensurePrimaryAssignment(principal, employeeId, id);
         }

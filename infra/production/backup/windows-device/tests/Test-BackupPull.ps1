@@ -89,6 +89,10 @@ try {
     $installerText = [IO.File]::ReadAllText((Join-Path $packageRoot 'Install-BackupPull.ps1'), [Text.Encoding]::UTF8)
     Assert-True ($installerText.Contains('& $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass')) 'Initial sync runs in a child PowerShell process so installer continues'
     Assert-True (-not $installerText.Contains("& (Join-Path `$program 'Invoke-BackupPull.ps1')")) 'Installer does not invoke exiting sync script in-process'
+    $launcherBytes = [IO.File]::ReadAllBytes((Join-Path $packageRoot '02-Install-BackupPull.cmd'))
+    Assert-True (@($launcherBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'CMD launcher is ASCII-only for every Windows system code page'
+    $launcherText = [Text.Encoding]::ASCII.GetString($launcherBytes)
+    Assert-True (-not $launcherText.Contains('chcp ')) 'CMD launcher does not change code page while cmd.exe is parsing it'
     Write-Host ('TOTAL PASSED: ' + $script:passed)
 } finally {
     $resolved = [IO.Path]::GetFullPath($testRoot)
