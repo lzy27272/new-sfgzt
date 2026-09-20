@@ -22,6 +22,7 @@ export const navigation: Array<{ id: AppRouteId; sectionId?: string; label: stri
   { id: 'organization', label: '组织与权限', icon: '⚙', group: '系统配置', permissions: ['org.manage', 'position-profile.read'] },
   { id: 'store-resources', label: '库存与固定资产', icon: '库', group: '系统配置', permissions: [permissionCodes.storeResource.read] },
   { id: 'data-retention', label: '数据留存策略', icon: '◷', group: '系统配置', administratorOnly: true },
+  { id: 'ai-data', label: 'AI 数据与复盘', icon: '◈', permissions: ['ui.module.ai-data'] },
   { id: 'wecom-webhooks', label: '企业微信 Webhook', icon: '◉', group: '系统配置', permissions: ['org.manage'] },
   { id: 'wecom-onboarding', label: '企业微信入职审核', icon: '人', group: '系统配置', permissions: [permissionCodes.wecomBinding.read] },
   { id: 'wecom-bindings', label: '企微绑定与异常', icon: '◎', permissions: [permissionCodes.wecomBinding.read] },

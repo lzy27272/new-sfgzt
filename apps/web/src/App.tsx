@@ -130,6 +130,7 @@ const WecomStoreWebhookConfiguration = lazy(() => import('./features/wecom/Wecom
 const WecomUserBindingAdministration = lazy(() => import('./features/wecom/WecomUserBindingAdministration').then((module) => ({ default: module.WecomUserBindingAdministration })))
 const WecomDirectoryOnboardingAdministration = lazy(() => import('./features/wecom/WecomDirectoryOnboardingAdministration').then((module) => ({ default: module.WecomDirectoryOnboardingAdministration })))
 const DataRetentionAdministration = lazy(() => import('./features/dataRetention/DataRetentionAdministration').then((module) => ({ default: module.DataRetentionAdministration })))
+const AiDataFeature = lazy(() => import('./features/aiData/AiDataFeature'))
 const StoreResourceFeature = lazy(() => import('./features/storeResources/StoreResourceRoutes').then((module) => ({ default: module.StoreResourceRoutes })))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
@@ -2009,6 +2010,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       case 'organization': legacyPage = <OrganizationCenter identity={activeIdentity} permissions={activePermissions} routeParams={routeParams} />; break
       case 'store-resources': legacyPage = <StoreResourceFeature identity={activeIdentity} grantedPermissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'data-retention': legacyPage = <DataRetentionAdministration identity={activeIdentity} />; break
+      case 'ai-data': legacyPage = <AiDataFeature key={activeIdentity.key} identity={activeIdentity} />; break
       case 'wecom-webhooks': legacyPage = <WecomStoreWebhookConfiguration identity={activeIdentity} permissions={activePermissions} />; break
       case 'wecom-bindings': legacyPage = <WecomUserBindingAdministration identity={activeIdentity} requestId={routeParams.requestId} onClearRequest={() => navigate('wecom-bindings')} />; break
       case 'wecom-onboarding': legacyPage = <WecomDirectoryOnboardingAdministration

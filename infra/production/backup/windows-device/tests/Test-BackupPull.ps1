@@ -82,6 +82,24 @@ try {
     $safeChild = New-BackupPullDirectory $testRoot (Join-Path $testRoot 'safe\child')
     Assert-True ([IO.Directory]::Exists($safeChild)) 'Safe directory created inside backup root'
     Assert-Throws { Assert-BackupPullPath $testRoot (Join-Path $testParent 'outside') } 'Path outside backup root rejected'
+    $sharedHash = 'e' * 64
+    $firstIncoming = New-BackupIncomingName 1 $sharedHash
+    $secondIncoming = New-BackupIncomingName 2 $sharedHash
+    Assert-True ($firstIncoming -ceq ('incoming/0001-' + $sharedHash + '.part')) 'Incoming name contains a stable transfer ordinal'
+    Assert-True ($firstIncoming -cne $secondIncoming) 'Equal-content manifest entries receive different incoming paths'
+    Assert-Throws { New-BackupIncomingName 0 $sharedHash } 'Invalid incoming ordinal rejected'
+    $incomingRoot = New-BackupPullDirectory $testRoot (Join-Path $testRoot 'incoming')
+    $legacyPart = Join-Path $incomingRoot (('a' * 64) + '.part')
+    $numberedPart = Join-Path $incomingRoot ('0001-' + ('b' * 64) + '.part')
+    [IO.File]::WriteAllText($legacyPart, 'legacy')
+    [IO.File]::WriteAllText($numberedPart, 'numbered')
+    Clear-BackupPullIncoming $testRoot
+    Assert-True (-not (Test-Path -LiteralPath $legacyPart) -and -not (Test-Path -LiteralPath $numberedPart)) 'Managed partial downloads are cleared before retry'
+    $unmanagedIncoming = Join-Path $incomingRoot 'keep.txt'
+    [IO.File]::WriteAllText($unmanagedIncoming, 'keep')
+    Assert-Throws { Clear-BackupPullIncoming $testRoot } 'Unmanaged incoming files block cleanup'
+    Assert-True (Test-Path -LiteralPath $unmanagedIncoming -PathType Leaf) 'Unmanaged incoming file is preserved'
+    [IO.File]::Delete($unmanagedIncoming)
     $junction = Join-Path $testRoot 'junction'
     New-Item -Path $junction -ItemType Junction -Value (Join-Path $testRoot 'safe') | Out-Null
     Assert-Throws { Assert-BackupPullPath $testRoot (Join-Path $junction 'child') } 'Directory junction rejected'

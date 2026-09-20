@@ -96,6 +96,26 @@ function Test-LowerSha256 {
     return $null -ne $Value -and $Value -cmatch '^[0-9a-f]{64}$'
 }
 
+function New-BackupIncomingName {
+    param([int]$Ordinal, [string]$Sha256)
+    if ($Ordinal -lt 1 -or $Ordinal -gt 500 -or -not (Test-LowerSha256 $Sha256)) {
+        throw '下载临时文件编号或校验值无效。'
+    }
+    return ('incoming/{0:D4}-{1}.part' -f $Ordinal, $Sha256)
+}
+
+function Clear-BackupPullIncoming {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $incoming = New-BackupPullDirectory $Root (Join-Path $Root 'incoming')
+    foreach ($entry in Get-ChildItem -LiteralPath $incoming -Force -ErrorAction Stop) {
+        if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $entry.Name -cnotmatch '^(?:[0-9]{4}-)?[0-9a-f]{64}[.]part$') {
+            throw '下载临时目录包含非受管文件，拒绝自动清理。'
+        }
+        [IO.File]::Delete($entry.FullName)
+    }
+}
+
 function Get-ValidatedBackupManifest {
     param([Parameter(Mandatory=$true)][string]$Path)
     $manifest = Read-BackupPullJson $Path

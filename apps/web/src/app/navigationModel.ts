@@ -25,7 +25,7 @@ const centerDefinitions: readonly {
   modules: readonly AppRouteId[]
 }[] = [
   { id: 'workbench', label: '工作台', modules: ['workbench', 'my-work', 'daily-reports-my', 'team-work', 'tasks', 'notifications'] },
-  { id: 'operations', label: '经营中心', modules: ['daily-operations', 'investments', 'store-resources'] },
+  { id: 'operations', label: '经营中心', modules: ['daily-operations', 'investments', 'store-resources', 'ai-data'] },
   { id: 'people', label: '人事中心', modules: ['organization', 'wecom-onboarding', 'wecom-bindings'] },
   { id: 'performance', label: '绩效中心', modules: ['kpi-center', 'evaluations'] },
   { id: 'configuration', label: '配置中心', modules: ['templates', 'work-packages', 'daily-report-templates', 'rules', 'organization', 'wecom-webhooks', 'data-retention'] },
@@ -60,7 +60,7 @@ export function buildNavigationCenters(visibleFeatures: readonly NavigationFeatu
 /** Existing hash routes keep their identifiers; detail routes already resolve to these sections. */
 export function navigationCenterForSection(sectionId: AppSectionId, params: RouteParams = {}): NavigationCenterId {
   if (sectionId === 'organization' && params.center === 'configuration') return 'configuration'
-  if (['daily-operations', 'investments', 'store-resources'].includes(sectionId)) return 'operations'
+  if (['daily-operations', 'investments', 'store-resources', 'ai-data'].includes(sectionId)) return 'operations'
   if (['organization', 'wecom-onboarding', 'wecom-bindings'].includes(sectionId)) return 'people'
   if (['kpi', 'evaluations'].includes(sectionId)) return 'performance'
   if (['templates', 'work-packages', 'daily-report-templates', 'rules', 'wecom-webhooks', 'data-retention'].includes(sectionId)) return 'configuration'
