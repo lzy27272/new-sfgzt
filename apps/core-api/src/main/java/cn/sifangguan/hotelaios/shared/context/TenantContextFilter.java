@@ -63,6 +63,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         return request.getRequestURI().startsWith("/actuator/")
+                // This exact endpoint resolves a restricted MCP grant itself, never cookies/JWT.
+                || request.getRequestURI().equals("/api/v1/ai-data/mcp")
                 || request.getRequestURI().equals("/api/v1/auth/login")
                 || request.getRequestURI().equals("/api/v1/auth/logout")
                 || isAnonymousWeComEndpoint(request)
