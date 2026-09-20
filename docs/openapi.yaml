@@ -1497,6 +1497,397 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/ListResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/usage-catalog:
+    get:
+      tags: [Store Resource]
+      operationId: getWorkUsageCatalogue
+      summary: Get current employee hotel actual-use item list without stock balances or costs
+      description: Requires work-record.submit, or both work-record.review and store-resource.read, plus own active hotel assignment or authorized hotel scope. Includes enabled, reviewer_available and configured base/issue units with row versions. Optional businessDate and itemCode resolve an existing complementary HKA_DAILY_REPORT/HKA_USAGE_RETURN record for this employee; reference_usage is informational and causes no stock write.
+      parameters:
+        - name: orgUnitId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - { name: businessDate, in: query, schema: { type: string, format: date } }
+        - { name: itemCode, in: query, schema: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/usage-review-config:
+    get:
+      tags: [Store Resource]
+      operationId: getWorkUsageReviewConfig
+      summary: Get hotel opt-in consumption reviewer configuration
+      description: Requires store-resource.read and authorized hotel scope. Missing configuration means enabled=false and row_version=-1; legacy reporting does not post inventory.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Store Resource]
+      operationId: configureWorkUsageReviewer
+      summary: Explicitly enable hotel consumption linkage and configure its reviewer
+      description: Requires store-resource.item-manage and hotel scope. Reviewer must have an active assignment in this hotel, work-record.review, store-resource.read and ui.module.store-resources. Pending records follow the new reviewer; submission snapshots remain unchanged. Uses optimistic configuration version, -1 for initial opt-in.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigureWorkUsageReviewer' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/usage-reviewers:
+    get:
+      tags: [Store Resource]
+      operationId: listWorkUsageReviewers
+      summary: List eligible consumption reviewer assignments in this hotel
+      description: Requires store-resource.item-manage and hotel scope; does not grant any new permissions.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/work-usage:
+    get:
+      tags: [Store Resource]
+      operationId: listWorkUsages
+      summary: List the most recent 100 consumption records with immutable item snapshots
+      description: Requires store-resource.read and hotel scope. Returns can_review and record_version. Review uses the existing work-data record review action; configured reviewer or platform administrator only, no self review. Approval, work status and stock ledger post atomically; linen is usage-only. Identical review retries do not deduct again.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - name: status
+          in: query
+          schema: { type: string, enum: [PENDING, APPROVED, REJECTED, REVERSED, ALL], default: PENDING }
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/store-resources/hotels/{hotelId}/work-usage/{recordId}/reverse:
+    post:
+      tags: [Store Resource]
+      operationId: reverseWorkUsage
+      summary: Reverse approved consumption by adding opposite ledger entries
+      description: Requires store-resource.movement-create and hotel scope. Restores original quantities and costs, never deletes history or changes work completion. Repeated identical reasons return the same reversed record; different reasons conflict. Corrected actual consumption requires a separately authorized adjustment with an audit reason.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - name: recordId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/work-usage/{recordId}/correct:
+    post:
+      tags: [Store Resource]
+      operationId: correctWorkUsage
+      summary: Replace approved quantities and atomically synchronize stock and cost with immutable revisions
+      description: Requires work-record.review, store-resource.read, hotel scope and the current configured reviewer or platform administrator. No self-review. expectedVersion is the correction_version, initially zero, not work-record row version. Restore the previous revision at its original value, then post replacement quantities at current weighted-average value. Missing stock or invalid configuration rolls back the entire command. Linen remains quantity-only. Repeated identical actor, expected version and request is idempotent; stale or different requests conflict. Original work record, evidence and closed-month snapshots remain immutable. Live business-date operating totals are updated.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - { name: recordId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantities, expectedVersion, reason]
+              properties:
+                quantities: { type: object, description: 'schemaVersion 1, noUsage boolean, lines array of itemId, quantity, unit, expectedItemVersion; 1-100 unique active items or explicit noUsage with empty lines.' }
+                expectedVersion: { type: integer, minimum: 0 }
+                reason: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/costs/operating-summary:
+    get:
+      tags: [Store Resource]
+      operationId: storeOperatingCostSummary
+      summary: Yesterday and month-to-yesterday cost cards with daily monthly and custom period queries
+      description: Requires daily-operation.read and store-resource.read plus full authorized hotel scope. Read-only REPEATABLE_READ snapshot. roomUseBasis is ALL_ROOM_USES_V1 and dateBasis BUSINESS_DATE_LIVE. Returns yesterday, monthToYesterday and selected windows, nullable amount/perRoomUse and quality reasons. Only consumables, cleaning supplies and accepted laundry costs are included, not rent, payroll, utilities or depreciation. Original business-date aggregation reflects corrections without changing financial posting-date closes. PMS gaps or zero use, pending consumption, unpriced/legacy costs and absent cost records never produce fabricated ratios. Custom period supports at most 1096 inclusive days through local yesterday. On month day 1 the current-month window is empty, never substituted with the previous month. Currency and denominator are exact decimal text.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - { name: periodType, in: query, schema: { type: string, enum: [DAY, MONTH, CUSTOM], default: MONTH } }
+        - { name: period, in: query, schema: { type: string }, description: 'YYYY-MM-DD for DAY or YYYY-MM for MONTH; empty defaults to yesterday or current month.' }
+        - { name: from, in: query, schema: { type: string, format: date }, description: Required for CUSTOM. }
+        - { name: to, in: query, schema: { type: string, format: date }, description: Required for CUSTOM. }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/costs:
+    get:
+      tags: [Store Resource]
+      operationId: storeCostMonthPreview
+      summary: Preview monthly cost or read the immutable closed-month snapshot
+      description: Requires store-resource.read and hotel scope. Monetary values and quantities are exact decimal strings. Separates consumption and qualified laundry fees, loss and inventory adjustments. Purchases, opening inventory and asset original values are not operating expenses. Includes daily/item aggregates, pending usage, outstanding laundry, zero amounts and legacy classification warnings. Default month uses the tenant timezone. previewToken covers a consistent committed snapshot.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - { name: month, in: query, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/costs/per-room-use:
+    get:
+      tags: [Store Resource]
+      operationId: storeCostPerRoomUse
+      summary: Read daily or monthly consumable, cleaning and laundry cost per verified PMS room use
+      description: Requires store-resource.read and hotel scope. Read-only management analysis, never a KPI or month-close write. Explicit tenant binding plus unique hotel-profile ID and property code mapping are mandatory. ALL_ROOM_USES_V1 requires an inclusive totalRoomUses with a confirmed ROOM_USE and EACH_USE definition including overnight, complimentary, house-use and hourly uses. Two uses of the same room on one business day count as two, with no room-number deduplication and no hourly conversion. A confirmed total alone is sufficient; four mutually exclusive categories are optional. Supplied categories must be nonnegative integer counts and cannot exceed the total; a complete breakdown must sum exactly to it. Partial categories are omitted, never zero-filled. Optional category availability does not change comparability. Old equivalent room-nights and legacy overnight-only data are never substituted. Numerator is posting-date cost in the same date range; monthly cost is total cost divided by summed uses, not the average of daily rates. Defaults to MONTH/current month through the last closed business day (cutoff and grace included); DAY defaults to last closed day. Missing, incomplete, unverified or zero-use data and absent or unpriced cost records never produce misleading zero ratios. Comparisons use matched periods and exact ratios. Definition changes and non-positive baselines are not percentage-comparable. Uses are integer text; monetary values and percentages are exact decimal text. PMS revision may change this live analysis without changing the immutable cost month close. No raw vendor data, credentials or filesystem paths are returned.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - { name: periodType, in: query, schema: { type: string, enum: [DAY, MONTH], default: MONTH } }
+        - name: period
+          in: query
+          description: DAY uses YYYY-MM-DD; MONTH uses YYYY-MM. Optional, from year 2000 through current date only.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Analysis with per-metric readiness, comparison reasons and source provenance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomUseCostAnalysis' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/costs/per-room-night:
+    get:
+      tags: [Store Resource]
+      operationId: storeCostPerRoomNightLegacyAlias
+      deprecated: true
+      summary: Deprecated path alias for per-room-use; returns the new versioned room-use contract
+      description: Same store-resource.read permission and hotel scope as per-room-use. Returns roomUseBasis ALL_ROOM_USES_V1, roomUses and perRoomUse; no legacy roomNightBasis or perRoomNight values. Clients must check the new basis and must not display it as room-nights.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - { name: periodType, in: query, schema: { type: string, enum: [DAY, MONTH], default: MONTH } }
+        - { name: period, in: query, schema: { type: string }, description: DAY uses YYYY-MM-DD; MONTH uses YYYY-MM. }
+      responses:
+        '200':
+          description: Versioned room-use analysis
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomUseCostAnalysis' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/costs/entries:
+    get:
+      tags: [Store Resource]
+      operationId: storeCostEntries
+      summary: Paginated immutable cost evidence with source and correction references
+      description: Requires store-resource.read and hotel scope. 50 entries per page with hasMore. Filters use posting date, not original business date. Reversals retain the original business date and are negative entries in the correction month. Closed months never acquire additional entries; backdated postings into a closed month move to the current tenant month.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - { name: month, in: query, required: true, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - { name: page, in: query, schema: { type: integer, minimum: 0, maximum: 100000, default: 0 } }
+        - { name: kind, in: query, schema: { type: string, enum: [ALL, CONSUMABLE, CLEANING_SUPPLY, OPERATING_ITEM, LINEN_USAGE, LAUNDRY, LOSS, ADJUSTMENT], default: ALL } }
+        - { name: day, in: query, schema: { type: string, format: date }, description: Optional posting date within the selected month. }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/costs/closed-months:
+    get:
+      tags: [Store Resource]
+      operationId: storeCostClosedMonths
+      summary: Read historical month-close totals, operator, note and timestamp
+      description: Requires store-resource.read and hotel scope. 12 monthly snapshots per page with hasMore.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - { name: page, in: query, schema: { type: integer, minimum: 0, maximum: 100000, default: 0 } }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/costs/close:
+    post:
+      tags: [Store Resource]
+      operationId: closeStoreCostMonth
+      summary: Confirm an ended month and retain an immutable cost snapshot
+      description: Requires both store-resource.cost-close and store-resource.read with hotel scope. Only ended months; pending usage must be approved or rejected first. Requires a fresh previewToken, explicit warning acknowledgment and a note. Uses an exclusive per-hotel accounting lock against shared posting locks. Same month/token/note retry returns the existing result; conflicts never overwrite it. No reopen or direct historical rewrite endpoint. Late entries and reversals remain auditable in the current month.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CloseStoreCostMonth' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/laundry/catalog:
+    get:
+      tags: [Store Resource]
+      operationId: laundryCatalog
+      summary: Active linen, laundry prices and owned / in-laundry / available quantities
+      description: Requires store-resource.read and hotel scope. Prices are per base unit, independent of purchase cost. Missing prices are null, not zero. Availability is owned quantity minus outstanding laundry custody.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ListResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/laundry/rates/{itemId}:
+    put:
+      tags: [Store Resource]
+      operationId: configureLaundryRate
+      summary: Configure the laundry price for new dispatches only
+      description: Requires store-resource.item-manage and hotel scope. Checks item and rate versions. expectedVersion=-1 creates the first price. Base unit and linen category become immutable. Existing dispatch snapshots never change.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/StoreResourceItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigureLaundryRate' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/laundry/orders:
+    get:
+      tags: [Store Resource]
+      operationId: listLaundryOrders
+      summary: Paginated laundry orders with effective charges
+      description: Requires store-resource.read and hotel scope. Returns items, page and hasMore, 25 orders per page. Charges exclude reversed receipts. Historical orders remain queryable. Aggregate quantities across different base units must not be displayed as a single physical unit.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 100000, default: 0 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [ALL, OPEN, COMPLETED, CANCELLED], default: ALL }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Store Resource]
+      operationId: dispatchLaundry
+      summary: Freeze quantities and laundry prices without consuming linen stock
+      description: Requires store-resource.movement-create and hotel scope. Idempotency-Key is required, at most 160 characters. All quantities use base units. Locks items in a stable order; outstanding laundry cannot be dispatched or consumed again. Only active linen with configured prices is allowed. Identical retries return the existing order, changed payloads conflict. Future actual dates are rejected using tenant timezone.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DispatchLaundry' }
+      responses:
+        '201': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}:
+    get:
+      tags: [Store Resource]
+      operationId: laundryOrderDetail
+      summary: Read frozen dispatch lines and complete receipt / reversal history
+      description: Requires store-resource.read and hotel scope. Status is SENT, PARTIAL, COMPLETED or CANCELLED; each receipt is POSTED or REVERSED. Lines retain original item names, base units and prices. Returns row_version for corrections and receipts. No attachments are removed by this workflow.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/LaundryOrderId'
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}/receipts:
+    post:
+      tags: [Store Resource]
+      operationId: receiveLaundry
+      summary: Accept partial returns, record rewash and explicitly confirm losses
+      description: Requires store-resource.movement-create and hotel scope. Idempotency-Key at most 160 characters. The order version serializes receipt and correction commands. acceptedQuantity generates a four-decimal fee at frozen unitPrice; rewashQuantity remains outstanding and generates no fee; writtenOffQuantity needs confirmWriteOff=true and a reason, and posts a separate weighted-average DAMAGE stock movement. All effects are atomic. Sum of these quantities cannot exceed outstanding custody. Receipt date must be between dispatch date and today. Returns refreshed order detail.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/LaundryOrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReceiveLaundry' }
+      responses:
+        '201': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}/cancel:
+    post:
+      tags: [Store Resource]
+      operationId: cancelLaundryOrder
+      summary: Cancel an order only when no effective receipt exists
+      description: Requires store-resource.movement-create and hotel scope. Releases custody but preserves all facts. Previously reversed receipts do not block cancellation. Same-reason retries return existing cancellation; changed reasons conflict.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/LaundryOrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CorrectLaundry' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}/receipts/{receiptId}/reverse:
+    post:
+      tags: [Store Resource]
+      operationId: reverseLaundryReceipt
+      summary: Reverse one receipt, preserving original facts and restoring original loss costs
+      description: Requires store-resource.movement-create and hotel scope. Receipt fees stop contributing to current effective charges. Compensating stock entries restore original write-off quantities and original values; custody is reinstated. Rejects if subsequent dispatches or outflows mean restored custody would exceed owned linen. Atomic, version-checked, same-reason idempotent. Future monthly accounting must use received_on and reversed_at separately, not rewrite closed months from this current-effective view.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+        - $ref: '#/components/parameters/LaundryOrderId'
+        - $ref: '#/components/parameters/LaundryReceiptId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CorrectLaundry' }
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/store-resources/hotels/{hotelId}/items:
     get:
       tags: [Store Resource]
@@ -1934,6 +2325,8 @@ components:
     NotificationId: { name: notificationId, in: path, required: true, schema: { type: string, format: uuid } }
     HotelId: { name: hotelId, in: path, required: true, schema: { type: string, format: uuid } }
     StoreResourceItemId: { name: itemId, in: path, required: true, schema: { type: string, format: uuid } }
+    LaundryOrderId: { name: orderId, in: path, required: true, schema: { type: string, format: uuid } }
+    LaundryReceiptId: { name: receiptId, in: path, required: true, schema: { type: string, format: uuid } }
     StoreFixedAssetId: { name: assetId, in: path, required: true, schema: { type: string, format: uuid } }
     StoreResourceHandoverId: { name: handoverId, in: path, required: true, schema: { type: string, format: uuid } }
     StoreResourceImportJobId: { name: importJobId, in: path, required: true, schema: { type: string, format: uuid } }
@@ -1981,6 +2374,11 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
     Forbidden:
       description: Permission denied or organization scope violation
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource not found in the authorized tenant and hotel scope
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -2344,6 +2742,174 @@ components:
       properties:
         jsonSchema: { type: object, additionalProperties: true }
         uiSchema: { type: [object, 'null'], additionalProperties: true }
+    ConfigureWorkUsageReviewer:
+      type: object
+      required: [reviewerAssignmentId, expectedVersion]
+      properties:
+        reviewerAssignmentId: { type: string, format: uuid }
+        expectedVersion: { type: integer, format: int64, minimum: -1 }
+    RoomUseCostAnalysis:
+      type: object
+      required: [periodType, selection, currentMonth, latestClosedDay, businessTimezone, costTimezone, generatedAt, roomUseBasis, current, previous, yearAgo, comparisons, notices]
+      properties:
+        periodType: { type: string, enum: [DAY, MONTH] }
+        selection: { type: string }
+        currentMonth: { type: string }
+        latestClosedDay: { type: string, format: date }
+        businessTimezone: { type: string }
+        costTimezone: { type: string }
+        generatedAt: { type: string, format: date-time }
+        roomUseBasis: { type: string, const: ALL_ROOM_USES_V1, description: Reject legacy overnight-only or equivalent room-night responses; count each use instead. }
+        current: { $ref: '#/components/schemas/RoomUseCostWindow' }
+        previous: { $ref: '#/components/schemas/RoomUseCostWindow' }
+        yearAgo: { $ref: '#/components/schemas/RoomUseCostWindow' }
+        comparisons:
+          type: array
+          items:
+            type: object
+            required: [kind, previous, yearAgo]
+            properties:
+              kind: { type: string }
+              previous: { $ref: '#/components/schemas/RoomUseCostChange' }
+              yearAgo: { $ref: '#/components/schemas/RoomUseCostChange' }
+        notices: { type: array, items: { type: string } }
+    RoomUseCostWindow:
+      type: object
+      required: [from, to, costMonthClosed, pendingUsageCount, shiftedEntryCount, source, costs]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date, description: May precede from when the current month has no closed business day yet. }
+        costMonthClosed: { type: boolean }
+        pendingUsageCount: { type: integer }
+        shiftedEntryCount: { type: integer }
+        source:
+          type: object
+          required: [state, reason, coveredDays, expectedDays, missingDates]
+          properties:
+            state: { type: string, enum: [READY, ZERO_USES, NOT_CONNECTED, NOT_MAPPED, SOURCE_ERROR, PERIOD_OPEN, NO_DATA, INCOMPLETE, UNVERIFIED, DUPLICATE, DEFINITION_CHANGED, DATE_BASIS_MISMATCH] }
+            reason: { type: string }
+            roomUses: { type: [string, 'null'], pattern: '^\d+$', description: Confirmed inclusive integer usage count. Two uses of the same room count twice; no hourly conversion. ZERO_USES cannot be divided. }
+            candidateRoomUses: { type: [string, 'null'], pattern: '^\d+$', description: Unconfirmed quantity for reconciliation only, never a denominator. }
+            breakdown:
+              $ref: '#/components/schemas/RoomUseBreakdown'
+              description: Optional even for READY or ZERO_USES. Null unless all four categories are verified for the entire period; total-only evidence remains usable and comparable. Missing components are never assumed to be zero.
+            coveredDays: { type: integer }
+            expectedDays: { type: integer }
+            missingDates: { type: array, items: { type: string, format: date } }
+            mode: { type: string, enum: [DAILY, PERIOD_SUMMARY] }
+            definitionLabel: { type: string }
+            definitionKey: { type: string, description: Comparable definition identity, not a source credential. }
+            collectedAt: { type: string, format: date-time }
+            revision: { type: string, pattern: '^[a-f0-9]{64}$' }
+        costs:
+          type: array
+          items:
+            type: object
+            required: [kind, amount, entryCount, zeroAmountCount, legacyCount, state, reason]
+            properties:
+              kind: { type: string, enum: [CONSUMABLE, CLEANING_SUPPLY, LAUNDRY] }
+              amount: { type: string, pattern: '^-?\d+\.\d{4}$' }
+              entryCount: { type: integer }
+              zeroAmountCount: { type: integer }
+              legacyCount: { type: integer }
+              state: { type: string }
+              reason: { type: string }
+              perRoomUse: { type: [string, 'null'], pattern: '^-?\d+\.\d{4}$', description: Yuan per use; null or omitted unless cost and confirmed nonzero total-use count are ready. }
+    RoomUseBreakdown:
+      type: [object, 'null']
+      description: Optional four mutually exclusive integer counts in ROOM_USE units; free or house-use hourly uses belong only to their respective category. No hourly conversion or same-room deduplication. Complete categories must sum to the total. No actual cost allocation by category is implied.
+      required: [paidOvernightRoomUses, complimentaryRoomUses, houseUseRoomUses, paidHourlyRoomUses]
+      properties:
+        paidOvernightRoomUses: { type: string, pattern: '^\d+$' }
+        complimentaryRoomUses: { type: string, pattern: '^\d+$' }
+        houseUseRoomUses: { type: string, pattern: '^\d+$' }
+        paidHourlyRoomUses: { type: string, pattern: '^\d+$' }
+    RoomUseCostChange:
+      type: object
+      required: [state, reason]
+      properties:
+        state: { type: string, enum: [READY, NOT_COMPARABLE, DEFINITION_CHANGED, NON_POSITIVE_BASE] }
+        reason: { type: string }
+        percent: { type: string, pattern: '^-?\d+\.\d{2}$', description: Positive indicates an increase in cost, not necessarily a performance improvement. }
+    CloseStoreCostMonth:
+      type: object
+      required: [month, previewToken, note, acknowledgeWarnings]
+      properties:
+        month: { type: string, pattern: '^\d{4}-\d{2}$' }
+        previewToken: { type: string, pattern: '^[a-f0-9]{64}$' }
+        note: { type: string, minLength: 1, maxLength: 1000 }
+        acknowledgeWarnings: { type: boolean, const: true }
+    ConfigureLaundryRate:
+      type: object
+      required: [unitPrice, expectedVersion, expectedItemVersion]
+      properties:
+        unitPrice: { type: [number, string], description: 'Nonnegative price per base unit, at most 14 integer and 4 fractional digits. Zero explicitly means free laundry.' }
+        expectedVersion: { type: integer, format: int64, minimum: -1 }
+        expectedItemVersion: { type: integer, format: int64, minimum: 0 }
+    DispatchLaundry:
+      type: object
+      required: [supplier, dispatchedOn, lines]
+      properties:
+        supplier: { type: string, minLength: 1, maxLength: 160 }
+        dispatchedOn: { type: string, format: date }
+        note: { type: [string, 'null'], maxLength: 1000 }
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [itemId, quantity, expectedRateVersion, expectedItemVersion]
+            properties:
+              itemId: { type: string, format: uuid }
+              quantity: { type: [number, string], description: 'Positive base-unit quantity, at most 14 integer and 4 fractional digits.' }
+              expectedRateVersion: { type: integer, format: int64, minimum: 0 }
+              expectedItemVersion: { type: integer, format: int64, minimum: 0 }
+    ReceiveLaundry:
+      type: object
+      required: [receivedOn, expectedVersion, lines]
+      properties:
+        receivedOn: { type: string, format: date }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+        confirmWriteOff: { type: boolean, default: false }
+        note: { type: [string, 'null'], maxLength: 1000 }
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [lineId, acceptedQuantity, rewashQuantity, writtenOffQuantity]
+            properties:
+              lineId: { type: string, format: uuid }
+              acceptedQuantity: { type: [number, string], description: 'Nonnegative base-unit quantity, maximum 4 fractional digits.' }
+              rewashQuantity: { type: [number, string], description: 'Remains at laundry, generates no fee. Positive quantity requires a differenceReason.' }
+              writtenOffQuantity: { type: [number, string], description: 'Final confirmed loss, separate inventory DAMAGE entry. Requires confirmWriteOff and differenceReason.' }
+              differenceReason: { type: [string, 'null'], maxLength: 1000 }
+    CorrectLaundry:
+      type: object
+      required: [reason, expectedVersion]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        expectedVersion: { type: integer, format: int64, minimum: 0 }
+    WorkUsageInput:
+      type: object
+      description: Set payload.inventoryQuantities for assigned HKA_USAGE_RETURN, NSA_DAILY_HANDOVER or inventoryUsage-enabled work items in opted-in hotels. Draft does not post; submission freezes item rules; review approves and posts once. Explicit noUsage=true requires no lines. Morning issue and daily summary are not consumption postings.
+      required: [schemaVersion, noUsage, lines]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        noUsage: { type: boolean }
+        lines:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [itemId, quantity, unit, expectedItemVersion]
+            properties:
+              itemId: { type: string, format: uuid }
+              quantity: { type: string, description: 'Positive decimal with up to 4 fractional digits; conversion must also fit NUMERIC(18,4).' }
+              unit: { type: string, description: Configured base or issue unit only }
+              expectedItemVersion: { type: integer, format: int64, minimum: 0 }
     SubmitWorkRecord:
       type: object
       required: [orgUnitId, employeeId, positionAssignmentId, formVersionId, businessDate, payload]
@@ -2830,6 +3396,7 @@ components:
           items: { $ref: '#/components/schemas/OperationsHotel' }
     CreateStoreResourceItem:
       type: object
+      description: Per-hotel item. Inventory, reference unitCost and minimumQuantity use the base unit. Aliases are optional; an alias with a different name requires an explicit positive conversion factor.
       additionalProperties: false
       required: [sku, name, category, unit, unitCost, minimumQuantity]
       properties:
@@ -2841,8 +3408,14 @@ components:
         unit: { type: string, minLength: 1, maxLength: 32 }
         unitCost: { type: number, minimum: 0 }
         minimumQuantity: { type: number, minimum: 0 }
+        specification: { type: [string, 'null'], maxLength: 240 }
+        purchaseUnit: { type: [string, 'null'], maxLength: 32, description: Defaults to the base unit when omitted. }
+        purchaseFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
+        issueUnit: { type: [string, 'null'], maxLength: 32, description: Issue or consumption entry unit; defaults to base unit. }
+        issueFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
     UpdateStoreResourceItem:
       type: object
+      description: Optimistic item configuration update. Omitted unit metadata preserves current settings. The base unit is immutable after any stock movement, even if stock is zero. Alias changes affect future postings only.
       additionalProperties: false
       required: [sku, name, category, unit, unitCost, minimumQuantity, expectedVersion]
       properties:
@@ -2855,6 +3428,14 @@ components:
         unitCost: { type: number, minimum: 0 }
         minimumQuantity: { type: number, minimum: 0 }
         expectedVersion: { type: integer, format: int64, minimum: 0 }
+        specification: { type: [string, 'null'], maxLength: 240 }
+        purchaseUnit: { type: [string, 'null'], maxLength: 32 }
+        purchaseFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
+        issueUnit: { type: [string, 'null'], maxLength: 32 }
+        issueFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
+    StoreItemUnitFactor:
+      type: [number, string, 'null']
+      description: One alias unit equals this many base units. Exact positive decimal with at most 12 integer and 6 fractional digits; strings preserve decimal precision. Same-name units must have identical factors, and the base unit factor must be 1.
     StoreResourceVersionCommand:
       type: object
       additionalProperties: false
@@ -2872,9 +3453,11 @@ components:
           type: string
           enum: [RECEIPT, CONSUMPTION, RETURN, DAMAGE, ADJUSTMENT]
         quantity:
-          type: number
-          description: Quantity magnitude for receipt, consumption, return and damage; signed delta for adjustment.
-        unitCost: { type: [number, 'null'], minimum: 0 }
+          type: [number, string]
+          description: Quantity in quantityUnit. Magnitude for receipt, consumption, return and damage; signed delta for adjustment. At most 14 integer and 4 fractional digits, including the converted base quantity. Rejects lossy conversion rather than rounding. Strings preserve decimal precision.
+        quantityUnit: { type: [string, 'null'], maxLength: 32, description: A configured base/purchase/issue unit; defaults to base unit. Server selects the factor from locked item configuration; clients cannot supply a posting factor. }
+        expectedItemVersion: { type: [integer, 'null'], format: int64, minimum: 0, description: Rejects stale unit configuration on new postings; an exact idempotent replay still returns original facts. }
+        unitCost: { type: [number, string, 'null'], description: Nonnegative price per selected input unit, at most 14 integer and 4 fractional digits. Used only for positive postings. Omission uses weighted-average inventory cost. Outflows always use weighted-average cost. }
         reason: { type: string, minLength: 1, maxLength: 1000 }
         occurredAt: { type: [string, 'null'], format: date-time }
     CreateStoreFixedAsset:

@@ -45,21 +45,26 @@ public class WeComIdentityResolver {
                 from wecom_user_binding b
                 join user_account u on u.tenant_id = b.tenant_id and u.id = b.account_id
                 where b.tenant_id = :tenantId and b.corp_id = :corpId
-                  and b.wecom_user_id = :userId and b.status = 'ACTIVE' and u.status = 'ACTIVE'
+                  and b.wecom_user_id = :userId and b.status = 'ACTIVE'
                 """, params().addValue("userId", wecomUserId.trim()), (rs, rowNum) -> new Binding(
                 rs.getObject("account_id", UUID.class),
                 rs.getObject("preferred_assignment_id", UUID.class),
                 rs.getString("display_name")
         ));
         if (bindings.size() != 1) {
-            throw new IdentityAuthenticationException("WeCom member is not bound to one active internal account");
+            throw new WeComLoginException(WeComLoginException.Reason.MEMBER_UNBOUND);
         }
         Binding binding = bindings.getFirst();
-        TenantPrincipal principal = effectiveIdentityService.resolve(
-                properties.tenantId(), binding.accountId(), correlationId);
+        TenantPrincipal principal;
+        try {
+            principal = effectiveIdentityService.resolve(
+                    properties.tenantId(), binding.accountId(), correlationId);
+        } catch (IdentityAuthenticationException exception) {
+            throw new WeComLoginException(WeComLoginException.Reason.ACCOUNT_UNAVAILABLE);
+        }
         UUID preferred = binding.preferredAssignmentId();
         if (preferred != null && !principal.assignmentIds().contains(preferred)) {
-            throw new IdentityAuthenticationException("The preferred WeCom assignment is no longer active");
+            throw new WeComLoginException(WeComLoginException.Reason.ASSIGNMENT_INACTIVE);
         }
         return new ResolvedIdentity(principal, preferred, binding.displayName());
     }

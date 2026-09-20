@@ -1,4 +1,4 @@
-export type StoreResourceTab = 'items' | 'inventory' | 'assets' | 'handovers'
+export type StoreResourceTab = 'items' | 'inventory' | 'usage' | 'laundry' | 'costs' | 'assets' | 'handovers'
 
 export type StoreResourceHotel = {
   id: string
@@ -20,6 +20,12 @@ export type StoreResourceItem = {
   minimumQuantity: number
   status: string
   rowVersion: number
+  specification: string
+  purchaseUnit: string
+  purchaseFactor: number
+  issueUnit: string
+  issueFactor: number
+  baseUnitLocked: boolean
 }
 
 export type StoreInventoryBalance = {
@@ -43,6 +49,12 @@ export type InventoryMovement = {
   quantityBefore: number
   quantityAfter: number
   unit: string
+  inputUnit: string
+  inputQuantity: number
+  conversionFactor: number
+  inputUnitCost?: number
+  unitCostSnapshot: number
+  valueDelta: number
   reason: string
   operatorName: string
   occurredAt: string
@@ -123,13 +135,20 @@ export type StoreResourceItemInput = {
   unit: string
   unitCost: number
   minimumQuantity: number
+  specification?: string
+  purchaseUnit?: string
+  purchaseFactor?: number | string
+  issueUnit?: string
+  issueFactor?: number | string
 }
 
 export type InventoryAdjustmentInput = {
   itemId: string
   movementType: 'RECEIPT' | 'CONSUMPTION' | 'RETURN' | 'DAMAGE' | 'ADJUSTMENT'
-  quantity: number
-  unitCost?: number
+  quantity: number | string
+  unitCost?: number | string
+  quantityUnit?: string
+  expectedItemVersion?: number
   reason: string
 }
 
@@ -171,6 +190,11 @@ export type StoreResourceImportPreviewItem = {
   unitCost: number
   minimumQuantity: number
   openingQuantity: number
+  specification: string
+  purchaseUnit: string
+  purchaseFactor: number
+  issueUnit: string
+  issueFactor: number
 }
 
 export type StoreResourceImportPreviewAsset = {
@@ -286,6 +310,9 @@ export function parseStoreResourceItem(value: unknown): StoreResourceItem {
     category: category(text(row, 'category', 'OPERATING_ITEM')), unit: text(row, 'unit'),
     unitCost: numberValue(row, 'unitCost'), minimumQuantity: numberValue(row, 'minimumQuantity'),
     status: text(row, 'status', 'ACTIVE'), rowVersion: numberValue(row, 'rowVersion'),
+    specification: text(row, 'specification', ''), purchaseUnit: text(row, 'purchaseUnit', text(row, 'unit')),
+    purchaseFactor: numberValue(row, 'purchaseFactor', 1), issueUnit: text(row, 'issueUnit', text(row, 'unit')),
+    issueFactor: numberValue(row, 'issueFactor', 1), baseUnitLocked: booleanValue(row, 'baseUnitLocked'),
   }
 }
 
@@ -311,6 +338,10 @@ export function parseInventoryMovements(value: unknown): InventoryMovement[] {
       id: text(row, 'id'), itemId: text(row, 'itemId'), itemName: text(row, 'itemName'), movementType: text(row, 'movementType'),
       quantityDelta: numberValue(row, 'quantityDelta'), quantityBefore: numberValue(row, 'quantityBefore'), quantityAfter: numberValue(row, 'quantityAfter'),
       unit: text(row, 'unit'), reason: text(row, 'reason', '—'), operatorName: text(row, 'operatorName', '系统'),
+      inputUnit: text(row, 'inputUnit', text(row, 'unit')), inputQuantity: numberValue(row, 'inputQuantity', numberValue(row, 'quantityDelta')),
+      conversionFactor: numberValue(row, 'conversionFactor', 1),
+      inputUnitCost: row.inputUnitCost == null ? undefined : numberValue(row, 'inputUnitCost'),
+      unitCostSnapshot: numberValue(row, 'unitCostSnapshot'), valueDelta: numberValue(row, 'valueDelta'),
       occurredAt: text(row, 'occurredAt'), sourceType: optionalText(row, 'sourceType'),
     }
   })
@@ -403,6 +434,9 @@ export function parseStoreResourceImportJob(value: unknown): StoreResourceImport
       category: category(text(item, 'category', 'OPERATING_ITEM')), unit: text(item, 'unit'),
       unitCost: numberValue(item, 'unitCost'), minimumQuantity: numberValue(item, 'minimumQuantity'),
       openingQuantity: numberValue(item, 'openingQuantity'),
+      specification: text(item, 'specification', ''), purchaseUnit: text(item, 'purchaseUnit', text(item, 'unit')),
+      purchaseFactor: numberValue(item, 'purchaseFactor', 1), issueUnit: text(item, 'issueUnit', text(item, 'unit')),
+      issueFactor: numberValue(item, 'issueFactor', 1),
     }
   }
   const parseAsset = (entry: unknown): StoreResourceImportPreviewAsset => {

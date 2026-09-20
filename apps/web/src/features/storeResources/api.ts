@@ -99,7 +99,7 @@ async function downloadStoreResourceImportFile(identity: RoleContext, path: stri
 }
 
 export async function downloadStoreResourceImportTemplate(identity: RoleContext, hotelId: string) {
-  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template`, '新店库存与固定资产导入模板_V1.xlsx')
+  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template`, '新店库存与固定资产导入模板_V2.xlsx')
 }
 
 export async function downloadStoreResourceImportErrors(identity: RoleContext, hotelId: string, jobId: string) {

@@ -163,7 +163,8 @@ export function PositionAdministration({ identity, canManage, canPublish, hotels
   const source = (view === 'active' ? positions : deleted)
   const selected = source.find((position) => position.id === selectedId) ?? source[0]
   const matchingPositions = source.filter((position) => position.name.toLocaleLowerCase().includes(positionSearch.trim().toLocaleLowerCase()))
-  const selectedContext = profileContext?.positionId === selected?.id ? profileContext.data : undefined
+  // Missing IDs during initial loading or an empty list are not a matching configuration.
+  const selectedContext = selected && profileContext && profileContext.positionId === selected.id ? profileContext.data : undefined
   const configurationReady = Boolean(selectedContext)
   const selfSelectionInvalid = Boolean(selectedContext?.selfSelectionBlockedReason && draftSelfSelectable)
   const togglePermission = (code: string, checked: boolean) => setDraftPermissions((current) => checked ? [...new Set([...current, code])] : current.filter((item) => item !== code))

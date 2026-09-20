@@ -19,6 +19,20 @@ class WeComDeliveryWorkerTest {
     }
 
     @Test
+    void managementRemindersOpenManagementRatherThanTheEmployeesSubmissionPage() {
+        for (String type : new String[]{"TASK_OVERDUE", "TASK_ESCALATED"}) {
+            assertThat(WeComDeliveryWorker.returnToFor("TASK", SOURCE_ID, type)).isEqualTo("#/workbench");
+        }
+        String target = WeComDeliveryWorker.returnToFor("WORK_EXPECTATION", SOURCE_ID, "WORK_EXPECTATION_SUPERVISION");
+        assertThat(target).isEqualTo("#/workbench");
+        assertThat(WeComOAuthService.validateReturnTo(target)).isEqualTo(target);
+        assertThat(WeComDeliveryWorker.returnToFor("WORK_EXPECTATION", SOURCE_ID, "WORK_EXPECTATION_REMINDER"))
+                .isEqualTo("#/my-work?expectationId=" + SOURCE_ID);
+        assertThat(WeComDeliveryWorker.returnToFor("TASK", SOURCE_ID, "TASK_DISPATCHED"))
+                .isEqualTo("#/tasks?view=mine&taskId=" + SOURCE_ID);
+    }
+
+    @Test
     void rejectsMissingIdsAndUnsupportedSources() {
         assertThatThrownBy(() -> WeComDeliveryWorker.returnToFor("DAILY_REPORT", null))
                 .isInstanceOf(IllegalArgumentException.class)

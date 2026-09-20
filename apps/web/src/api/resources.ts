@@ -1,5 +1,8 @@
 import { apiBlob, apiMutation, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
+import { withRequestDeadline } from './requestDeadline'
 import { dashboardApiPaths } from '../app/dashboardContract'
+import { camelizeKeysDeep } from '../features/shared/featureApi'
+import type { UsageDetail } from '../features/storeResources/workUsage'
 import { materializeFileForUpload, readableUploadError } from '../app/uploadFiles'
 import { selectTeamRecordId } from '../features/workbench/workBoardModel'
 import type {
@@ -66,7 +69,10 @@ export async function loadIdentity(identity: ApiIdentity, fallback: IdentitySnap
   return withFallback(async () => {
     // Bootstrap must not reuse the demo/default assignment. The server resolves
     // the real account first and returns its valid assignments for selection.
-    const raw = object(await apiRequest<unknown>('/iam/me', { ...identity, businessActorAssignmentId: undefined }))
+    const raw = object(await withRequestDeadline(
+      (signal) => apiRequest<unknown>('/iam/me', { ...identity, businessActorAssignmentId: undefined }, { signal }),
+      '身份与权限读取超时，请检查网络后点击“重新验证”；系统未放开任何账号权限。',
+    ))
     const account = object(raw.account)
     const employee = object(raw.employee)
     const assignments = asList<JsonObject>(value(raw, 'positionAssignments', 'assignments'))
@@ -201,6 +207,7 @@ export function normalizeExpectation(item: JsonObject): WorkExpectation {
     })(),
     workPackageVersionId: text(item, ['workPackageVersionId', 'work_package_version_id'], '') || undefined,
     workPackageItemId: text(item, ['workPackageItemId', 'work_package_item_id'], '') || undefined,
+    itemCode: text(item, ['itemCode', 'item_code'], '') || undefined,
     recordId: text(item, ['recordId', 'workRecordId', 'record_id'], '') || records[0]?.id,
     firstSubmittedAt: text(item, ['firstSubmittedAt', 'first_submitted_at'], '') || records.at(-1)?.submittedAt,
     boardLate: typeof item.is_late === 'boolean' ? item.is_late : undefined,
@@ -213,6 +220,7 @@ export function normalizeExpectation(item: JsonObject): WorkExpectation {
       const raw = object(jsonColumn(value(item, 'submissionPolicy', 'submission_policy')))
       return {
         completionStatementRequired: raw.completionStatementRequired !== false,
+        inventoryUsage: raw.inventoryUsage === true,
         exceptionStatementRequired: raw.exceptionStatementRequired === true,
         nextActionRequired: raw.nextActionRequired === true,
         attachmentRequired: raw.attachmentRequired === true,
@@ -390,6 +398,30 @@ function demoWorkbenchSummary(): WorkbenchSummary {
   }
 }
 
+function normalizeWorkbenchOrganizations(payload: unknown, fallbackName: string) {
+  return asList<JsonObject>(payload).map((hotel) => ({
+    id: text(hotel, ['id']),
+    name: text(hotel, ['name'], fallbackName),
+    today: normalizeCompletionMetric(hotel.today),
+    monthToDate: normalizeCompletionMetric(value(hotel, 'monthToDate', 'month_to_date')),
+    departments: asList<JsonObject>(hotel.departments).map((department) => ({
+      id: text(department, ['id']),
+      name: text(department, ['name'], '未归属部门'),
+      today: normalizeCompletionMetric(department.today),
+      monthToDate: normalizeCompletionMetric(value(department, 'monthToDate', 'month_to_date')),
+      employees: asList<JsonObject>(department.employees).map((employee) => ({
+        id: text(employee, ['id']),
+        assignmentId: text(employee, ['assignmentId', 'assignment_id']),
+        employeeId: text(employee, ['employeeId', 'employee_id']),
+        name: text(employee, ['name'], '未命名员工'),
+        positionName: text(employee, ['positionName', 'position_name']),
+        today: normalizeCompletionMetric(employee.today),
+        monthToDate: normalizeCompletionMetric(value(employee, 'monthToDate', 'month_to_date')),
+      })),
+    })),
+  }))
+}
+
 export async function loadWorkbenchSummary(identity: ApiIdentity, date?: string) {
   return withFallback(async () => {
     const query = date ? `?businessDate=${encodeURIComponent(date)}` : ''
@@ -399,27 +431,8 @@ export async function loadWorkbenchSummary(identity: ApiIdentity, date?: string)
       monthStart: text(payload, ['monthStart', 'month_start'], ''),
       today: normalizeCompletionMetric(payload.today),
       monthToDate: normalizeCompletionMetric(value(payload, 'monthToDate', 'month_to_date')),
-      hotels: asList<JsonObject>(payload.hotels).map((hotel) => ({
-        id: text(hotel, ['id']),
-        name: text(hotel, ['name'], '授权门店'),
-        today: normalizeCompletionMetric(hotel.today),
-        monthToDate: normalizeCompletionMetric(value(hotel, 'monthToDate', 'month_to_date')),
-        departments: asList<JsonObject>(hotel.departments).map((department) => ({
-          id: text(department, ['id']),
-          name: text(department, ['name'], '未归属部门'),
-          today: normalizeCompletionMetric(department.today),
-          monthToDate: normalizeCompletionMetric(value(department, 'monthToDate', 'month_to_date')),
-          employees: asList<JsonObject>(department.employees).map((employee) => ({
-            id: text(employee, ['id']),
-            assignmentId: text(employee, ['assignmentId', 'assignment_id']),
-            employeeId: text(employee, ['employeeId', 'employee_id']),
-            name: text(employee, ['name'], '未命名员工'),
-            positionName: text(employee, ['positionName', 'position_name']),
-            today: normalizeCompletionMetric(employee.today),
-            monthToDate: normalizeCompletionMetric(value(employee, 'monthToDate', 'month_to_date')),
-          })),
-        })),
-      })),
+      hotels: normalizeWorkbenchOrganizations(payload.hotels, '授权门店'),
+      organizations: normalizeWorkbenchOrganizations(payload.organizations, '集团及总部'),
     } satisfies WorkbenchSummary
   }, async () => demoWorkbenchSummary())
 }
@@ -460,6 +473,7 @@ function normalizeWorkRecord(item: JsonObject): WorkRecordDetail {
     rowVersion: number(item, ['rowVersion', 'row_version'], 0),
     businessDate: text(item, ['businessDate', 'business_date'], '') || undefined,
     payload: rawPayload && typeof rawPayload === 'object' ? rawPayload as Record<string, unknown> : {},
+    inventoryUsage: object(item.inventoryUsage).status ? camelizeKeysDeep<UsageDetail>(item.inventoryUsage) : undefined,
     employeeName: text(item, ['employeeName', 'employee_name'], '提交员工'),
     positionName: text(item, ['positionName', 'position_name'], '执行岗位'),
     formName: text(item, ['formName', 'form_name'], '岗位工作记录'),
@@ -560,6 +574,7 @@ export async function loadTeamWorkCase(identity: ApiIdentity, initial: WorkExpec
     const expectation = normalizeExpectation(object(await apiRequest<unknown>(`/work-expectations/${initial.id}`, identity)))
     const recordId = selectTeamRecordId(expectation, selectedRecordId)
     const record = recordId ? normalizeWorkRecord(object(await apiRequest<unknown>(`/work-data/records/${recordId}`, identity))) : undefined
+    if (selectedRecordId && record?.workExpectationId !== expectation.id) throw new Error('所选记录不属于此工作，请刷新后重试')
     if (record) {
       const attachments = await apiRequest<unknown>(`/work-data/records/${record.id}/attachments`, identity).catch(() => record.attachments)
       record.attachments = asList<JsonObject>(attachments).map(normalizeAttachment)

@@ -354,6 +354,7 @@ public class DailyReportRoutineProjectionService {
         if (includeExceptions && !isBlank(record.exceptionStatement())) value.put("exception", record.exceptionStatement());
         if (!isBlank(record.nextAction())) value.put("nextAction", record.nextAction());
         value.set("formData", readObject(record.payload()));
+        projectUsageFacts(principal, record.workRecordId(), value);
         if (record.reviewedAt() != null) value.put("reviewedAt", record.reviewedAt().toString());
         boolean exception = approved && includeExceptions && !isBlank(record.exceptionStatement())
                 && !"无".equals(record.exceptionStatement().trim());
@@ -529,6 +530,7 @@ public class DailyReportRoutineProjectionService {
             }
             if (!isBlank(record.nextAction())) entry.put("nextAction", record.nextAction());
             entry.set("formData", readObject(record.payload()));
+            projectUsageFacts(principal, record.workRecordId(), entry);
             if (record.reviewedAt() != null) entry.put("reviewedAt", record.reviewedAt().toString());
             entrySnapshots.put(record.workRecordId(), entry.deepCopy());
             workRecordIds.add(record.workRecordId().toString());
@@ -1028,6 +1030,47 @@ public class DailyReportRoutineProjectionService {
         if (deduplicationKeys.add(key)) {
             target.add(new RuleFact(workRecordId, reviewStatus, sourceField, value));
         }
+    }
+
+    private void projectUsageFacts(TenantPrincipal principal, UUID recordId, ObjectNode value) {
+        List<UUID> links = jdbc.queryForList("select usage_record_id from store_work_usage_report_link where tenant_id=:tenantId and work_record_id=:recordId",
+                base(principal).addValue("recordId", recordId), UUID.class);
+        if (!links.isEmpty()) recordId=links.getFirst();
+        List<Map<String, Object>> usage = jdbc.queryForList("""
+                select u.status,coalesce(c.no_usage,u.no_usage) as no_usage,u.reversal_reason,c.revision_no,c.reason as correction_reason
+                from store_work_usage u left join lateral (
+                    select no_usage,revision_no,reason from store_work_usage_correction
+                    where tenant_id=u.tenant_id and work_record_id=u.work_record_id order by revision_no desc limit 1
+                ) c on true where u.tenant_id=:tenantId and u.work_record_id=:recordId
+                """, base(principal).addValue("recordId", recordId));
+        if (usage.isEmpty()) return;
+        Map<String, Object> row = usage.getFirst();
+        List<Map<String, Object>> lines = jdbc.queryForList("""
+                select item_name,category,input_quantity,input_unit,base_quantity,base_unit
+                from store_work_usage_current_line where tenant_id=:tenantId and work_record_id=:recordId order by item_id
+                """, base(principal).addValue("recordId", recordId));
+        String status = String.valueOf(row.get("status"));
+        ObjectNode fact = value.putObject("inventoryUsage");
+        fact.put("status", status);
+        if (row.get("revision_no")!=null) {
+            fact.put("correctionVersion", ((Number)row.get("revision_no")).intValue());
+            fact.put("correctionReason", String.valueOf(row.get("correction_reason")));
+        }
+        fact.put("referenced", !links.isEmpty());
+        fact.put("statusLabel", switch (status) {
+            case "APPROVED" -> "耗用已审核";
+            case "REJECTED" -> "已退回，未扣库";
+            case "REVERSED" -> "已冲销，原库存及成本已退回";
+            default -> "待审核，未扣库";
+        });
+        fact.put("summary", Boolean.TRUE.equals(row.get("no_usage")) ? "本次无耗用"
+                : lines.stream().map(line -> line.get("item_name") + " "
+                    + ((java.math.BigDecimal) line.get("input_quantity")).stripTrailingZeros().toPlainString() + " "
+                    + line.get("input_unit") + ("LINEN".equals(line.get("category")) ? "（布草使用，不扣总库存）" : ""))
+                    .collect(java.util.stream.Collectors.joining("；")));
+        if (row.get("reversal_reason") != null) fact.put("reversalReason", String.valueOf(row.get("reversal_reason")));
+        // Keep raw ids/unit versions in the immutable work record, not in human-readable report facts.
+        ((ObjectNode) value.path("formData")).remove("inventoryQuantities");
     }
 
     private ArrayNode toFactArray(List<RuleFact> facts) {

@@ -191,17 +191,35 @@ class WeComOAuthControllerTest {
         WeComOAuthService service = mock(WeComOAuthService.class);
         WeComBindingEnrollmentService enrollmentService = mock(WeComBindingEnrollmentService.class);
         when(service.callback("provider-code", "state", "browser-verifier"))
-                .thenThrow(new IllegalStateException("identity unavailable"));
+                .thenThrow(new IllegalStateException("private provider secret must not appear in redirect"));
         MockMvc mvc = MockMvcBuilders.standaloneSetup(new WeComOAuthController(service, enrollmentService)).build();
 
         mvc.perform(get("/api/v1/integrations/wecom/oauth/callback")
                         .param("code", "provider-code").param("state", "state")
                         .cookie(new Cookie(WeComOAuthController.VERIFIER_COOKIE, "browser-verifier")))
                 .andExpect(status().isFound())
-                .andExpect(header().string("Location", "/wecom-auth"))
+                .andExpect(header().string("Location", "/wecom-auth?error_code=VERIFICATION_FAILED"))
                 .andExpect(header().string("Cache-Control", "no-store, private"))
                 .andExpect(header().stringValues("Set-Cookie", hasItem(containsString(
                         "__Host-wecom_oauth_verifier=;"))))
                 .andExpect(header().doesNotExist("Content-Disposition"));
+    }
+
+    @Test
+    void missingBindingHasAnActionableErrorWithoutClaimingTheCredentialExpired() throws Exception {
+        for (WeComLoginException.Reason reason : WeComLoginException.Reason.values()) {
+            WeComOAuthService service = mock(WeComOAuthService.class);
+            when(service.callback("provider-code", "state", "browser-verifier"))
+                    .thenThrow(new WeComLoginException(reason));
+            MockMvc mvc = MockMvcBuilders.standaloneSetup(new WeComOAuthController(
+                    service, mock(WeComBindingEnrollmentService.class))).build();
+            mvc.perform(get("/api/v1/integrations/wecom/oauth/callback")
+                            .param("code", "provider-code").param("state", "state")
+                            .cookie(new Cookie(WeComOAuthController.VERIFIER_COOKIE, "browser-verifier")))
+                    .andExpect(status().isFound())
+                    .andExpect(header().string("Location", "/wecom-auth?error_code=" + reason.name()))
+                    .andExpect(header().string("Cache-Control", "no-store, private"))
+                    .andExpect(content().string(""));
+        }
     }
 }

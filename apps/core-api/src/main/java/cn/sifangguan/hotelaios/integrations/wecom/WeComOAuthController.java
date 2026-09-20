@@ -78,13 +78,20 @@ public class WeComOAuthController {
         } catch (RuntimeException exception) {
             if (taskFlow) {
                 return noStore(ResponseEntity.status(HttpStatus.FOUND))
-                        .header(HttpHeaders.LOCATION, "/wecom-auth")
+                        .header(HttpHeaders.LOCATION, "/wecom-auth?error_code=" + loginErrorCode(exception))
                         .header(HttpHeaders.SET_COOKIE, clearVerifierCookie(VERIFIER_COOKIE).toString())
                         .header(HttpHeaders.SET_COOKIE, clearVerifierCookie(BINDING_VERIFIER_COOKIE).toString())
                         .build();
             }
             return unauthorizedResponse();
         }
+    }
+
+    private static String loginErrorCode(RuntimeException exception) {
+        if (exception instanceof WeComLoginException failure) return failure.reason().name();
+        if (exception instanceof org.springframework.web.server.ResponseStatusException failure
+                && failure.getStatusCode().value() == 401) return "SESSION_INVALID";
+        return "VERIFICATION_FAILED";
     }
 
     private static ResponseEntity<Void> unauthorizedResponse() {

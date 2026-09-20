@@ -84,7 +84,7 @@ test('企微会话由当前页面直接认领，不依赖 WebView 存储是否�
   assert.match(appSource, /initialWecomSessionBootstrap \|\| hasAccessToken\(\)/)
 })
 
-test('企微内置浏览器在会话失效后重新走静默OAuth，普通浏览器不受影响', () => {
+test('企微正常入口支持静默登录，同时为手动登录选择保留回退入口', () => {
   assert.equal(isWeComBrowser('Mozilla/5.0 wxwork/4.1.30 MicroMessenger'), true)
   assert.equal(isWeComBrowser('Mozilla/5.0 Chrome/128.0'), false)
   assert.equal(
@@ -92,7 +92,8 @@ test('企微内置浏览器在会话失效后重新走静默OAuth，普通浏览
     '/api/v1/integrations/wecom/oauth/start?returnTo=%23%2Fworkbench',
   )
   assert.match(appSource, /isWeComBrowser\(\)/)
-  assert.match(appSource, /<WeComSilentLoginRedirect \/>/)
+  assert.match(appSource, /!authenticated && !manualLogin && authMode === 'bearer' && isWeComBrowser\(\)/)
+  assert.match(appSource, /<WeComSilentLoginRedirect onReturnToLogin=/)
 })
 
 test('伪造或重复会话标记会被清理但不会建立登录状态', () => {

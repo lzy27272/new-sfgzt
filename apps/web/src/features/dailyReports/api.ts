@@ -113,6 +113,8 @@ function displayValue(value: unknown): string | undefined {
   if (typeof value === 'string') {
     try {
       const parsed = JSON.parse(value)
+      const usage = displayUsageWorkRecord(row(parsed))
+      if (usage) return usage
       const repeatableRecords = displayRepeatableWorkRecords(row(parsed))
       if (repeatableRecords) return repeatableRecords
     } catch {
@@ -121,9 +123,19 @@ function displayValue(value: unknown): string | undefined {
     return value
   }
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  const usage = displayUsageWorkRecord(row(value))
+  if (usage) return usage
   const repeatableRecords = displayRepeatableWorkRecords(row(value))
   if (repeatableRecords) return repeatableRecords
   try { return JSON.stringify(value) } catch { return String(value) }
+}
+
+function displayUsageWorkRecord(value: Row): string | undefined {
+  const usage = row(value.inventoryUsage)
+  if (!text(usage.summary)) return undefined
+  return [text(value.completion), `${text(usage.statusLabel)}：${text(usage.summary)}`,
+    usage.reversalReason ? `冲销原因：${text(usage.reversalReason)}` : '',
+    value.exception ? `异常：${text(value.exception)}` : '', value.nextAction ? `后续：${text(value.nextAction)}` : ''].filter(Boolean).join('；')
 }
 
 function displayFactSummary(value: unknown): string {

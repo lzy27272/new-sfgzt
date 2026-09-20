@@ -76,6 +76,14 @@ assert.match(workbench, /executive && canReadTeam/)
   assert.match(workbench, /管理提醒/)
 })
 
+test('headquarters personal work is loaded independently and is never counted as a hotel', () => {
+  assert.match(workbench, /useWorkBoard\(identity, 'my', dateParams, canReadOwn\)/)
+  assert.match(workbench, /group.dimension === 'hotel' && group.group_id/)
+  assert.match(workbench, /!executive && hotels.length === 1/)
+  assert.match(boardService, /groupAggregate\("employee", "position_assignment_id"/)
+  assert.match(workPackageService, /requireOrgScopeOrOwnWork/)
+})
+
 test('closure, submission and on-time rates stay distinct from settled KPI snapshots', () => {
 assert.match(workbench, /当日闭环完成率/)
   assert.match(workbench, /截至当日月工作完成率/)

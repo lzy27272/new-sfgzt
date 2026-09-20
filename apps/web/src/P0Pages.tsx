@@ -23,6 +23,7 @@ import type {
   WorkRecordAttachment,
 } from './domain'
 import { useResource } from './useResource'
+import { UsageEvidenceSummary } from './features/storeResources/WorkUsagePanel'
 import type { NavigationParams } from './domain'
 import { useWorkBoard, WorkDateToolbar, WorkStatusCards, CompletionRates, WorkQueueAlerts, WorkBoardList } from './features/workbench/WorkBoard'
 import { withBoardParams } from './features/workbench/workBoardModel'
@@ -109,9 +110,9 @@ export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { 
     {!resource.loading && !resource.error && <WorkQueueAlerts data={resource.data} onOpen={change} />}
     {detailError && <p className="inline-error" role="alert">{detailError}</p>}
     <WorkBoardList data={resource.data} loading={resource.loading} error={resource.error} params={routeParams} onChange={change}
-      onOpen={item => go('team-work', { ...routeParams, expectationId: item.id })} onRetry={resource.reload} />
-    {selected && <TeamWorkDrawer key={`${identity.key}:${selected.id}`} initial={selected} identity={identity} permissions={permissions} go={go}
-      onClose={() => go('team-work', { ...routeParams, expectationId: undefined })} onChanged={resource.reload} />}
+      onOpen={item => go('team-work', { ...routeParams, expectationId: item.id, recordId: undefined })} onRetry={resource.reload} />
+    {selected && <TeamWorkDrawer key={`${identity.key}:${selected.id}:${routeParams.recordId ?? ''}`} initial={selected} requestedRecordId={routeParams.recordId} identity={identity} permissions={permissions} go={go}
+      onClose={() => go('team-work', { ...routeParams, expectationId: undefined, recordId: undefined })} onChanged={resource.reload} />}
   </section>
 }
 
@@ -162,7 +163,8 @@ function readablePayload(expectation: WorkExpectation, payload: Record<string, u
   if (!unwrapped || typeof unwrapped !== 'object' || Array.isArray(unwrapped)) return []
   const properties = expectation.formSchema?.properties ?? {}
   return Object.entries(unwrapped as Record<string, unknown>)
-    .filter(([key]) => !['type', 'value', 'null'].includes(key) && !key.startsWith('_'))
+    .filter(([key, raw]) => !['type', 'value', 'null'].includes(key) && !key.startsWith('_')
+      && !(key === 'inventoryQuantities' && raw && typeof raw === 'object' && 'schemaVersion' in raw))
     .map(([key, raw], index) => ({
       key,
       label: properties[key]?.title || payloadLabels[key] || `补充记录 ${index + 1}`,
@@ -287,8 +289,9 @@ function resultId(result: unknown) {
   return String(row.id ?? row.taskId ?? row.evaluationId ?? nested?.id ?? nested?.taskId ?? nested?.evaluationId ?? '')
 }
 
-export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, onChanged }: {
+export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissions, go, onClose, onChanged }: {
   initial: WorkExpectation
+  requestedRecordId?: string
   identity: RoleContext
   permissions: string[]
   go: Navigate
@@ -296,7 +299,7 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
   onChanged: () => void
 }) {
   const fallback: TeamWorkCase = useMemo(() => ({ expectation: initial }), [initial])
-  const [selectedRecordId, setSelectedRecordId] = useState<string>()
+  const [selectedRecordId, setSelectedRecordId] = useState<string | undefined>(requestedRecordId)
   const resource = useResource(`${identity.key}:team-case:${initial.id}:${selectedRecordId ?? 'default'}`, () => loadTeamWorkCase(identity, initial, selectedRecordId), fallback)
   const { expectation, record } = resource.data
   const [reviewReason, setReviewReason] = useState('')
@@ -462,7 +465,7 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
         {message && <div role="status" className={`team-action-feedback ${message.tone}`}><span><strong>{message.tone === 'ok' ? '操作成功' : '操作未完成'}</strong><small>{message.text}</small></span>{message.next ? <button type="button" className="secondary" onClick={() => runNext(message.next!)}>{message.next.label} →</button> : null}</div>}
         {(expectation.records?.length ?? 0) > 1 && <section className="detail-section"><label>选择提交记录（共 {expectation.records!.length} 条）<select aria-label="选择提交记录" value={record?.id ?? ''} disabled={!!busy} onChange={(event) => { setSelectedRecordId(event.target.value); setReviewReason(''); setMessage(undefined); setAttachmentPreview(undefined) }}>{expectation.records!.map((entry, index) => <option key={entry.id} value={entry.id}>{entry.status === 'SUBMITTED' ? '待审核' : label(entry.status)} · {formatDate(entry.submittedAt)} · 记录 {expectation.records!.length - index}</option>)}</select></label><p className="muted">每条提交保留独立的内容、照片和审核结果；可切换查看，重复提交工作优先展示待审核记录。</p></section>}
         {!record ? <div className="inline-warning">该工作期望尚未形成可复核的工作记录。</div> : <>
-          <section className="detail-section"><h3>记录事实</h3><dl><div><dt>提交员工</dt><dd>{record.employeeName}</dd></div><div><dt>执行岗位</dt><dd>{record.positionName}</dd></div><div><dt>记录状态</dt><dd>{label(record.status)}</dd></div><div><dt>提交时间</dt><dd>{formatDate(record.submittedAt)}</dd></div></dl>{payloadFields.length ? <div className="payload-grid">{payloadFields.map((field) => <span key={field.key}><small>{field.label}</small><strong>{field.value}</strong></span>)}</div> : <p className="muted">本次提交没有额外的表单记录。</p>}{record.reviewReason && <div className="inline-warning">上次复核意见：{record.reviewReason}</div>}</section>
+          {record.inventoryUsage && <UsageEvidenceSummary usage={record.inventoryUsage} />}<section className="detail-section"><h3>记录事实</h3><dl><div><dt>提交员工</dt><dd>{record.employeeName}</dd></div><div><dt>执行岗位</dt><dd>{record.positionName}</dd></div><div><dt>记录状态</dt><dd>{label(record.status)}</dd></div><div><dt>提交时间</dt><dd>{formatDate(record.submittedAt)}</dd></div></dl>{payloadFields.length ? <div className="payload-grid">{payloadFields.map((field) => <span key={field.key}><small>{field.label}</small><strong>{field.value}</strong></span>)}</div> : <p className="muted">本次提交没有额外的表单记录。</p>}{record.reviewReason && <div className="inline-warning">上次复核意见：{record.reviewReason}</div>}</section>
 
           <section className="detail-section"><h3>现场图片与附件</h3>
             <p className="muted">图片按检查区域直接展示；竖拍照片以竖向画框陈列，横拍照片以横向画框陈列。附件补充和删除仍由记录所属员工完成。</p>

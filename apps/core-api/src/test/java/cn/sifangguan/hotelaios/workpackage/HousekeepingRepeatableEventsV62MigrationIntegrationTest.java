@@ -5,10 +5,13 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import javax.sql.DataSource;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class HousekeepingRepeatableEventsV62MigrationIntegrationTest {
     private static final String TENANT = "10000000-0000-0000-0000-000000000001";
+    private static final String MIGRATION_OWNER = "housekeeping_v62_migration_owner";
 
     @Test
     void upgradesFromV61WithFreshNonBypassRlsOwnerConnection() throws Exception {
@@ -53,14 +56,23 @@ class HousekeepingRepeatableEventsV62MigrationIntegrationTest {
     @Test
     void publishesRepeatableHousekeepingEventsAndDailyReportAggregation() throws Exception {
         try (EmbeddedPostgres postgres = EmbeddedPostgres.builder().start()) {
-            var dataSource = postgres.getPostgresDatabase();
-            Flyway.configure()
-                    .dataSource(dataSource)
-                    .locations("classpath:db/migration")
-                    .target("62")
-                    .load()
-                    .migrate();
-            var jdbc = new JdbcTemplate(dataSource);
+            DataSource adminDataSource = postgres.getPostgresDatabase();
+            JdbcTemplate jdbc = new JdbcTemplate(adminDataSource);
+            jdbc.execute("CREATE ROLE " + MIGRATION_OWNER
+                    + " LOGIN PASSWORD 'test-only-password' NOSUPERUSER NOCREATEDB "
+                    + "NOCREATEROLE NOINHERIT NOBYPASSRLS");
+            jdbc.execute("ALTER DATABASE postgres OWNER TO " + MIGRATION_OWNER);
+            jdbc.execute("ALTER SCHEMA public OWNER TO " + MIGRATION_OWNER);
+            DataSource migrationDataSource = postgres.getDatabase(MIGRATION_OWNER, "postgres");
+
+            migrate(migrationDataSource, "61");
+            assertThat(new JdbcTemplate(migrationDataSource).queryForObject(
+                    "select count(*) from work_package_definition", Integer.class)).isZero();
+            migrate(migrationDataSource, "62");
+
+            assertThat(jdbc.queryForObject(
+                    "select rolbypassrls from pg_roles where rolname = ?",
+                    Boolean.class, MIGRATION_OWNER)).isFalse();
 
             assertThat(jdbc.queryForObject("""
                     select count(*)
@@ -131,5 +143,15 @@ class HousekeepingRepeatableEventsV62MigrationIntegrationTest {
                       )
                     """, Integer.class)).isEqualTo(2);
         }
+    }
+
+    private static void migrate(DataSource dataSource, String target) {
+        Flyway.configure()
+                .dataSource(dataSource)
+                .locations("classpath:db/migration")
+                .target(target)
+                .cleanDisabled(true)
+                .load()
+                .migrate();
     }
 }

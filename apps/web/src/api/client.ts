@@ -1,4 +1,5 @@
 import { shouldExpireAuthenticatedSession } from '../app/authBootstrap'
+import { withRequestDeadline } from './requestDeadline'
 
 export type ApiIdentity = {
   tenantId: string
@@ -36,6 +37,7 @@ const TENANT_ID = import.meta.env.VITE_TENANT_ID ?? '10000000-0000-0000-0000-000
 let ephemeralAccessToken: string | undefined
 let sessionExpiryNotified = false
 let sessionGeneration = 0
+let pendingServerLogout: Promise<void> = Promise.resolve()
 
 const allowDemoQuery = import.meta.env.VITE_ALLOW_DEMO_QUERY === 'true' ||
   (import.meta.env.VITE_ALLOW_DEMO_QUERY === undefined && import.meta.env.DEV)
@@ -112,30 +114,44 @@ export function establishFederatedSession(accessToken?: string, expiresAt?: stri
 
 export async function logout(): Promise<void> {
   clearAccessToken()
-  await fetch(`${API_BASE}/auth/logout`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { Accept: 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
-  }).catch(() => undefined)
+  await clearServerSession()
+}
+
+function clearServerSession(): Promise<void> {
+  // Do not let a delayed cookie-clearing response invalidate the next login.
+  pendingServerLogout = withRequestDeadline(async (signal) => {
+    await fetch(`${API_BASE}/auth/logout`, {
+      method: 'POST', signal,
+      credentials: 'include',
+      headers: { Accept: 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
+    })
+  }, '退出登录超时', 5_000).catch(() => undefined)
+  return pendingServerLogout
 }
 
 export async function login(loginName: string, password: string): Promise<LoginResponse> {
-  const response = await fetch(`${API_BASE}/auth/login`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
-    body: JSON.stringify({ tenantId: TENANT_ID, loginName: loginName.trim(), password }),
-  })
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({ detail: response.statusText })) as Record<string, unknown>
-    throw new ApiError(response.status, String(problem.detail ?? problem.message ?? '登录失败'), problem)
-  }
-  const session = await response.json() as LoginResponse
+  await pendingServerLogout
+  const session = await withRequestDeadline(async (signal) => {
+    const response = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST', signal,
+      credentials: 'include',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
+      body: JSON.stringify({ tenantId: TENANT_ID, loginName: loginName.trim(), password }),
+    })
+    if (!response.ok) {
+      const problem = await response.json().catch(() => ({ detail: response.statusText })) as Record<string, unknown>
+      throw new ApiError(response.status, String(problem.detail ?? problem.message ?? '登录失败'), problem)
+    }
+    return await response.json() as LoginResponse
+  }, '账号登录超时，请检查网络后重试，或联系管理员检查账号状态。')
   ephemeralAccessToken = session.accessToken
   sessionExpiryNotified = false
   sessionGeneration += 1
   try { window.sessionStorage.removeItem(FEDERATED_SESSION_STORAGE_KEY) } catch { /* storage may be disabled */ }
-  window.localStorage.removeItem(UAT_ACCESS_TOKEN_STORAGE_KEY)
+  try {
+    window.localStorage.removeItem(UAT_ACCESS_TOKEN_STORAGE_KEY)
+    window.localStorage.removeItem(FEDERATED_SESSION_STORAGE_KEY)
+  } catch { /* storage availability must not prevent password login */ }
   return session
 }
 
@@ -193,11 +209,7 @@ function expireAuthenticatedSession(requestSessionGeneration: number): void {
   // The browser cannot delete an HttpOnly session cookie itself. Logout is a
   // best-effort same-origin cleanup and deliberately bypasses apiRequest so a
   // rejected session cannot recurse through this handler.
-  void fetch(`${API_BASE}/auth/logout`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { Accept: 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
-  }).catch(() => undefined)
+  void clearServerSession()
 }
 
 export async function apiRequest<T>(path: string, identity: ApiIdentity, init: RequestInit = {}): Promise<T> {
