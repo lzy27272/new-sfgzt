@@ -27,6 +27,7 @@ import java.util.*;
 public class StoreWorkUsageService {
     private static final Set<String> USAGE_ITEMS = Set.of("HKA_USAGE_RETURN", "HKA_DAILY_REPORT", "NSA_DAILY_HANDOVER");
     private static final Set<String> SHARED_ITEMS = Set.of("HKA_USAGE_RETURN", "HKA_DAILY_REPORT");
+    private static final Set<String> ISSUE_ITEMS = Set.of("HKA_ITEM_ISSUE", "NSA_ITEM_ISSUE");
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy access;
@@ -49,6 +50,23 @@ public class StoreWorkUsageService {
         return catalogue(orgUnitId, null, null);
     }
 
+    /** Take this before expectation/report row locks to keep cross-entry submission lock order stable. */
+    public void lockDay(UUID orgUnitId, UUID employeeId, LocalDate date) {
+        TenantPrincipal p=access.principal();
+        // Work outside hotels has no inventory linkage.
+        List<UUID> hotels=jdbc.queryForList("""
+                select o.id from org_unit_closure c join org_unit o on o.tenant_id=c.tenant_id and o.id=c.ancestor_id
+                where c.tenant_id=:tenantId and c.descendant_id=:orgId and o.unit_type='HOTEL' order by c.depth limit 1
+                """,base(p).addValue("orgId",orgUnitId),UUID.class);
+        if(!hotels.isEmpty()) jdbc.queryForList("select pg_advisory_xact_lock(hashtextextended(:key,67))",
+                new MapSqlParameterSource("key",p.tenantId()+":"+hotels.getFirst()+":"+employeeId+":"+date));
+    }
+    public void lockAssignmentDay(UUID orgUnitId, UUID assignmentId, LocalDate date) {
+        UUID employee=jdbc.queryForObject("select employee_id from employee_position_assignment where tenant_id=:tenantId and id=:id",
+                base(access.principal()).addValue("id",assignmentId),UUID.class);
+        lockDay(orgUnitId,employee,date);
+    }
+
     @Transactional(readOnly = true)
     public Map<String, Object> catalogue(UUID orgUnitId, LocalDate businessDate, String itemCode) {
         TenantPrincipal p = prepare(access.principal().hasPermission("work-record.submit") ? "work-record.submit" : "work-record.review");
@@ -68,11 +86,14 @@ public class StoreWorkUsageService {
         }
         Map<String, Object> config = configuration(p, hotelId);
         Map<String, Object> result = new LinkedHashMap<>(config);
+        boolean issue = ISSUE_ITEMS.contains(Objects.toString(itemCode, ""));
+        result.put("mode", issue ? "ISSUE" : "USAGE");
+        if (issue) result.put("enabled", true);
         // Employees must not receive financial values or unrestricted inventory balances.
         result.put("items", jdbc.queryForList("""
-                select id, name, category, specification, unit, issue_unit, issue_factor, row_version
+                select id, sku, name, category, specification, unit, issue_unit, issue_factor, row_version
                 from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
-                  and status='ACTIVE' and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN')
+                  and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN')
                 order by category,name,id
                 """, base(p).addValue("hotelId", hotelId)));
         if (businessDate != null && SHARED_ITEMS.contains(Objects.toString(itemCode, ""))) {
@@ -171,6 +192,11 @@ public class StoreWorkUsageService {
         JsonNode input = read((String) record.get("payload")).path("inventoryQuantities");
         boolean typed = input.path("schemaVersion").isIntegralNumber()
                 && input.path("schemaVersion").canConvertToInt() && input.path("schemaVersion").intValue() == 1;
+        if (ISSUE_ITEMS.contains(Objects.toString(record.get("item_code"), ""))) {
+            validateIssue(p, record, input);
+            audit.record("WORK_ITEM_ISSUE_REGISTERED", "WORK_RECORD", recordId, input.toString());
+            return; // An issue declaration is not actual consumption and never posts cost.
+        }
         boolean supported = USAGE_ITEMS.contains(Objects.toString(record.get("item_code"), ""))
                 || read((String) record.get("submission_policy")).path("inventoryUsage").asBoolean(false);
         if (!supported) {
@@ -227,7 +253,7 @@ public class StoreWorkUsageService {
             JsonNode line = entry.getValue();
             List<Map<String, Object>> items = jdbc.queryForList("""
                     select * from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
-                      and id=:itemId and status='ACTIVE' and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for update
+                      and id=:itemId and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for update
                     """, base(p).addValue("hotelId", hotelId).addValue("itemId", itemId));
             if (items.isEmpty()) throw new IllegalArgumentException("所选物品已停用或不属于本门店，请刷新物品清单");
             Map<String, Object> item = items.getFirst();
@@ -263,6 +289,36 @@ public class StoreWorkUsageService {
     public boolean hasUsage(UUID recordId) {
         return Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from store_work_usage where tenant_id=:tenantId and work_record_id=:recordId)",
                 base(access.principal()).addValue("recordId", recordId), Boolean.class));
+    }
+
+    private void validateIssue(TenantPrincipal p, Map<String, Object> record, JsonNode input) {
+        if (input.path("schemaVersion").asInt() != 1 || !input.path("noUsage").isBoolean() || !input.path("lines").isArray())
+            throw new IllegalArgumentException("请搜索选择门店物品并填写领用数量，或勾选本次没有领用");
+        JsonNode lines = input.path("lines");
+        if (lines.size() > 100 || (input.path("noUsage").asBoolean() ? !lines.isEmpty() : lines.isEmpty()))
+            throw new IllegalArgumentException("领用登记应包含1至100种物品，无领用时不能填写数量");
+        UUID hotelId = hotelFor(p, (UUID) record.get("target_org_unit_id"));
+        Set<UUID> seen = new HashSet<>();
+        for (JsonNode line : lines) {
+            UUID itemId = UUID.fromString(line.path("itemId").asText());
+            if (!seen.add(itemId)) throw new IllegalArgumentException("同一种物品不能重复填报");
+            List<Map<String, Object>> items = jdbc.queryForList("""
+                    select * from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
+                      and id=:itemId and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN')
+                    """, base(p).addValue("hotelId", hotelId).addValue("itemId", itemId));
+            if (items.isEmpty()) throw new IllegalArgumentException("所选物品不可用或不属于本门店");
+            Map<String, Object> item = items.getFirst();
+            if (!line.path("expectedItemVersion").isIntegralNumber()
+                    || line.path("expectedItemVersion").asLong(-1) != ((Number) item.get("row_version")).longValue())
+                throw conflict("物品配置已变化，请刷新后重新选择并核对数量");
+            StoreItemUnits units = StoreItemUnits.from(item);
+            if (!units.issueUnit().equals(line.path("unit").asText())) throw new IllegalArgumentException("领用单位必须使用后台配置的单位");
+            BigDecimal quantity;
+            try { quantity = StoreItemUnits.exact(new BigDecimal(line.path("quantity").asText()), 4, 14, "领用数量"); }
+            catch (NumberFormatException error) { throw new IllegalArgumentException("请输入有效的领用数量"); }
+            if (quantity.signum() <= 0) throw new IllegalArgumentException("领用数量必须大于0");
+            units.baseQuantity(quantity, units.issueUnit());
+        }
     }
 
     @Transactional

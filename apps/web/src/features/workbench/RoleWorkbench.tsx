@@ -9,6 +9,7 @@ import { TaskCreateDialog } from '../../Pilot6Pages'
 import { useResource } from '../../useResource'
 import { resolveTaskDispatchMode } from '../tasks/taskDispatchAccess'
 import { OwnDailyReportShortcut, TeamDailyReportShortcut } from './DailyReportShortcuts'
+import { DailyReportTodo } from './DailyReportTodo'
 import { WorkBoardPanel, WorkDateToolbar, WorkQueueAlerts, useWorkBoard } from './WorkBoard'
 import { boardLabels, emptyMetric, personalWorkLabel, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
 export { isLateSubmitted } from './workBoardModel'
@@ -88,6 +89,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
         {canReadNotices && <button className="secondary" onClick={() => go('notifications')}>消息提醒{unreadNotices.length ? ' ' + unreadNotices.length : ''}</button>}
       </div></header>
     {navigation}
+    {dailyReportsAvailable && Boolean(identity.businessActorAssignmentId) && allows(permissions, 'daily-report.read') && <DailyReportTodo key={identity.key} identity={identity} go={go} />}
     <WorkDateToolbar params={routeParams} businessDate={headline.data.businessDate} onChange={change} />
     <nav className="wb-mobile-anchors" aria-label="工作台快捷定位">{canReadTeam && <a href="#team-board" onClick={event => { event.preventDefault(); document.getElementById('team-board')?.scrollIntoView({ behavior: 'smooth' }) }}>团队看板</a>}
       {canReadOwn && <a href="#personal-board" onClick={event => { event.preventDefault(); document.getElementById('personal-board')?.scrollIntoView({ behavior: 'smooth' }) }}>个人看板</a>}</nav>

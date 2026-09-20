@@ -383,6 +383,9 @@ export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyRep
   }
   return {
     ...summary,
+    inventoryContext: source.inventoryContext as DailyReportDetail['inventoryContext'],
+    inventoryQuantities: snapshot.inventoryQuantities,
+    roomCounts: snapshot.roomCounts as DailyReportDetail['roomCounts'],
     currentRevision,
     revisions,
     autoSummary: Object.keys(autoSummary).length ? {
@@ -485,6 +488,8 @@ export async function saveDailyReportDraft(identity: ApiIdentity, report: DailyR
   const body = {
     revisionId: report.currentRevision.id,
     narrative: input.narrative,
+    inventoryQuantities: input.inventoryQuantities,
+    roomCounts: input.roomCounts,
     items: input.itemValues.map((item) => ({
       templateItemId: item.templateItemId,
       value: commandValue(item.value, itemTypes.get(item.templateItemId) || 'TEXT'),

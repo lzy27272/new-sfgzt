@@ -125,7 +125,7 @@ public class StoreResourceService {
         return jdbc.queryForList("""
                 select item.id, item.hotel_org_unit_id, item.sku, item.name,
                        item.category, item.unit, item.unit_cost, item.minimum_quantity,
-                       item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
+                       item.employee_usage_enabled, item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
                        (exists (select 1 from store_inventory_movement history
                          where history.tenant_id = item.tenant_id and history.hotel_org_unit_id = item.hotel_org_unit_id
                            and history.item_id = item.id)
@@ -164,6 +164,7 @@ public class StoreResourceService {
                 .addValue("specification", request.specification() == null ? "" : request.specification().trim())
                 .addValue("purchaseUnit", units.purchaseUnit()).addValue("purchaseFactor", units.purchaseFactor())
                 .addValue("issueUnit", units.issueUnit()).addValue("issueFactor", units.issueFactor())
+                .addValue("employeeUsageEnabled", !Boolean.FALSE.equals(request.employeeUsageEnabled()))
                 .addValue("unitCost", StoreItemUnits.exact(request.unitCost(), 4, 14, "基础单位成本"))
                 .addValue("minimumQuantity", StoreItemUnits.exact(request.minimumQuantity(), 4, 14, "最低库存"))
                 .addValue("actorId", principal.actorId());
@@ -171,10 +172,10 @@ public class StoreResourceService {
             jdbc.update("""
                     insert into store_resource_item
                       (id, tenant_id, hotel_org_unit_id, sku, name, category, unit,
-                       unit_cost, minimum_quantity, specification, purchase_unit, purchase_factor, issue_unit, issue_factor, created_by)
+                       unit_cost, minimum_quantity, specification, purchase_unit, purchase_factor, issue_unit, issue_factor, employee_usage_enabled, created_by)
                     values
                       (:id, :tenantId, :hotelId, :sku, :name, :category, :unit,
-                       :unitCost, :minimumQuantity, :specification, :purchaseUnit, :purchaseFactor, :issueUnit, :issueFactor, :actorId)
+                       :unitCost, :minimumQuantity, :specification, :purchaseUnit, :purchaseFactor, :issueUnit, :issueFactor, :employeeUsageEnabled, :actorId)
                     """, params);
         } catch (DataIntegrityViolationException exception) {
             throw conflict("该门店已存在相同物品编码");
@@ -224,6 +225,7 @@ public class StoreResourceService {
                         unit_cost = :unitCost, minimum_quantity = :minimumQuantity,
                         specification = :specification, purchase_unit = :purchaseUnit, purchase_factor = :purchaseFactor,
                         issue_unit = :issueUnit, issue_factor = :issueFactor,
+                        employee_usage_enabled = :employeeUsageEnabled,
                         row_version = row_version + 1
                     where tenant_id = :tenantId and hotel_org_unit_id = :hotelId
                       and id = :itemId and row_version = :expectedVersion
@@ -236,6 +238,7 @@ public class StoreResourceService {
                     .addValue("specification", request.specification() == null ? current.get("specification") : request.specification().trim())
                     .addValue("purchaseUnit", units.purchaseUnit()).addValue("purchaseFactor", units.purchaseFactor())
                     .addValue("issueUnit", units.issueUnit()).addValue("issueFactor", units.issueFactor())
+                    .addValue("employeeUsageEnabled", request.employeeUsageEnabled() == null ? current.get("employee_usage_enabled") : request.employeeUsageEnabled())
                     .addValue("unitCost", StoreItemUnits.exact(request.unitCost(), 4, 14, "基础单位成本"))
                     .addValue("minimumQuantity", StoreItemUnits.exact(request.minimumQuantity(), 4, 14, "最低库存"))
                     .addValue("expectedVersion", request.expectedVersion()));
@@ -1085,7 +1088,7 @@ public class StoreResourceService {
         return jdbc.queryForMap("""
                 select item.id, item.hotel_org_unit_id, item.sku, item.name,
                        item.category, item.unit, item.unit_cost, item.minimum_quantity,
-                       item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
+                       item.employee_usage_enabled, item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
                        (exists (select 1 from store_inventory_movement history
                          where history.tenant_id = item.tenant_id and history.hotel_org_unit_id = item.hotel_org_unit_id
                            and history.item_id = item.id)

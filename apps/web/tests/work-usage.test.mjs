@@ -22,7 +22,7 @@ const input = { schemaVersion: 1, noUsage: false, lines: [{ itemId: 'soap', quan
 test('daily report accepts typed use while issuing stock remains a separate non-consumption task', () => {
   assert.equal(usage.supportsWorkUsage({ itemCode: 'HKA_USAGE_RETURN' }), true)
   assert.equal(usage.supportsWorkUsage({ itemCode: 'NSA_DAILY_HANDOVER' }), true)
-  assert.equal(usage.supportsWorkUsage({ itemCode: 'HKA_ITEM_ISSUE' }), false)
+  assert.equal(usage.supportsWorkUsage({ itemCode: 'HKA_ITEM_ISSUE' }), true)
   assert.equal(usage.supportsWorkUsage({ itemCode: 'HKA_DAILY_REPORT' }), true)
   assert.equal(usage.supportsWorkUsage({ submissionPolicy: { inventoryUsage: true } }), true)
 })
@@ -66,11 +66,11 @@ test('actual employee form shows configured reviewer, quantities and exact base-
   const html = renderToStaticMarkup(React.createElement(WorkUsageFields, { catalogue, value: input, onChange() {}, onRefresh() {} }))
   assert.match(html, /王店助/); assert.match(html, /折合 150 毫升/)
   assert.match(html, /审核通过才扣库/); assert.match(html, /不扣减总库存/)
-  assert.match(html, /第1项数量/); assert.match(html, /添加使用物品/)
+  assert.match(html, /清洁液数量/); assert.match(html, /继续添加物品/)
 })
 test('form shows missing configuration and busy inputs cannot change', () => {
   const html = renderToStaticMarkup(React.createElement(WorkUsageFields, { catalogue: { ...catalogue, reviewerAvailable: false, items: [] }, value: { 牙刷: 2 }, disabled: true, onChange() {}, onRefresh() {} }))
-  assert.match(html, /fieldset disabled/); assert.match(html, /旧草稿/); assert.match(html, /审核人已失效/); assert.match(html, /尚未配置可填报物品/)
+  assert.match(html, /fieldset disabled/); assert.match(html, /旧草稿/); assert.match(html, /审核人已失效/); assert.match(html, /尚未配置当前岗位可填报物品/)
 })
 test('work detail renders human-readable snapshot without ids or database fields', () => {
   const html = renderToStaticMarkup(React.createElement(UsageEvidenceSummary, { usage: { workRecordId: 'internal-record-id', status: 'APPROVED', noUsage: false, lines: [{ itemId: 'internal-item-id', itemName: '浴巾', inputQuantity: 3, inputUnit: '条', baseQuantity: 3, baseUnit: '条', category: 'LINEN' }] } }))

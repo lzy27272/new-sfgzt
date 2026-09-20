@@ -1178,7 +1178,7 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
 
 const workFilters = ['ALL', 'PENDING_WORK', 'AVAILABLE', 'PLANNED', 'IN_PROGRESS', 'SUBMITTED', 'SATISFIED', 'FAILED', 'MISSED'] as const
 
-function MyWork({ identity, routeParams, go }: { identity: RoleContext; routeParams: RouteParams; go: Navigate }) {
+function MyWork({ identity, routeParams, go }: { identity: RoleContext; routeParams: RouteParams; go: AppNavigate }) {
   const resource = useWorkBoard(identity, 'my', routeParams)
   const [editing, setEditing] = useState<WorkExpectation>()
   const [opening, setOpening] = useState(false)
@@ -1190,12 +1190,17 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
     setEditing(undefined); setOpenError(undefined); setOpening(false)
     if (routeParams.expectationId) {
       setOpening(true)
-      loadExpectation(identity, routeParams.expectationId).then(result => { if (active) setEditing(result.data) })
+      loadExpectation(identity, routeParams.expectationId).then(result => {
+        if (!active) return
+        if (result.data.itemCode === 'HKA_DAILY_REPORT' && routeParams.entry !== 'legacy') {
+          go('daily-reports-my', { businessDate: result.data.businessDate, open: 'today' })
+        } else setEditing(result.data)
+      })
         .catch(reason => { if (active) setOpenError(reason instanceof Error ? reason.message : '工作详情加载失败') })
         .finally(() => { if (active) setOpening(false) })
     }
     return () => { active = false }
-  }, [identity.key, routeParams.expectationId])
+  }, [identity.key, routeParams.expectationId, routeParams.entry])
   return <section className="wb-page">
     <header className="wb-page-heading"><div><h1>我的工作</h1><p>当前任职：{identity.label} · {identity.orgName}。切换岗位不会混入其他任职。</p></div>
       <button className="secondary" onClick={() => go('workbench', withBoardParams(routeParams, { status: undefined, queue: undefined }))}>返回工作台</button></header>
@@ -1926,6 +1931,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       || activePermissions.includes(permissionCodes.dailyReport.reviewCorrection)
     const canUseOwnReport = Boolean(activeIdentity.businessActorAssignmentId) &&
       (activePermissions.includes('*') || activePermissions.includes(permissionCodes.dailyReport.readOwn) || activePermissions.includes(permissionCodes.dailyReport.submit))
+    if (canUseOwnReport) return 'daily-reports-my'
     return resolveDailyReportsTarget({
       roleCode: presentationRoleCode,
       hasAssignment: Boolean(activeIdentity.businessActorAssignmentId),

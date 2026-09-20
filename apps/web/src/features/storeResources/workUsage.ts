@@ -3,8 +3,8 @@ import { featureApiMutation, featureApiRequest } from '../shared/featureApi'
 import { baseQuantityPreview } from './unitConversion'
 
 export type UsageConfig = { hotelOrgUnitId: string; enabled: boolean; rowVersion: number; reviewerAssignmentId?: string; reviewerName?: string; reviewerPositionName?: string; reviewerAvailable: boolean }
-export type UsageItem = { id: string; name: string; category: string; specification: string; unit: string; issueUnit: string; issueFactor: number; rowVersion: number }
-export type UsageCatalogue = UsageConfig & { items: UsageItem[]; referenceUsage?: UsageDetail }
+export type UsageItem = { id: string; name: string; sku?: string; category: string; specification: string; unit: string; issueUnit: string; issueFactor: number; rowVersion: number }
+export type UsageCatalogue = UsageConfig & { items: UsageItem[]; referenceUsage?: UsageDetail; mode?: 'ISSUE' | 'USAGE' }
 export type UsageInputLine = { itemId: string; quantity: string; unit: string; expectedItemVersion: number }
 export type UsageInput = { schemaVersion: 1; noUsage: boolean; lines: UsageInputLine[] }
 export type UsageLine = { itemId: string; itemName: string; category: string; baseUnit: string; inputUnit: string; inputQuantity: number; conversionFactor: number; baseQuantity: number }
@@ -14,7 +14,7 @@ export type UsageRow = UsageDetail & { employeeName: string; workTitle: string; 
 export type UsageReviewer = { assignmentId: string; employeeName: string; positionName: string }
 
 export function supportsWorkUsage(item: Pick<WorkExpectation, 'itemCode' | 'submissionPolicy'>) {
-  return ['HKA_USAGE_RETURN', 'HKA_DAILY_REPORT', 'NSA_DAILY_HANDOVER'].includes(item.itemCode ?? '') || item.submissionPolicy?.inventoryUsage === true
+  return ['HKA_ITEM_ISSUE', 'NSA_ITEM_ISSUE', 'HKA_USAGE_RETURN', 'HKA_DAILY_REPORT', 'NSA_DAILY_HANDOVER'].includes(item.itemCode ?? '') || item.submissionPolicy?.inventoryUsage === true
 }
 export function usageInput(value: unknown): UsageInput | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -26,7 +26,7 @@ export function usageInput(value: unknown): UsageInput | undefined {
 export function usageValidation(value: unknown, catalogue: UsageCatalogue): string | undefined {
   if (!catalogue.enabled) return undefined
   if (catalogue.referenceUsage) return undefined
-  if (!catalogue.reviewerAvailable) return '门店耗用审核人已失效，请联系管理员重新配置。'
+  if (!catalogue.reviewerAvailable && catalogue.mode !== 'ISSUE') return '门店耗用审核人已失效，请联系管理员重新配置。'
   const input = usageInput(value)
   if (!input) return '请填写实际耗用数量，或明确勾选本次无耗用。'
   if (input.noUsage) return input.lines.length ? '无耗用时不能同时填写物品数量。' : undefined

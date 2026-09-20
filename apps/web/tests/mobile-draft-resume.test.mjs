@@ -277,6 +277,13 @@ test('daily report local draft is restored and current values are saved before s
   assert.match(reports, /submitDailyReport\(identity, saved, `\$\{key\}-submit`\)/)
 })
 
+test('saved daily reports are not resurrected by debounce or lifecycle cleanup', () => {
+  assert.equal((reports.match(/if \(wasDraftSaved\(snapshot, savedDraftRef\.current\)\) return/g) ?? []).length, 2)
+  assert.match(reports, /savedDraftRef\.current = submittedDraft[\s\S]*await removeResumableDraft\(localDraftKey\)/)
+  assert.match(reports, /const submittedDraft: DailyReportLocalDraft = .*values: \{ \.\.\.values \}/)
+  assert.match(reports, /setValues\(initialValues\)[\s\S]*setExceptions\(initialExceptions\)[\s\S]*localDraftRef\.current = \{/)
+})
+
 test('daily report drafts stop on row-version conflict until the user chooses a version', () => {
   assert.match(reports, /type DailyReportLocalDraft = \{[\s\S]*baseRowVersion: number[\s\S]*\}/)
   assert.match(reports, /stored\.baseRowVersion !== report\.rowVersion[\s\S]*setConflictingLocalDraft\(stored\)/)

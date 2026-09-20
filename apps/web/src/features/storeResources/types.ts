@@ -10,6 +10,7 @@ export type StoreResourceHotel = {
 export type StoreResourceItemCategory = 'LINEN' | 'CONSUMABLE' | 'CLEANING_SUPPLY' | 'OPERATING_ITEM'
 
 export type StoreResourceItem = {
+  employeeUsageEnabled?: boolean
   id: string
   hotelOrgUnitId: string
   sku: string
@@ -129,6 +130,7 @@ export type StoreResourceHandoverLine = {
 export type StoreResourceHandoverDetail = StoreResourceHandover & { lines: StoreResourceHandoverLine[] }
 
 export type StoreResourceItemInput = {
+  employeeUsageEnabled?: boolean
   sku: string
   name: string
   category: StoreResourceItemCategory
@@ -313,6 +315,7 @@ export function parseStoreResourceItem(value: unknown): StoreResourceItem {
     specification: text(row, 'specification', ''), purchaseUnit: text(row, 'purchaseUnit', text(row, 'unit')),
     purchaseFactor: numberValue(row, 'purchaseFactor', 1), issueUnit: text(row, 'issueUnit', text(row, 'unit')),
     issueFactor: numberValue(row, 'issueFactor', 1), baseUnitLocked: booleanValue(row, 'baseUnitLocked'),
+    employeeUsageEnabled: row.employeeUsageEnabled !== false,
   }
 }
 

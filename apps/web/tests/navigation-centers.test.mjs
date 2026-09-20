@@ -24,8 +24,8 @@ test('full navigation has exactly five ordered centers and preserves every autho
     ['workbench', '平台管理员工作台'], ['operations', '经营中心'], ['people', '人事中心'],
     ['performance', '绩效中心'], ['configuration', '配置中心'],
   ])
-  assert.deepEqual(centers[0].items.map((item) => item.id), ['workbench', 'my-work', 'team-work', 'tasks', 'notifications'])
-  assert.deepEqual(centers[1].items.map((item) => item.id), ['daily-operations', 'daily-reports-my', 'investments', 'store-resources'])
+  assert.deepEqual(centers[0].items.map((item) => item.id), ['workbench', 'my-work', 'daily-reports-my', 'team-work', 'tasks', 'notifications'])
+  assert.deepEqual(centers[1].items.map((item) => item.id), ['daily-operations', 'investments', 'store-resources'])
   assert.deepEqual(new Set(centers.flatMap((center) => center.items.map((item) => item.id))), new Set(allFeatures.map((item) => item.id)))
   assert.equal(centers[4].items.find((item) => item.id === 'work-packages').label, '岗位工作模板')
 })
@@ -35,8 +35,8 @@ test('published modules determine nonempty centers without granting new feature 
     'ui.module.workbench', 'ui.module.my-work', 'ui.module.daily-reports-my', 'ui.module.kpi-center',
   ], 'FRONT_DESK')
   const centers = buildNavigationCenters(visible, '前台员工')
-  assert.deepEqual(centers.map((center) => center.id), ['workbench', 'operations', 'performance'])
-  assert.deepEqual(centers[0].items.map((item) => item.id), ['workbench', 'my-work'])
+  assert.deepEqual(centers.map((center) => center.id), ['workbench', 'performance'])
+  assert.deepEqual(centers[0].items.map((item) => item.id), ['workbench', 'my-work', 'daily-reports-my'])
   assert.deepEqual(buildNavigationCenters([], '未授权岗位'), [])
   assert.deepEqual(buildNavigationCenters([feature('tasks')], '主管').map((center) => center.id), ['workbench'])
 })
@@ -60,7 +60,7 @@ test('old hash sections and nested feature sections select the owning main cente
     workbench: 'workbench', 'hotel-dashboard': 'workbench', 'operations-dashboard': 'workbench',
     'my-work': 'workbench', 'team-work': 'workbench', tasks: 'workbench', notifications: 'workbench',
     'all-functions': 'workbench', 'account-self-service': 'workbench',
-    'daily-operations': 'operations', 'daily-reports': 'operations', investments: 'operations', 'store-resources': 'operations',
+    'daily-operations': 'operations', 'daily-reports': 'workbench', investments: 'operations', 'store-resources': 'operations',
     organization: 'people', 'wecom-onboarding': 'people', 'wecom-bindings': 'people',
     kpi: 'performance', evaluations: 'performance',
     templates: 'configuration', 'work-packages': 'configuration', 'daily-report-templates': 'configuration',

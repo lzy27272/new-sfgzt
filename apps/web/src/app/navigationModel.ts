@@ -24,8 +24,8 @@ const centerDefinitions: readonly {
   label: string
   modules: readonly AppRouteId[]
 }[] = [
-  { id: 'workbench', label: '工作台', modules: ['workbench', 'my-work', 'team-work', 'tasks', 'notifications'] },
-  { id: 'operations', label: '经营中心', modules: ['daily-operations', 'daily-reports-my', 'investments', 'store-resources'] },
+  { id: 'workbench', label: '工作台', modules: ['workbench', 'my-work', 'daily-reports-my', 'team-work', 'tasks', 'notifications'] },
+  { id: 'operations', label: '经营中心', modules: ['daily-operations', 'investments', 'store-resources'] },
   { id: 'people', label: '人事中心', modules: ['organization', 'wecom-onboarding', 'wecom-bindings'] },
   { id: 'performance', label: '绩效中心', modules: ['kpi-center', 'evaluations'] },
   { id: 'configuration', label: '配置中心', modules: ['templates', 'work-packages', 'daily-report-templates', 'rules', 'organization', 'wecom-webhooks', 'data-retention'] },
@@ -42,6 +42,7 @@ export function buildNavigationCenters(visibleFeatures: readonly NavigationFeatu
         return [{ ...feature, label: '组织与权限', params: { center: 'configuration' } }]
       }
       const label = id === 'workbench' ? '工作总览'
+        : id === 'daily-reports-my' ? '我的日报'
         : id === 'work-packages' ? '岗位工作模板'
         : id === 'organization' ? '组织与人员'
         : feature.label
@@ -59,7 +60,7 @@ export function buildNavigationCenters(visibleFeatures: readonly NavigationFeatu
 /** Existing hash routes keep their identifiers; detail routes already resolve to these sections. */
 export function navigationCenterForSection(sectionId: AppSectionId, params: RouteParams = {}): NavigationCenterId {
   if (sectionId === 'organization' && params.center === 'configuration') return 'configuration'
-  if (['daily-operations', 'daily-reports', 'investments', 'store-resources'].includes(sectionId)) return 'operations'
+  if (['daily-operations', 'investments', 'store-resources'].includes(sectionId)) return 'operations'
   if (['organization', 'wecom-onboarding', 'wecom-bindings'].includes(sectionId)) return 'people'
   if (['kpi', 'evaluations'].includes(sectionId)) return 'performance'
   if (['templates', 'work-packages', 'daily-report-templates', 'rules', 'wecom-webhooks', 'data-retention'].includes(sectionId)) return 'configuration'

@@ -35,10 +35,15 @@ public final class DailyReportModels {
 
     public record SaveDraft(
             @NotNull UUID revisionId,
-            @NotEmpty List<@Valid ItemValue> items,
+            @NotNull List<@Valid ItemValue> items,
             String narrative,
-            @PositiveOrZero long expectedVersion
+            @PositiveOrZero long expectedVersion,
+            JsonNode inventoryQuantities,
+            JsonNode roomCounts
     ) {
+        public SaveDraft(UUID revisionId, List<ItemValue> items, String narrative, long expectedVersion) {
+            this(revisionId,items,narrative,expectedVersion,null,null);
+        }
     }
 
     public record SubmitReport(

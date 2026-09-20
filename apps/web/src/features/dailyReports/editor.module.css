@@ -1,0 +1,15 @@
+.editor { align-items: start; }
+.editor > main, .editor > aside { min-width: 0; }
+.editor fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.editor h2 { font-size: 18px; }
+.editor p, .editor label, .editor button { font-size: 14px; line-height: 1.65; }
+.editor button { min-height: 44px; }
+.editor small, .editor header span, .editor article strong { font-size: 12px; }
+.editor input:not([type="checkbox"]), .editor textarea { font-size: 16px; min-height: 44px; }
+.editor label:has(> input[type="checkbox"]) { display: flex; align-items: center; gap: 10px; }
+.editor input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; }
+@media (max-width: 600px) {
+  .editor > main > section, .editor > aside > section { padding: 14px; }
+  .editor h2 { font-size: 17px; }
+  .editor header { flex-wrap: wrap; }
+}

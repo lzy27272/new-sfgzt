@@ -402,6 +402,92 @@ class StoreWorkUsageIntegrationTest {
         return revisionId;
     }
 
+    @Test void dailyReportEditorSubmitsOneUsageRecordAndRollsBackInvalidQuantities() throws Exception {
+        usageItemCode="HKA_DAILY_REPORT"; setup();
+        LocalDate date=LocalDate.now().minusDays(2);
+        jdbc.update("update work_package_allocation set valid_from=? where id=(select work_package_allocation_id from work_expectation where id=?::uuid)",date,expectation);
+        jdbc.update("update work_expectation set business_date=? where id=?::uuid",date,expectation);
+        String itemId=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
+        UUID revision=createUsageDailyReport(version,itemId,date);
+        String report=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
+        JsonNode detail=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+        assertThat(detail.path("inventoryContext").path("catalogue").path("enabled").asBoolean()).isTrue();
+        String brush=item("CONSUMABLE","支","支",1,100,0.5);
+        Map<String,Object> quantities=Map.of("schemaVersion",1,"noUsage",false,"lines",List.of(line(brush,"3","支",0)));
+        JsonNode invalid=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",detail.path("rowVersion").asLong(),"items",List.of(),
+                        "inventoryQuantities",Map.of("schemaVersion",1,"noUsage",false,"lines",List.of(line(brush,"0","支",0))),
+                        "roomCounts",Map.of("checkoutRooms",6,"stayoverRooms",4)),200);
+        call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",invalid.path("rowVersion").asLong()),400);
+        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isZero();
+        assertThat(jdbc.queryForObject("select report_status from daily_report where id=?::uuid",String.class,report)).isEqualTo("DRAFT");
+        JsonNode saved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",invalid.path("rowVersion").asLong(),"items",List.of(),
+                        "inventoryQuantities",quantities,"roomCounts",Map.of("checkoutRooms",6,"stayoverRooms",4)),200);
+        assertThat(saved.path("revisions").get(0).path("payloadSnapshot").path("inventoryQuantities")).isEqualTo(mapper.valueToTree(quantities));
+        JsonNode submitted=call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),200);
+        assertThat(submitted.path("reportStatus").asText()).isEqualTo("SUBMITTED");
+        String record=jdbc.queryForObject("select id::text from work_record where work_expectation_id=?::uuid",String.class,expectation);
+        balance(brush,"100","50");
+        review(record,GM,"APPROVED",0,200); review(record,GM,"APPROVED",0,200);
+        balance(brush,"97","48.5");
+        assertThat(movements(record)).isEqualTo(1);
+        call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",submitted.path("rowVersion").asLong()),409);
+        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isEqualTo(1);
+    }
+
+    @Test void dailyReportReferencesExistingWorkAndRejectsUnrelatedUsage() throws Exception {
+        usageItemCode="HKA_DAILY_REPORT"; setup();
+        LocalDate date=LocalDate.now().minusDays(1);
+        jdbc.update("update work_package_allocation set valid_from=? where id=(select work_package_allocation_id from work_expectation where id=?::uuid)",date,expectation);
+        jdbc.update("update work_expectation set business_date=? where id=?::uuid",date,expectation);
+        String itemId=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
+        String brush=item("CONSUMABLE","支","盒",12,100,0.5);
+        var body=recordBody(Map.of("schemaVersion",1,"noUsage",false,"lines",List.of(line(brush,"2","盒",0))),false);
+        body.put("businessDate",date.toString());
+        String record=call(post("/api/v1/work-data/records"),EMP,body,201).path("id").asText();
+        UUID revision=createUsageDailyReport(version,itemId,date);
+        String report=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
+        JsonNode detail=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+        assertThat(detail.path("inventoryContext").path("catalogue").path("reference_usage").path("work_record_id").asText()).isEqualTo(record);
+        JsonNode invalid=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",detail.path("rowVersion").asLong(),"items",List.of(),
+                        "inventoryQuantities",Map.of("schemaVersion",1,"referenceRecordId",UUID.randomUUID().toString())),200);
+        call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",invalid.path("rowVersion").asLong()),400);
+        JsonNode saved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",invalid.path("rowVersion").asLong(),"items",List.of(),
+                        "inventoryQuantities",Map.of("schemaVersion",1,"referenceRecordId",record)),200);
+        call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),200);
+        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isEqualTo(1);
+        balance(brush,"100","50");
+        assertThat(movements(record)).isZero();
+    }
+
+    @Test void issuePickerValidatesConfigurationWithoutPostingConsumption() throws Exception {
+        usageItemCode="HKA_ITEM_ISSUE"; setup();
+        String brush=item("CONSUMABLE","支","盒",12,100,0.5);
+        JsonNode catalog=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",D).param("itemCode","HKA_ITEM_ISSUE"),EMP,null,200);
+        assertThat(catalog.path("mode").asText()).isEqualTo("ISSUE");
+        jdbc.update("update store_resource_item set employee_usage_enabled=false where id=?::uuid",brush);
+        assertThat(call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",D).param("itemCode","HKA_ITEM_ISSUE"),EMP,null,200).path("items").toString()).doesNotContain(brush);
+        submit(List.of(line(brush,"2","盒",0)),false,400);
+        jdbc.update("update store_resource_item set employee_usage_enabled=true where id=?::uuid",brush);
+        submit(List.of(line(brush,"2","支",0)),false,400);
+        String record=submit(List.of(line(brush,"2","盒",0)),false,201).path("id").asText();
+        UUID previousManager=jdbc.queryForObject("select manager_assignment_id from employee_position_assignment where id=?::uuid",UUID.class,EA);
+        jdbc.update("update employee_position_assignment set manager_assignment_id=?::uuid where id=?::uuid",GMA,EA);
+        try { review(record,GM,"APPROVED",0,200); }
+        finally { jdbc.update("update employee_position_assignment set manager_assignment_id=? where id=?::uuid",previousManager,EA); }
+        balance(brush,"100","50");
+        assertThat(movements(record)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from store_cost_entry where source_parent_id=?::uuid",Integer.class,record)).isZero();
+    }
+
     private void configure(String assignment,int status) throws Exception {
         long v=call(get("/api/v1/store-resources/hotels/"+H+"/usage-review-config"),ADMIN,null,200).path("row_version").asLong(-1);
         call(put("/api/v1/store-resources/hotels/"+H+"/usage-review-config"),ADMIN,Map.of("reviewerAssignmentId",assignment,"expectedVersion",v),status);

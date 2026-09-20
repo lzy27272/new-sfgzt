@@ -248,6 +248,7 @@ public class WorkDataService {
                 request.positionAssignmentId(), request.businessDate());
         authorizeAssignmentSubmission(principal, request.positionAssignmentId(), request.orgUnitId());
         validateAssignmentAndForm(principal, request);
+        usageService.lockDay(targetOrgUnitId, request.employeeId(), request.businessDate());
         WorkContext workContext = resolveWorkContext(principal, request, targetOrgUnitId);
         boolean saveAsDraft = Boolean.TRUE.equals(request.saveAsDraft());
         if (saveAsDraft) {
@@ -375,6 +376,7 @@ public class WorkDataService {
             throw new IllegalArgumentException("只有草稿工作记录可以提交");
         }
         validatePayload(principal, record.formVersionId(), readJson(record.payloadJson()));
+        usageService.lockAssignmentDay(record.targetOrgUnitId(), record.assignmentId(), record.businessDate());
         if (!record.repeatableEntry()) {
             requireFirstSharedSubmission(principal, record.expectationId(), recordId);
         }
