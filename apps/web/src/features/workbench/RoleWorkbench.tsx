@@ -8,6 +8,7 @@ import type { AccessibleHotel, RoleContext, RouteParams, NavigationParams } from
 import { TaskCreateDialog } from '../../Pilot6Pages'
 import { useResource } from '../../useResource'
 import { resolveTaskDispatchMode } from '../tasks/taskDispatchAccess'
+import { OwnDailyReportShortcut, TeamDailyReportShortcut } from './DailyReportShortcuts'
 import { WorkBoardPanel, WorkDateToolbar, WorkQueueAlerts, useWorkBoard } from './WorkBoard'
 import { boardLabels, emptyMetric, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
 export { isLateSubmitted } from './workBoardModel'
@@ -28,9 +29,9 @@ function GroupTable({ title, rows, onOpen }: { title: string; rows: BoardGroup[]
 }
 
 export function RoleWorkbench({ identity, permissions, presentationKey, executiveTasksEnabled,
-  storeResourcesAvailable = false, navigation, routeParams = {}, go }: {
+  storeResourcesAvailable = false, dailyReportsAvailable = false, navigation, routeParams = {}, go }: {
   identity: RoleContext; permissions: string[]; presentationKey: RolePresentationKey
-  executiveTasksEnabled: boolean; storeResourcesAvailable?: boolean; navigation?: ReactNode
+  executiveTasksEnabled: boolean; storeResourcesAvailable?: boolean; dailyReportsAvailable?: boolean; navigation?: ReactNode
   routeParams?: RouteParams; go: AppNavigate
 }) {
   const canReadTeam = allows(permissions, permissionCodes.workRecord.readTeam) || allows(permissions, 'work-record.review')
@@ -39,7 +40,6 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   const canReadNotices = allows(permissions, 'notification.read')
   const canReadOperations = allows(permissions, 'dashboard.operations')
   const canReadHotels = allows(permissions, 'dashboard.hotel')
-  const canReadReports = [permissionCodes.dailyReport.readOwn, permissionCodes.dailyReport.readTeam].some(code => allows(permissions, code))
   const canReadDailyOperations = [permissionCodes.dailyOperations.readHotel, permissionCodes.dailyOperations.readCrossHotel].some(code => allows(permissions, code))
   const canReadKpi = [permissionCodes.kpi.scorecardReadOwn, permissionCodes.kpi.scorecardReadTeam, permissionCodes.kpi.scorecardReadAll, permissionCodes.kpi.templateRead].some(code => allows(permissions, code))
   const canReadStoreResources = storeResourcesAvailable && allows(permissions, permissionCodes.storeResource.read)
@@ -81,7 +81,9 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
 
   return <section className="wb-page">
     <header className="wb-page-heading"><div><span className="eyebrow">当前岗位工作</span><h1>{identity.label}工作台</h1><p>{identity.orgName} · 所选日期的工作进展与待办</p></div>
-      <div className="wb-actions">{dispatchMode && <button className="primary" aria-label="一键下达任务" onClick={() => dispatchMode === 'EXECUTIVE'
+      <div className="wb-actions">
+        <OwnDailyReportShortcut permissions={permissions} available={dailyReportsAvailable} hasAssignment={Boolean(identity.businessActorAssignmentId)} go={go} />
+        {dispatchMode && <button className="primary" aria-label="一键下达任务" onClick={() => dispatchMode === 'EXECUTIVE'
         ? go('tasks', { create: 'true' }) : setCreatingTask(true)}>工作下达</button>}
         {canReadNotices && <button className="secondary" onClick={() => go('notifications')}>消息提醒{unreadNotices.length ? ' ' + unreadNotices.length : ''}</button>}
       </div></header>
@@ -106,7 +108,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
     {(canReadTeam || canReadOwn) && <p className="wb-metric-note">当日闭环完成率、截至当日月工作完成率均按工作归属日核算；未来日期不计入完成率，已结算 KPI 不随页面查询改写。</p>}
     {selectedHotel && <div className="wb-scope-heading"><strong>{selectedHotel.name}工作台</strong>{executive && <button className="text-action" onClick={() => openHotel()}>返回门店列表</button>}
       <div className="wb-actions">
-        {canReadReports && <button className="text-action" onClick={() => go('daily-reports-team', { hotelId: selectedHotel.id })}>日报</button>}
+        <TeamDailyReportShortcut permissions={permissions} available={dailyReportsAvailable} hotelId={selectedHotel.id} go={go} />
         {canReadDailyOperations && <button className="text-action" onClick={() => go('daily-operations', { hotelId: selectedHotel.id })}>日运营</button>}
         {canReadKpi && <button className="text-action" onClick={() => go('kpi-center', { hotelId: selectedHotel.id })}>KPI</button>}
         {canReadStoreResources && <button className="text-action" onClick={() => go('store-resources', { hotelId: selectedHotel.id, tab: 'assets' })}>库存与资产</button>}

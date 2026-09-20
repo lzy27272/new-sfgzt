@@ -1917,6 +1917,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const activeCenterId = navigationCenterForSection(sectionId, routeParams)
   const activeCenter = navigationCenters.find((center) => center.id === activeCenterId)
   const storeResourcesAvailable = canOpenStoreResources(activePermissions, visibleNavigation)
+  const dailyReportsAvailable = visibleNavigation.some(item => item.id === 'daily-reports-my')
   const navigationTarget = (id: AppRouteId): AppRouteId => {
     if (id !== 'daily-reports-my') return id
     const canUseTeamReport = activePermissions.includes('*')
@@ -1976,7 +1977,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     }
     let legacyPage: React.ReactNode
     switch (view) {
-      case 'workbench': legacyPage = <RoleWorkbench identity={activeIdentity} permissions={activePermissions} presentationKey={presentationPolicy.key} executiveTasksEnabled={executiveTasksEnabled} storeResourcesAvailable={storeResourcesAvailable} routeParams={routeParams} go={navigate} navigation={<CenterFeatureNavigation center={activeCenter} sectionId={sectionId} go={navigate} resolveTarget={navigationTarget} unreadCount={unreadCount} />} />; break
+      case 'workbench': legacyPage = <RoleWorkbench identity={activeIdentity} permissions={activePermissions} presentationKey={presentationPolicy.key} executiveTasksEnabled={executiveTasksEnabled} storeResourcesAvailable={storeResourcesAvailable} dailyReportsAvailable={dailyReportsAvailable} routeParams={routeParams} go={navigate} navigation={<CenterFeatureNavigation center={activeCenter} sectionId={sectionId} go={navigate} resolveTarget={navigationTarget} unreadCount={unreadCount} />} />; break
       case 'all-functions': legacyPage = <AllFunctionsPage
         items={visibleNavigation}
         roleLabel={activeIdentity.label}
@@ -2029,7 +2030,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     >
       <Suspense fallback={<div className="state-card"><div className="spinner" /><strong>正在加载当前岗位功能</strong></div>}>{legacyPage}</Suspense>
     </PageAccessBoundary>
-  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation, activeCenter, sectionId, storeResourcesAvailable, unreadCount])
+  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation, activeCenter, sectionId, storeResourcesAvailable, dailyReportsAvailable, unreadCount])
   const changeRole = (key: string) => {
     const next = roleContexts.find((role) => role.key === key)
     if (!next) return
