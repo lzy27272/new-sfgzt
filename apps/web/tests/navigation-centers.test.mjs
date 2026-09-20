@@ -12,7 +12,7 @@ import { applyPublishedModuleVisibility, resolveDailyReportsTarget } from '../sr
 const feature = (id, sectionId) => ({ id, sectionId, label: id, icon: '' })
 const allFeatures = [
   feature('workbench'), feature('my-work'), feature('team-work'), feature('tasks'), feature('notifications'),
-  feature('daily-operations'), feature('daily-reports-my', 'daily-reports'), feature('investments'), feature('store-resources'),
+  feature('daily-operations'), feature('daily-reports-my', 'daily-reports'), feature('investments'), feature('store-resources'), feature('ai-data'),
   feature('organization'), feature('wecom-onboarding'), feature('wecom-bindings'),
   feature('kpi-center', 'kpi'), feature('evaluations'), feature('templates'), feature('work-packages'),
   feature('daily-report-templates'), feature('rules'), feature('wecom-webhooks'), feature('data-retention'),
@@ -25,7 +25,7 @@ test('full navigation has exactly five ordered centers and preserves every autho
     ['performance', '绩效中心'], ['configuration', '配置中心'],
   ])
   assert.deepEqual(centers[0].items.map((item) => item.id), ['workbench', 'my-work', 'daily-reports-my', 'team-work', 'tasks', 'notifications'])
-  assert.deepEqual(centers[1].items.map((item) => item.id), ['daily-operations', 'investments', 'store-resources'])
+  assert.deepEqual(centers[1].items.map((item) => item.id), ['daily-operations', 'investments', 'store-resources', 'ai-data'])
   assert.deepEqual(new Set(centers.flatMap((center) => center.items.map((item) => item.id))), new Set(allFeatures.map((item) => item.id)))
   assert.equal(centers[4].items.find((item) => item.id === 'work-packages').label, '岗位工作模板')
 })
@@ -60,7 +60,7 @@ test('old hash sections and nested feature sections select the owning main cente
     workbench: 'workbench', 'hotel-dashboard': 'workbench', 'operations-dashboard': 'workbench',
     'my-work': 'workbench', 'team-work': 'workbench', tasks: 'workbench', notifications: 'workbench',
     'all-functions': 'workbench', 'account-self-service': 'workbench',
-    'daily-operations': 'operations', 'daily-reports': 'workbench', investments: 'operations', 'store-resources': 'operations',
+    'daily-operations': 'operations', 'daily-reports': 'workbench', investments: 'operations', 'store-resources': 'operations', 'ai-data': 'operations',
     organization: 'people', 'wecom-onboarding': 'people', 'wecom-bindings': 'people',
     kpi: 'performance', evaluations: 'performance',
     templates: 'configuration', 'work-packages': 'configuration', 'daily-report-templates': 'configuration',
