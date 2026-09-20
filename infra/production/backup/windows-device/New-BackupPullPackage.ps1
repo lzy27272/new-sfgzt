@@ -61,6 +61,17 @@ try {
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw ('源包缺少文件：' + $name) }
         [IO.File]::Copy($source, (Join-Path $staging $name), $false)
     }
+    # cmd.exe decodes batch files with the active legacy code page before a
+    # script-level chcp command can safely affect every parsed block. Keep the
+    # launcher ASCII-only and normalize it to Windows line endings so it works
+    # independently of the device language and the packaging checkout format.
+    $launcherPath = Join-Path $staging '02-Install-BackupPull.cmd'
+    $launcherBytes = [IO.File]::ReadAllBytes($launcherPath)
+    if (@($launcherBytes | Where-Object { $_ -gt 127 }).Count) {
+        throw '连接包启动文件必须只包含 ASCII 字符。'
+    }
+    $launcherText = [Text.Encoding]::ASCII.GetString($launcherBytes) -replace "`r?`n", "`r`n"
+    [IO.File]::WriteAllText($launcherPath, $launcherText, [Text.Encoding]::ASCII)
     $connection = [pscustomobject][ordered]@{
         kind = 'SFG_BACKUP_CONNECTION_V1'; schemaVersion = 1
         issuedAt = [DateTime]::UtcNow.ToString('o')
