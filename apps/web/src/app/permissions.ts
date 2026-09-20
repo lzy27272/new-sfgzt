@@ -109,6 +109,7 @@ export const permissions = Object.freeze({
     read: 'store-resource.read',
     itemManage: 'store-resource.item-manage',
     movementCreate: 'store-resource.movement-create',
+    costClose: 'store-resource.cost-close',
     assetManage: 'store-resource.asset-manage',
     importPreview: 'store-resource.import-preview',
     importApply: 'store-resource.import-apply',

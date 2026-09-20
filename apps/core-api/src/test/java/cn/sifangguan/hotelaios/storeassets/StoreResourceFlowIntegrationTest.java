@@ -26,11 +26,15 @@ import java.sql.Connection;
 import java.util.UUID;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest
@@ -40,6 +44,7 @@ class StoreResourceFlowIntegrationTest {
     private static final String TENANT = "10000000-0000-0000-0000-000000000001";
     private static final String CEO = "19000000-0000-0000-0000-000000000001";
     private static final String HOTEL = "12000000-0000-0000-0000-000000000003";
+    private static final String UNIT_HOTEL = "12000000-0000-0000-0000-000000000004";
 
     private static final String TRANSFEROR_ACCOUNT = "19000000-0000-0000-0000-000000000002";
     private static final String TRANSFEROR_ASSIGNMENT = "19200000-0000-0000-0000-000000000001";
@@ -433,6 +438,237 @@ class StoreResourceFlowIntegrationTest {
                 select count(*) from store_inventory_movement
                 where tenant_id = ?::uuid and source_type = 'IMPORT' and source_id = ?::uuid
                 """, Integer.class, TENANT, jobId)).isOne();
+    }
+
+    @Test
+    void purchaseUnitsConvertToBaseStockAndChangedFactorsNeverRewriteHistoricalFacts() throws Exception {
+        JsonNode item = unitItem("支", "箱", "100", "支", "1");
+        String id = item.path("id").asText();
+        long version = item.path("row_version").asLong();
+        String receiptKey = UUID.randomUUID().toString();
+        Map<String, Object> receiptBody = Map.of("itemId", id, "movementType", "RECEIPT", "quantity", "2",
+                "quantityUnit", "箱", "unitCost", "50", "reason", "整箱采购", "expectedItemVersion", version);
+        JsonNode receipt = unitMovement(receiptKey, receiptBody, 201);
+        assertThat(receipt.path("quantity_after").decimalValue()).isEqualByComparingTo("200");
+        assertThat(receipt.path("value_delta").decimalValue()).isEqualByComparingTo("100");
+        assertThat(receipt.path("input_quantity").decimalValue()).isEqualByComparingTo("2");
+        assertThat(receipt.path("unit_cost_snapshot").decimalValue()).isEqualByComparingTo("0.5");
+        JsonNode consumed = unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id, "movementType", "CONSUMPTION",
+                "quantity", "30", "quantityUnit", "支", "reason", "客房耗用"), 201);
+        assertThat(consumed.path("quantity_after").decimalValue()).isEqualByComparingTo("170");
+        assertThat(consumed.path("value_delta").decimalValue()).isEqualByComparingTo("-15");
+        assertThat(consumed.path("input_quantity").decimalValue()).isEqualByComparingTo("-30");
+        JsonNode updated = updateUnitItem(item, "支", "120", version, 200);
+        assertThat(updated.path("base_unit_locked").asBoolean()).isTrue();
+        assertThat(updated.path("current_quantity").decimalValue()).isEqualByComparingTo("170");
+        assertThat(updated.path("inventory_value").decimalValue()).isEqualByComparingTo("85");
+        // A retry succeeds with the original facts, even though its expected version is now stale.
+        JsonNode replay = unitMovement(receiptKey, receiptBody, 201);
+        assertThat(replay.path("id").asText()).isEqualTo(receipt.path("id").asText());
+        assertThat(replay.path("conversion_factor").decimalValue()).isEqualByComparingTo("100");
+        unitMovement(UUID.randomUUID().toString(), receiptBody, 409);
+        unitMovement(receiptKey, Map.of("itemId", id, "movementType", "RECEIPT", "quantity", "2",
+                "quantityUnit", "支", "unitCost", "50", "reason", "整箱采购"), 409);
+        JsonNode newer = unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id, "movementType", "RECEIPT", "quantity", "1",
+                "quantityUnit", "箱", "unitCost", "60", "reason", "新规格采购", "expectedItemVersion", updated.path("row_version").asLong()), 201);
+        assertThat(newer.path("quantity_after").decimalValue()).isEqualByComparingTo("290");
+        assertThat(newer.path("conversion_factor").decimalValue()).isEqualByComparingTo("120");
+        updateUnitItem(updated, "盒", "120", updated.path("row_version").asLong(), 409);
+        unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id, "movementType", "CONSUMPTION", "quantity", "290",
+                "reason", "耗尽库存"), 201);
+        updateUnitItem(updated, "盒", "120", updated.path("row_version").asLong(), 409);
+        assertThatThrownBy(() -> jdbc.update("update store_resource_item set unit = '盒' where id = ?::uuid", id))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+        JsonNode history = response(identity(get("/api/v1/store-resources/hotels/{hotelId}/movements", UNIT_HOTEL),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT), 200);
+        for (JsonNode movement : history) if (movement.path("id").asText().equals(receipt.path("id").asText())) {
+            assertThat(movement.path("conversion_factor").decimalValue()).isEqualByComparingTo("100");
+            assertThat(movement.path("quantity_delta").decimalValue()).isEqualByComparingTo("200");
+        }
+    }
+
+    @Test
+    void cleaningLiquidUsesMillilitresAndDepletionBalancesRoundingExactly() throws Exception {
+        JsonNode item = unitItem("毫升", "桶", "5000", "升", "1000");
+        String id = item.path("id").asText();
+        unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id, "movementType", "RECEIPT", "quantity", "1",
+                "quantityUnit", "桶", "unitCost", "100", "reason", "清洁液入库"), 201);
+        JsonNode used = unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id, "movementType", "CONSUMPTION", "quantity", "0.15",
+                "quantityUnit", "升", "reason", "清洁液使用"), 201);
+        assertThat(used.path("quantity_delta").decimalValue()).isEqualByComparingTo("-150");
+        assertThat(used.path("value_delta").decimalValue()).isEqualByComparingTo("-3");
+        assertThat(used.path("quantity_after").decimalValue()).isEqualByComparingTo("4850");
+        JsonNode thirds = unitItem("毫升", "桶", "3", "毫升", "1");
+        String thirdId = thirds.path("id").asText();
+        unitMovement(UUID.randomUUID().toString(), Map.of("itemId", thirdId, "movementType", "RECEIPT", "quantity", "1",
+                "quantityUnit", "桶", "unitCost", "1", "reason", "舍入测试"), 201);
+        BigDecimal outflow = BigDecimal.ZERO;
+        for (int i = 0; i < 3; i++) {
+            JsonNode result = unitMovement(UUID.randomUUID().toString(), Map.of("itemId", thirdId,
+                    "movementType", "CONSUMPTION", "quantity", "1", "reason", "逐次耗用"), 201);
+            outflow = outflow.add(result.path("value_delta").decimalValue());
+        }
+        assertThat(outflow).isEqualByComparingTo("-1");
+        assertThat(jdbc.queryForObject("select inventory_value from store_inventory_balance where item_id = ?::uuid",
+                BigDecimal.class, thirdId)).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void unitValidationAndInsufficientStockLeaveNoPartialMovements() throws Exception {
+        JsonNode item = unitItem("升", "毫升", "0.001", "升", "1");
+        String id = item.path("id").asText();
+        for (Map<String, Object> body : List.of(
+                Map.<String, Object>of("itemId", id, "movementType", "RECEIPT", "quantity", "0.0001", "quantityUnit", "毫升", "reason", "舍入应拒绝"),
+                Map.<String, Object>of("itemId", id, "movementType", "RECEIPT", "quantity", "1", "quantityUnit", "瓶", "reason", "未知单位应拒绝"),
+                Map.<String, Object>of("itemId", id, "movementType", "RECEIPT", "quantity", "100000000000000", "reason", "溢出应拒绝"))) {
+            unitMovement(UUID.randomUUID().toString(), body, 400);
+        }
+        unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id, "movementType", "CONSUMPTION",
+                "quantity", "1", "reason", "负库存应拒绝"), 409);
+        assertThat(jdbc.queryForObject("select count(*) from store_inventory_movement where item_id = ?::uuid", Integer.class, id)).isZero();
+        JsonNode error = response(identity(post("/api/v1/store-resources/hotels/{hotelId}/movements", HOTEL),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT).header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType("application/json").content(objectMapper.writeValueAsString(Map.of("itemId", id,
+                        "movementType", "RECEIPT", "quantity", 1, "reason", "跨门店应拒绝"))), 404);
+        assertThat(error.toString()).doesNotContain("purchase_factor");
+    }
+
+    @Test
+    void concurrentIdenticalSubmissionOnlyPostsOnce() throws Exception {
+        JsonNode item = unitItem("支", "箱", "100", "支", "1");
+        String id = item.path("id").asText();
+        String key = UUID.randomUUID().toString();
+        Map<String, Object> body = Map.of("itemId", id, "movementType", "RECEIPT", "quantity", "2",
+                "quantityUnit", "箱", "unitCost", "50", "reason", "并发重试");
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> unitMovement(key, body, 201));
+            var second = executor.submit(() -> unitMovement(key, body, 201));
+            assertThat(first.get().path("id").asText()).isEqualTo(second.get().path("id").asText());
+        }
+        assertThat(jdbc.queryForObject("select quantity from store_inventory_balance where item_id = ?::uuid", BigDecimal.class, id))
+                .isEqualByComparingTo("200");
+        assertThat(jdbc.queryForObject("select count(*) from store_inventory_movement where item_id = ?::uuid", Integer.class, id)).isOne();
+    }
+
+    @Test
+    void importV2StoresAliasesButOpeningQuantityAndCostRemainInBaseUnits() throws Exception {
+        String sku = ("UNIT-IMPORT-" + UUID.randomUUID()).toUpperCase(java.util.Locale.ROOT);
+        JsonNode preview = unitImportPreview(sku, "箱", "100");
+        assertThat(preview.path("status").asText()).isEqualTo("READY");
+        assertThat(preview.path("preview").path("items").get(0).path("purchaseFactor").decimalValue()).isEqualByComparingTo("100");
+        String jobId = preview.path("id").asText();
+        response(identity(post("/api/v1/store-resources/hotels/{hotelId}/imports/{jobId}/actions/apply", UNIT_HOTEL, jobId),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT).header("Idempotency-Key", UUID.randomUUID().toString()), 200);
+        Map<String, Object> row = jdbc.queryForMap("""
+                select item.purchase_unit, item.purchase_factor, item.specification, balance.quantity, balance.inventory_value,
+                       movement.input_unit, movement.conversion_factor
+                from store_resource_item item join store_inventory_balance balance on item.id = balance.item_id
+                join store_inventory_movement movement on movement.item_id = item.id where item.sku = ?
+                """, sku);
+        assertThat(row.get("purchase_unit")).isEqualTo("箱");
+        assertThat((BigDecimal) row.get("quantity")).isEqualByComparingTo("200");
+        assertThat((BigDecimal) row.get("inventory_value")).isEqualByComparingTo("100");
+        assertThat(row.get("input_unit")).isEqualTo("支");
+        assertThat((BigDecimal) row.get("conversion_factor")).isEqualByComparingTo("1");
+        assertThat(row.get("specification")).isEqualTo("100支/箱");
+    }
+
+    @Test
+    void invalidImportUnitRatiosCannotBeAppliedAndLegacyReadyJobsRemainCompatible() throws Exception {
+        for (String factor : List.of("", "0", "0.0000001", "1000000000000")) {
+            String sku = ("BAD-UNIT-" + UUID.randomUUID()).toUpperCase(java.util.Locale.ROOT);
+            JsonNode invalid = unitImportPreview(sku, "箱", factor);
+            assertThat(invalid.path("status").asText()).isEqualTo("INVALID");
+            assertThat(invalid.path("canApply").asBoolean()).isFalse();
+            response(identity(post("/api/v1/store-resources/hotels/{hotelId}/imports/{jobId}/actions/apply", UNIT_HOTEL, invalid.path("id").asText()),
+                    TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT).header("Idempotency-Key", UUID.randomUUID().toString()), 409);
+            assertThat(jdbc.queryForObject("select count(*) from store_resource_item where sku = ?", Integer.class, sku)).isZero();
+        }
+        String sku = ("OLD-JOB-" + UUID.randomUUID()).toUpperCase(java.util.Locale.ROOT);
+        JsonNode preview = unitImportPreview(sku, "支", "1");
+        String id = preview.path("id").asText();
+        // Emulate a persisted V1 READY payload from before the upgrade (no unit metadata).
+        jdbc.update("""
+                update tabular_import_job set template_version = 1,
+                  parsed_payload = jsonb_set(parsed_payload, '{items,0}',
+                    (parsed_payload #> '{items,0}') - 'specification' - 'purchaseUnit' - 'purchaseFactor' - 'issueUnit' - 'issueFactor')
+                where id = ?::uuid
+                """, id);
+        response(identity(post("/api/v1/store-resources/hotels/{hotelId}/imports/{jobId}/actions/apply", UNIT_HOTEL, id),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT).header("Idempotency-Key", UUID.randomUUID().toString()), 200);
+        assertThat(jdbc.queryForObject("select purchase_unit from store_resource_item where sku = ?", String.class, sku)).isEqualTo("支");
+        assertThat(jdbc.queryForObject("select purchase_factor from store_resource_item where sku = ?", BigDecimal.class, sku))
+                .isEqualByComparingTo("1");
+    }
+
+    private JsonNode unitItem(String base, String purchase, String purchaseFactor, String issue, String issueFactor) throws Exception {
+        return response(identity(post("/api/v1/store-resources/hotels/{hotelId}/items", UNIT_HOTEL), TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT)
+                .contentType("application/json").content(objectMapper.writeValueAsString(Map.of(
+                        "sku", "UNIT-" + UUID.randomUUID(), "name", "换算测试物品", "category", "CONSUMABLE", "unit", base,
+                        "unitCost", 0, "minimumQuantity", 0, "purchaseUnit", purchase, "purchaseFactor", purchaseFactor,
+                        "issueUnit", issue, "issueFactor", issueFactor))), 201);
+    }
+
+    @Test
+    void legacyUpdatePreservesAliasesAndReturnDamageAdjustmentUseSelectedUnit() throws Exception {
+        JsonNode item = unitItem("支", "箱", "100", "盒", "10");
+        String id = item.path("id").asText();
+        JsonNode updated = response(identity(put("/api/v1/store-resources/hotels/{hotelId}/items/{itemId}", UNIT_HOTEL, id),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT).contentType("application/json")
+                .content(objectMapper.writeValueAsString(Map.of("sku", item.path("sku").asText(), "name", "仅修改名称",
+                        "category", "CONSUMABLE", "unit", "支", "unitCost", "0.5", "minimumQuantity", 0,
+                        "expectedVersion", item.path("row_version").asLong()))), 200);
+        assertThat(updated.path("purchase_unit").asText()).isEqualTo("箱");
+        assertThat(updated.path("purchase_factor").decimalValue()).isEqualByComparingTo("100");
+        assertThat(updated.path("issue_factor").decimalValue()).isEqualByComparingTo("10");
+        JsonNode returned = unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id,
+                "movementType", "RETURN", "quantity", "2", "quantityUnit", "盒", "reason", "退回"), 201);
+        assertThat(returned.path("quantity_after").decimalValue()).isEqualByComparingTo("20");
+        assertThat(returned.path("value_delta").decimalValue()).isEqualByComparingTo("10");
+        JsonNode damage = unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id,
+                "movementType", "DAMAGE", "quantity", "0.5", "quantityUnit", "盒", "reason", "损坏"), 201);
+        assertThat(damage.path("quantity_delta").decimalValue()).isEqualByComparingTo("-5");
+        JsonNode adjustment = unitMovement(UUID.randomUUID().toString(), Map.of("itemId", id,
+                "movementType", "ADJUSTMENT", "quantity", "-1.5", "quantityUnit", "盒", "reason", "盘点减少"), 201);
+        assertThat(adjustment.path("quantity_after").decimalValue()).isEqualByComparingTo("0");
+        assertThat(adjustment.path("value_delta").decimalValue()).isEqualByComparingTo("-7.5");
+    }
+
+    @Test
+    void downloadableV2TemplateContainsUnitColumnsAndBaseQuantityInstructions() throws Exception {
+        byte[] bytes = mockMvc.perform(identity(get("/api/v1/store-resources/hotels/{hotelId}/imports/template", UNIT_HOTEL),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT)).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+        var book = workbook.read(bytes);
+        assertThat(book.sheet("物品与期初库存").rows().getFirst()).contains("采购单位", "采购换算比例", "领用耗用单位", "领用耗用换算比例");
+        assertThat(book.sheet("填写说明").rows().toString()).contains("全部按基础单位填写", "200支", "旧V1");
+    }
+
+    private JsonNode updateUnitItem(JsonNode item, String base, String factor, long version, int expectedStatus) throws Exception {
+        return response(identity(put("/api/v1/store-resources/hotels/{hotelId}/items/{itemId}", UNIT_HOTEL, item.path("id").asText()),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT).contentType("application/json")
+                .content(objectMapper.writeValueAsString(Map.of("sku", item.path("sku").asText(), "name", "换算测试物品",
+                        "category", "CONSUMABLE", "unit", base, "unitCost", 0, "minimumQuantity", 0,
+                        "purchaseUnit", "箱", "purchaseFactor", factor, "expectedVersion", version))), expectedStatus);
+    }
+
+    private JsonNode unitMovement(String key, Map<String, Object> body, int expectedStatus) throws Exception {
+        return response(identity(post("/api/v1/store-resources/hotels/{hotelId}/movements", UNIT_HOTEL),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT).header("Idempotency-Key", key)
+                .contentType("application/json").content(objectMapper.writeValueAsString(body)), expectedStatus);
+    }
+
+    private JsonNode unitImportPreview(String sku, String purchase, String factor) throws Exception {
+        LinkedHashMap<String, List<List<String>>> sheets = new LinkedHashMap<>();
+        sheets.put("物品与期初库存", List.of(
+                List.of("物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*",
+                        "规格型号", "采购单位", "采购换算比例", "领用耗用单位", "领用耗用换算比例"),
+                List.of(sku, "导入牙刷", "耗品", "支", "0.5", "10", "200", "100支/箱", purchase, factor, "支", "1")));
+        sheets.put("固定资产", List.of(List.of("资产编号*", "资产名称*", "资产分类*", "规格型号", "序列号", "计量单位*",
+                "原值*", "购置日期", "存放位置", "责任人工号", "责任人岗位编码", "状态")));
+        MockMultipartFile file = new MockMultipartFile("file", "unit-import.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", workbook.write(sheets));
+        return response(identity(multipart("/api/v1/store-resources/hotels/{hotelId}/imports/preview", UNIT_HOTEL).file(file),
+                TRANSFEROR_ACCOUNT, TRANSFEROR_ASSIGNMENT), 201);
     }
 
     private JsonNode handoverAction(

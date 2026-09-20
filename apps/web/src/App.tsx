@@ -1,6 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, demoFallbackEnabled, establishFederatedSession, hasAccessToken, login, logout } from './api/client'
 import { consumeLogoutEntry } from './app/logoutEntry'
+import { useScopedResource } from './shared/useScopedResource'
+import { WorkUsageFields } from './features/storeResources/WorkUsageFields'
+import { UsageEvidenceSummary } from './features/storeResources/WorkUsagePanel'
+import { loadUsageCatalogue, supportsWorkUsage, usageInput, usagePayload, usageValidation, type UsageCatalogue } from './features/storeResources/workUsage'
 import {
   bootstrapAssignmentId,
   bootstrapAssignments,
@@ -301,11 +305,12 @@ type PendingWorkEvidence = {
 
 type NewWorkEvidence = Omit<PendingWorkEvidence, 'draftFileId'>
 
-type WorkRecordObjectValue = Record<string, string | number | boolean>
+type WorkRecordObjectValue = Record<string, unknown>
 type WorkRecordFieldValue = string | number | boolean | string[] | WorkRecordObjectValue
 
 const isWorkRecordFieldValue = (entry: [string, unknown]): entry is [string, WorkRecordFieldValue] => {
   const value = entry[1]
+  if (entry[0] === 'inventoryQuantities' && usageInput(value)) return true
   if (['string', 'number', 'boolean'].includes(typeof value)) return true
   if (Array.isArray(value)) return value.every((item) => typeof item === 'string')
   return Boolean(value && typeof value === 'object'
@@ -420,6 +425,9 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
   const repeatableDailyRecords = item.executionPolicy?.repeatableDailyRecords === true
   const canSubmit = item.orgUnitId && assignmentOrgUnitId && employeeId && executionAssignmentId && item.formVersionId && executionAllowed
   const properties = item.formSchema?.properties ?? {}
+  const usageSupported = supportsWorkUsage(item)
+  const usageCatalogue = useScopedResource<UsageCatalogue | undefined>(`${identity.key}:${item.orgUnitId}:${item.businessDate}:${item.itemCode}:${usageSupported}:work-usage`,
+    (signal) => usageSupported && item.orgUnitId ? loadUsageCatalogue(identity, item.orgUnitId, signal, { businessDate: item.businessDate, itemCode: item.itemCode }) : Promise.resolve(undefined), undefined)
   const required = item.formSchema?.required ?? []
   const policy = item.submissionPolicy ?? { completionStatementRequired: true, exceptionStatementRequired: false, nextActionRequired: false, attachmentRequired: false, maxAttachments: 10, maxFileSizeBytes: 20 * 1024 * 1024, allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf', 'docx', 'xlsx'], evidenceRequirements: [] }
   const applicabilityConditionField = typeof item.applicabilityPolicy?.conditionField === 'string'
@@ -438,7 +446,9 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
     && (repeatableDailyRecords || item.status !== 'FAILED'))
   const fieldLabels: Record<string, string> = { checkins: '今日入住数', complaints: '客诉数量', vipReception: 'VIP接待情况', roomsChecked: '检查房间数', issues: '发现问题数', attendance: '出勤人数', employeeStatus: '员工状态', handover: '交接事项', operationsReviewed: '已查看经营数据', otaChecked: '已完成OTA巡查', employeeTalks: '员工沟通人数', summary: '完成情况', roomNumber: '房号', serviceContent: '服务内容描述', location: '房号', complaintContent: '客诉内容', initialHandling: '初步处理情况' }
   const requiredReady = required.every((key) => {
-    const value = payload[key]
+    const value = usageSupported && key === 'inventoryQuantities'
+      ? usagePayload(payload[key], usageCatalogue.data)
+      : payload[key]
     return Array.isArray(value)
       ? value.length > 0 && value.every((entry) => entry.trim().length > 0)
       : value && typeof value === 'object'
@@ -848,9 +858,15 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
     if (!isOwner || !item.executionPolicy?.delegationAllowed) return
     void loadDelegationCandidates(identity, item.id).then(setCandidates).catch(() => setCandidates([]))
   }, [identity.key, isOwner, item.id, item.executionPolicy?.delegationAllowed])
-  const recordPayload = () => Object.keys(properties).length ? payload : { summary: completion, exception: exception || null }
+  const recordPayload = () => Object.keys(properties).length ? (usageSupported && usageCatalogue.data?.referenceUsage
+    ? { ...payload, inventoryQuantities: usagePayload(payload.inventoryQuantities, usageCatalogue.data) } : payload) : { summary: completion, exception: exception || null }
   const validate = (forSubmission: boolean) => {
     if (!canSubmit) throw new Error('接口结果缺少组织、员工、任职或表单版本，无法安全提交。')
+    if (forSubmission && usageSupported) {
+      if (usageCatalogue.loading || usageCatalogue.error || !usageCatalogue.data) throw new Error('物品清单尚未读取成功，请刷新后再提交。')
+      const usageError = usageValidation(payload.inventoryQuantities, usageCatalogue.data)
+      if (usageError) throw new Error(usageError)
+    }
     if (forSubmission && !requiredReady) throw new Error('请完成表单中的所有必填项。')
     if (forSubmission && policy.completionStatementRequired && !completion.trim()) throw new Error('请填写完成情况。')
     if (forSubmission && policy.exceptionStatementRequired && !exception.trim()) throw new Error('请填写异常与协同事项。')
@@ -1103,12 +1119,19 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
       {item.delegateAssignmentId && <div className="inline-warning">本事项已转交给 {item.delegatedEmployeeName ?? '指定员工'}{item.ownerResting ? '，原执行人今日休息' : ''}。</div>}
       {isOwner && item.executionPolicy?.delegationAllowed && !viewOnly && <section className="action-box"><label>转交本项工作<select value={delegateAssignmentId} onChange={(event) => setDelegateAssignmentId(event.target.value)}><option value="">请选择同店员工</option>{candidates.map((candidate) => <option value={candidate.assignmentId} key={candidate.assignmentId}>{candidate.employeeName} · {candidate.positionName}</option>)}</select></label>{item.executionPolicy.oneClickRestTransfer && <label className="checkbox-line"><input type="checkbox" checked={ownerResting} onChange={(event) => setOwnerResting(event.target.checked)} />本人今日休息，将当日后续工作一键转交</label>}<label>转交说明<input value={delegationReason} onChange={(event) => setDelegationReason(event.target.value)} placeholder="选填" /></label><div className="button-row"><button className="secondary" disabled={delegating || !delegateAssignmentId} onClick={() => void saveDelegation()}>{delegating ? '处理中…' : ownerResting ? '确认一键转交' : '确认转交'}</button>{item.delegateAssignmentId && <button className="secondary" disabled={delegating} onClick={() => void revokeDelegation()}>撤销转交</button>}</div></section>}
       {loadingRecord && <div className="state-card"><div className="spinner" /><strong>正在读取已提交记录</strong></div>}
+      {existing?.inventoryUsage && <UsageEvidenceSummary usage={existing.inventoryUsage} />}
+      {!viewOnly && usageSupported && <section>
+        {usageCatalogue.loading && <p role="status">正在读取门店物品清单…</p>}
+        {!!usageCatalogue.error && <div className="inline-error" role="alert">门店物品清单读取失败，暂不能提交。<button type="button" className="secondary" onClick={() => void usageCatalogue.reload()}>重新读取</button></div>}
+        {usageCatalogue.data?.enabled && !loadingRecord && !conflictingLocalForm && <WorkUsageFields catalogue={usageCatalogue.data} value={payload.inventoryQuantities} disabled={!!saving || validatingAttachments} onChange={(value) => setPayload((current) => ({ ...current, inventoryQuantities: value }))} onRefresh={() => void usageCatalogue.reload()} />}
+        {usageCatalogue.data && !usageCatalogue.data.enabled && <p className="inline-warning">本店尚未启用耗用审核联动，下方文字数量只作为工作记录保存，不自动扣库存。请联系管理员在“日清耗用审核”配置审核人。</p>}
+      </section>}
       {conflictingLocalForm && <div className="inline-warning"><strong>发现两个版本的未提交内容</strong><p>服务器草稿已在其他页面或设备更新，本机仍保留一份未提交内容。请选择一个版本后再继续，系统不会自动覆盖。</p><div className="button-row"><button className="secondary" onClick={chooseServerDraft}>使用服务器最新草稿</button><button className="secondary" onClick={chooseLocalDraft}>恢复本机未提交内容</button></div></div>}
       {repeatableDailyRecords && <section className="detail-section"><h3>当日业务记录</h3><p className="muted">已形成 {item.records?.filter((record) => ['SUBMITTED', 'APPROVED'].includes(record.status)).length ?? 0} 条有效记录；每条记录独立保留照片、内容和审核结果，并全部汇总到今日日报。</p>{viewOnly && <div className="button-row"><button type="button" className="primary" onClick={() => void startNewOccurrence()}>+ 新增一条记录</button>{item.records?.map((record) => <button type="button" className={existing?.id === record.id ? 'primary' : 'secondary'} key={record.id} onClick={() => void openOccurrence(record.id)}>第 {record.seriesEntryNo ?? 1} 条 · {label(record.status)}</button>)}</div>}</section>}
       {existing && <section className="detail-section"><h3>最近一次提交 · {label(existing.status)}</h3><dl><div><dt>完成情况</dt><dd>{existing.completionStatement ?? String(existing.payload.serviceContent ?? existing.payload.complaintContent ?? existing.payload.summary ?? '—')}</dd></div><div><dt>异常事项</dt><dd>{existing.exceptionStatement ?? String(existing.payload.exception ?? '无')}</dd></div><div><dt>下一步行动</dt><dd>{existing.nextAction ?? '—'}</dd></div><div><dt>提交时间</dt><dd>{formatDate(existing.submittedAt)}</dd></div></dl>{existing.reviewReason && <div className="inline-warning">复核意见：{existing.reviewReason}</div>}<div className="attachment-list">{existing.attachments.map((attachment) => <button className="secondary" key={attachment.id} onClick={() => void preview(attachment.id, attachment.originalName, attachment.mediaType)}>{attachment.evidenceInstanceKey ? `编号 ${attachment.evidenceInstanceKey} · ` : ''}{attachment.originalName} · {Math.ceil(attachment.sizeBytes / 1024)}KB</button>)}</div>{existing.supplements.map((entry) => <p className="muted" key={entry.id}>补充：{entry.content} · {entry.submittedByName}</p>)}</section>}
       {viewOnly && !!attachments.length && <section className="detail-section"><div className="inline-warning"><strong>本机还有 {attachments.length} 个未上传附件</strong><p>该工作记录已在其他页面或设备提交，系统没有自动删除这些照片。你可以先逐个导出留存，再明确选择是否丢弃。</p></div><div className="pending-evidence-list">{attachments.map((entry) => <button type="button" className="secondary" key={entry.draftFileId} onClick={() => downloadPendingAttachment(entry)}>{entry.evidenceInstanceKey ? `编号 ${entry.evidenceInstanceKey}` : entry.checkpointCode ? '现场' : '文件'} · 导出 {entry.file.name}</button>)}</div><button type="button" className="danger-button" onClick={() => void discardLockedPendingAttachments()}>丢弃本机未上传附件</button></section>}
       {viewOnly && existing?.status === 'SUBMITTED' && <section className="action-box"><label>补充说明<textarea rows={3} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="待主管复核前可追加说明，原提交内容不会被覆盖" /></label><button className="secondary" disabled={saving === 'supplement' || !supplement.trim()} onClick={() => void addSupplement()}>{saving === 'supplement' ? '补充中…' : '追加说明'}</button></section>}
-      {!viewOnly && !loadingRecord && !conflictingLocalForm && <>{item.status === 'FAILED' && <div className="inline-warning">上一版未通过，本次提交会生成新的尝试记录，不覆盖历史证据。</div>}{Object.values(properties).some((definition) => definition.type !== 'array') && <div className="dynamic-form">{Object.entries(properties).filter(([, definition]) => definition.type !== 'array').map(([key, definition]) => <label key={key}>{fieldLabels[key] ?? definition.title ?? key}{required.includes(key) ? ' *' : ''}{definition.type === 'object' ? <textarea rows={4} value={structuredObjectText(payload[key])} placeholder="每行填写一项，例如：牙刷=2" onChange={(event) => setPayload((current) => ({ ...current, [key]: structuredObjectValue(event.target.value) }))} /> : definition.enum?.length ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))}><option value="">请选择</option>{definition.enum.map((option) => <option key={String(option)} value={String(option)}>{String(option)}</option>)}</select> : definition.type === 'boolean' ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : event.target.value === 'true' }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select> : ['integer', 'number'].includes(definition.type ?? '') ? <input type="number" min={definition.minimum} max={definition.maximum} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : Number(event.target.value) }))} /> : <textarea rows={3} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))} />}{definition.type === 'object' && <small>按“名称=数量或读数”逐行填写，系统会保存为结构化数据。</small>}{definition.description && <small>{definition.description}</small>}</label>)}</div>}
+      {!viewOnly && !loadingRecord && !conflictingLocalForm && <>{item.status === 'FAILED' && <div className="inline-warning">上一版未通过，本次提交会生成新的尝试记录，不覆盖历史证据。</div>}{Object.values(properties).some((definition) => definition.type !== 'array') && <div className="dynamic-form">{Object.entries(properties).filter(([key, definition]) => definition.type !== 'array' && !(key === 'inventoryQuantities' && usageSupported && (usageCatalogue.loading || usageCatalogue.error || usageCatalogue.data?.enabled))).map(([key, definition]) => <label key={key}>{fieldLabels[key] ?? definition.title ?? key}{required.includes(key) ? ' *' : ''}{definition.type === 'object' ? <textarea rows={4} value={structuredObjectText(payload[key])} placeholder="每行填写一项，例如：牙刷=2" onChange={(event) => setPayload((current) => ({ ...current, [key]: structuredObjectValue(event.target.value) }))} /> : definition.enum?.length ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))}><option value="">请选择</option>{definition.enum.map((option) => <option key={String(option)} value={String(option)}>{String(option)}</option>)}</select> : definition.type === 'boolean' ? <select value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : event.target.value === 'true' }))}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select> : ['integer', 'number'].includes(definition.type ?? '') ? <input type="number" min={definition.minimum} max={definition.maximum} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value === '' ? '' : Number(event.target.value) }))} /> : <textarea rows={3} value={String(payload[key] ?? '')} onChange={(event) => setPayload((current) => ({ ...current, [key]: event.target.value }))} />}{definition.type === 'object' && <small>按“名称=数量或读数”逐行填写，系统会保存为结构化数据。</small>}{definition.description && <small>{definition.description}</small>}</label>)}</div>}
         {itemSubmissionApplicable === false && <div className="inline-success">本项已明确为当日不适用；提交后将保留记录并从完成率分母排除，无需上传证据。</div>}
         {(!repeatableDailyRecords || policy.completionStatementRequired || policy.exceptionStatementRequired || policy.nextActionRequired) && <><label>完成情况{policy.completionStatementRequired ? ' *' : ''}<textarea rows={4} value={completion} onChange={(event) => setCompletion(event.target.value)} placeholder="说明实际完成内容、结果和关键数据" /></label><label>异常与需协同事项{policy.exceptionStatementRequired ? ' *' : ''}<textarea rows={3} value={exception} onChange={(event) => setException(event.target.value)} placeholder="没有异常请填写“无”" /></label><label>下一步行动{policy.nextActionRequired ? ' *' : ''}<textarea rows={2} value={nextAction} onChange={(event) => setNextAction(event.target.value)} placeholder="需要继续跟进时填写" /></label></>}
         {!!activeRequirements.length && <section className="camera-evidence">

@@ -63,6 +63,23 @@ class OpenApiContractTest {
                 "/api/v1/store-resources/hotels/{hotelId}/summary",
                 "/api/v1/store-resources/hotels/{hotelId}/balances",
                 "/api/v1/store-resources/hotels/{hotelId}/movements",
+                "/api/v1/store-resources/usage-catalog",
+                "/api/v1/store-resources/hotels/{hotelId}/usage-review-config",
+                "/api/v1/store-resources/hotels/{hotelId}/usage-reviewers",
+                "/api/v1/store-resources/hotels/{hotelId}/work-usage",
+                "/api/v1/store-resources/hotels/{hotelId}/work-usage/{recordId}/reverse",
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/catalog",
+                "/api/v1/store-resources/hotels/{hotelId}/costs",
+                "/api/v1/store-resources/hotels/{hotelId}/costs/entries",
+                "/api/v1/store-resources/hotels/{hotelId}/costs/closed-months",
+                "/api/v1/store-resources/hotels/{hotelId}/costs/per-room-use",
+                "/api/v1/store-resources/hotels/{hotelId}/costs/close",
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/rates/{itemId}",
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/orders",
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}",
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}/receipts",
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}/cancel",
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}/receipts/{receiptId}/reverse",
                 "/api/v1/store-resources/hotels/{hotelId}/assets",
                 "/api/v1/store-resources/hotels/{hotelId}/assignment-options",
                 "/api/v1/store-resources/hotels/{hotelId}/imports/template",
@@ -87,6 +104,26 @@ class OpenApiContractTest {
         assertThat(requestSchemaRef(movementPost))
                 .isEqualTo("#/components/schemas/CreateStoreInventoryMovement");
 
+        Map<String, Object> laundryPost = map(map(paths.get(
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/orders")).get("post"));
+        assertThat(requestSchemaRef(laundryPost)).isEqualTo("#/components/schemas/DispatchLaundry");
+        assertThat(String.valueOf(laundryPost.get("description"))).contains("store-resource.movement-create", "Idempotency-Key");
+        Map<String, Object> laundryReceive = map(map(paths.get(
+                "/api/v1/store-resources/hotels/{hotelId}/laundry/orders/{orderId}/receipts")).get("post"));
+        assertThat(requestSchemaRef(laundryReceive)).isEqualTo("#/components/schemas/ReceiveLaundry");
+        assertThat(String.valueOf(laundryReceive.get("description"))).contains("confirmWriteOff=true", "atom");
+        Map<String,Object> costClose=map(map(paths.get("/api/v1/store-resources/hotels/{hotelId}/costs/close")).get("post"));
+        assertThat(requestSchemaRef(costClose)).isEqualTo("#/components/schemas/CloseStoreCostMonth");
+        assertThat(String.valueOf(costClose.get("description"))).contains("store-resource.cost-close", "store-resource.read", "previewToken", "No reopen");
+        Map<String,Object> roomUses=map(map(paths.get("/api/v1/store-resources/hotels/{hotelId}/costs/per-room-use")).get("get"));
+        assertThat(responseSchemaRef(roomUses)).isEqualTo("#/components/schemas/RoomUseCostAnalysis");
+        assertThat(String.valueOf(roomUses.get("description"))).contains("store-resource.read", "hotel scope", "Read-only", "Explicit tenant binding", "immutable cost month close");
+        assertThat(String.valueOf(roomUses.get("description"))).contains("ALL_ROOM_USES_V1",
+                "mutually exclusive", "no hourly conversion", "legacy overnight-only", "total alone is sufficient");
+        Map<String,Object> legacyAlias=map(map(paths.get("/api/v1/store-resources/hotels/{hotelId}/costs/per-room-night")).get("get"));
+        assertThat(legacyAlias.get("deprecated")).isEqualTo(true);
+        assertThat(responseSchemaRef(legacyAlias)).isEqualTo("#/components/schemas/RoomUseCostAnalysis");
+
         Map<String, Object> applyImport = map(map(paths.get(
                 "/api/v1/store-resources/hotels/{hotelId}/imports/{importJobId}/actions/apply")).get("post"));
         assertThat(list(applyImport.get("parameters")))
@@ -103,6 +140,23 @@ class OpenApiContractTest {
                 .isEqualTo("#/components/schemas/CreateStoreResourceHandover");
 
         Map<String, Object> schemas = map(map(document.get("components")).get("schemas"));
+        Map<String, Object> roomNightAnalysis = map(schemas.get("RoomUseCostAnalysis"));
+        assertThat(list(roomNightAnalysis.get("required"))).contains("roomUseBasis");
+        assertThat(map(map(roomNightAnalysis.get("properties")).get("roomUseBasis")).get("const"))
+                .isEqualTo("ALL_ROOM_USES_V1");
+        Map<String, Object> roomNightSourceProperties = map(map(map(map(schemas.get("RoomUseCostWindow"))
+                .get("properties")).get("source")).get("properties"));
+        assertThat(map(roomNightSourceProperties.get("roomUses")).get("pattern"))
+                .isEqualTo("^\\d+$");
+        assertThat(map(roomNightSourceProperties.get("breakdown")).get("$ref"))
+                .isEqualTo("#/components/schemas/RoomUseBreakdown");
+        Map<String, Object> usageBreakdown = map(schemas.get("RoomUseBreakdown"));
+        assertThat(list(usageBreakdown.get("required"))).containsExactly("paidOvernightRoomUses",
+                "complimentaryRoomUses", "houseUseRoomUses", "paidHourlyRoomUses");
+        for (Object component : list(usageBreakdown.get("required"))) {
+            assertThat(map(map(usageBreakdown.get("properties")).get(String.valueOf(component))).get("pattern"))
+                    .isEqualTo("^\\d+$");
+        }
         assertThat(list(map(schemas.get("CreateStoreResourceHandover")).get("required")))
                 .containsExactly("transferorAssignmentId", "recipientAssignmentId", "approverAssignmentId");
         assertThat(list(map(schemas.get("StoreResourcePhysicalCount")).get("required")))
@@ -110,6 +164,14 @@ class OpenApiContractTest {
         assertThat(list(map(map(map(schemas.get("CreateStoreResourceItem"))
                 .get("properties")).get("category")).get("enum")))
                 .containsExactly("CONSUMABLE", "LINEN", "CLEANING_SUPPLY", "OPERATING_ITEM");
+        assertThat(map(map(schemas.get("CreateStoreResourceItem")).get("properties")))
+                .containsKeys("specification", "purchaseUnit", "purchaseFactor", "issueUnit", "issueFactor");
+        assertThat(map(map(schemas.get("CreateStoreInventoryMovement")).get("properties")))
+                .containsKeys("quantityUnit", "expectedItemVersion");
+        assertThat(list(map(schemas.get("WorkUsageInput")).get("required")))
+                .containsExactly("schemaVersion", "noUsage", "lines");
+        assertThat(requestSchemaRef(map(map(paths.get("/api/v1/store-resources/hotels/{hotelId}/usage-review-config")).get("put"))))
+                .isEqualTo("#/components/schemas/ConfigureWorkUsageReviewer");
     }
 
     private static String responseSchemaRef(Map<String, Object> operation) {

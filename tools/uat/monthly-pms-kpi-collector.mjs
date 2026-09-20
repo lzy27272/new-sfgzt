@@ -1,18 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { decryptCookie } from './report-source-cookie-crypto.mjs'
+import { persistPmsSummary } from './pms-summary-store.mjs'
 
 const require = createRequire(import.meta.url)
-const { chromium } = require('playwright')
 
 const REPORT_PATH = '/hotelpms/api/v1/report/jy07'
 const REPORT_NAME = 'JY07经理报表(月报)(固化)'
@@ -20,7 +14,6 @@ const OCCUPANCY_METRIC_NAME = '过夜房出租率'
 const REPORT_ORIGIN = 'https://pms.meituan.com'
 const LOGIN_PMS_PATH = '/hotelpms/api/v1/loginPms'
 const MAX_RESPONSE_BYTES = 12 * 1024 * 1024
-const MAX_STORED_RECORDS = 120
 const BROWSER_EXECUTABLE = process.env.UAT_BROWSER_EXECUTABLE
   ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 
@@ -232,17 +225,6 @@ const readJson = (path, fallback = null) => {
     throw new Error('CONFIG_FILE_MISSING')
   }
   return JSON.parse(readFileSync(path, 'utf8'))
-}
-
-const atomicWriteJson = (path, value) => {
-  mkdirSync(dirname(path), { recursive: true })
-  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`
-  writeFileSync(
-    temporaryPath,
-    `${JSON.stringify(value, null, 2)}\n`,
-    { encoding: 'utf8', mode: 0o600 },
-  )
-  renameSync(temporaryPath, path)
 }
 
 export const summarizeMonthlyRows = ({
@@ -477,6 +459,8 @@ const browserCookies = (cookie) => String(cookie ?? '')
 
 const fetchJy07WithBrowserContext = async ({ cookie, periodStart }) => {
   if (!existsSync(BROWSER_EXECUTABLE)) throw new Error('PMS_BROWSER_NOT_FOUND')
+  // Pure report/retention tests must not require a browser installation or vendor session.
+  const { chromium } = require('playwright')
   const browser = await chromium.launch({
     headless: true,
     executablePath: BROWSER_EXECUTABLE,
@@ -749,12 +733,7 @@ export const collectMonthlyPmsKpi = async ({
     ...summary,
     officialScoreEligible: true,
   }
-  const existing = readJson(outputPath, { schemaVersion: 1, records: [] })
-  const records = Array.isArray(existing.records) ? existing.records : []
-  atomicWriteJson(outputPath, {
-    schemaVersion: 1,
-    records: [...records, record].slice(-MAX_STORED_RECORDS),
-  })
+  persistPmsSummary({ outputPath, record })
   return record
 }
 

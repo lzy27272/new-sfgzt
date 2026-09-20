@@ -34,6 +34,11 @@
 .mutedPill { color: #687b88; background: #e9eef1; }
 .form { margin-bottom: 15px; padding: 15px; display: grid; gap: 13px; border: 1px solid #cfe0eb; border-radius: 12px; background: #f7fbfd; }
 .formGrid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.form fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.form input[readonly] { background: #edf2f5; color: #607687; }
+.unitNote { margin: 5px 0 0; color: #637f91; font-size: 10px; line-height: 1.65; overflow-wrap: anywhere; }
+.conversionPreview { padding: 12px; border: 1px solid #b9d9ea; border-radius: 9px; background: #edf7fd; color: #285b79; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.conversionPreview small { display: block; margin-top: 5px; color: #647e90; }
 .form label { display: grid; gap: 5px; color: #506c7e; font-size: 9px; font-weight: 800; }
 .form input, .form select, .form textarea { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid #cad9e2; border-radius: 8px; color: #1f425a; background: #fff; }
 .form textarea { resize: vertical; }
@@ -106,4 +111,81 @@
   .resourceList dl { grid-template-columns: 1fr; }
   .timeline article { grid-template-columns: 1fr; }
   .timeline p, .timeline small { grid-column: auto; }
+}
+
+.usageForm { padding: 18px; border: 1px solid #d5e4ec; border-radius: 14px; background: #f5fafd; margin: 14px 0; }
+.usageForm fieldset { padding: 0; border: 0; min-width: 0; }
+.usageForm p { line-height: 1.7; }
+.usageForm .checkbox { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
+.usageForm .checkbox input { width: auto; }
+.usageRow { display: grid; grid-template-columns: minmax(140px, 2fr) minmax(80px, 1fr) minmax(80px, 1fr) auto; gap: 10px; align-items: end; border-bottom: 1px solid #d5e4ec; padding: 14px 0; margin-bottom: 12px; }
+.usageRow label { min-width: 0; display: grid; gap: 6px; }
+.usageRow input, .usageRow select { width: 100%; min-width: 0; }
+.confirmation { border: 1px solid #ddae57; background: #fff7e7; border-radius: 12px; padding: 14px; }
+.laundryPanel { min-width: 0; }
+.laundryNotice { position: sticky; top: 78px; z-index: 4; }
+.laundryPanel > .unitNote { margin-bottom: 18px; }
+.laundryPanel p, .laundryPanel small, .laundryPanel label { font-size: 12px; overflow-wrap: anywhere; }
+.laundryPanel h3 { font-size: 15px; }
+.laundryRates { margin: 16px 0; padding: 14px; border: 1px solid #d5e4ec; border-radius: 12px; }
+.laundryRates summary { cursor: pointer; color: #285b79; font-weight: 700; padding: 5px 0 14px; }
+.laundryToolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 14px; margin: 18px 0; }
+.laundryToolbar label { display: grid; gap: 6px; }
+.laundryToolbar select { min-height: 42px; border: 1px solid #cfe0eb; border-radius: 8px; padding: 8px; }
+.laundryToolbar span { margin-right: auto; font-size: 12px; color: #637f91; }
+.laundryDetail { border: 1px solid #b9d9ea; border-radius: 14px; margin-top: 24px; padding: 20px; scroll-margin-top: 85px; }
+.laundryDetail > header, .laundryReceipts article > header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+.laundryDetail .resourceList { margin: 16px 0; }
+.laundryEntry { display: grid; grid-template-columns: minmax(130px, 2fr) minmax(100px, 1fr) auto; gap: 12px; align-items: end; margin: 14px 0; }
+.laundryEntry small { grid-column: 1/-1; }
+.laundryReceiptEntry, .laundryReceipts article { padding: 16px; border: 1px solid #d5e4ec; border-radius: 12px; margin: 14px 0; }
+.laundryReceiptEntry h4 { margin: 0 0 14px; }
+.laundryPanel input, .laundryPanel select, .laundryPanel button { min-height: 42px; }
+.laundryPanel .checkbox input { min-height: 18px; flex-shrink: 0; }
+.costPanel { min-width: 0; }
+.costPanel p { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.costPanel .metrics { margin: 18px 0; }
+.costPanel .metrics strong { font-size: clamp(16px, 1.4vw, 24px); overflow-wrap: anywhere; }
+.costWarnings { padding: 14px; background: #fff8e9; border: 1px solid #eed1a1; border-radius: 12px; }
+.costCategories { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 12px; margin: 16px 0; }
+.costCategories button { display: grid; gap: 8px; text-align: left; min-width: 0; overflow-wrap: anywhere; }
+.costEntries article { padding: 16px; margin: 12px 0; border: 1px solid #d5e4ec; border-radius: 12px; }
+.costEntries header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+.costEntries h4 { margin: 0; }
+.costPanel input { min-height: 42px; border: 1px solid #cfe0eb; border-radius: 8px; padding: 8px; }
+.costPanel .checkbox { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.costPanel .checkbox input { min-height: 18px; width: auto; flex-shrink: 0; }
+.roomNightPanel { margin: 24px 0; padding: 18px; border: 1px solid #b9d9ea; border-radius: 14px; min-width: 0; }
+.roomNightPanel h3 { margin: 0; font-size: 18px; }
+.roomNightPanel h4 { margin: 0 0 10px; font-size: 14px; }
+.roomNightPanel summary { cursor: pointer; font-size: 13px; }
+.roomNightPanel li { line-height: 1.8; overflow-wrap: anywhere; }
+.roomNightCards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+.roomNightCards article { border: 1px solid #d5e4ec; border-radius: 12px; padding: 16px; min-width: 0; }
+.roomNightCards strong { font-size: 20px; color: #23684f; overflow-wrap: anywhere; }
+.roomNightCards dl { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.roomNightCards dt { font-size: 12px; color: #607e8f; }
+.roomNightCards dd { margin: 6px 0 0; font-size: 16px; }
+.roomNightBreakdown { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.roomNightBreakdown > div { padding: 12px; border: 1px solid #d5e4ec; border-radius: 10px; min-width: 0; overflow-wrap: anywhere; }
+.roomNightBreakdown dt { font-size: 13px; color: #607e8f; }
+.roomNightBreakdown dd { margin: 8px 0 0; font-size: 16px; }
+@media (max-width: 760px) {
+  .roomNightPanel { padding: 12px; }
+  .roomNightCards { grid-template-columns: 1fr; }
+  .roomNightBreakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .costPanel .metrics { grid-template-columns: 1fr 1fr; }
+  .costCategories { grid-template-columns: 1fr 1fr; }
+  .costPanel input, .costPanel select, .costPanel textarea { font-size: 16px; }
+}
+@media (max-width: 760px) {
+  .laundryEntry { grid-template-columns: 1fr; }
+  .laundryDetail { padding: 12px; }
+  .laundryToolbar, .laundryDetail > header { align-items: stretch; }
+  .laundryToolbar label, .laundryToolbar .actions { width: 100%; }
+  .laundryPanel input, .laundryPanel select, .laundryPanel textarea { font-size: 16px; }
+}
+@media (max-width: 760px) {
+  .usageRow { grid-template-columns: 1fr 1fr; }
+  .usageRow > label:first-child, .usageRow > small { grid-column: 1 / -1; }
 }

@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.workdata;
 
 import cn.sifangguan.hotelaios.dailyreports.DailyReportRoutineProjectionService;
+import cn.sifangguan.hotelaios.storeassets.StoreWorkUsageService;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
@@ -45,6 +46,7 @@ public class WorkDataService {
     private final FormPayloadValidator payloadValidator;
     private final ObjectMapper objectMapper;
     private final DailyReportRoutineProjectionService routineProjectionService;
+    private final StoreWorkUsageService usageService;
 
     public WorkDataService(
             NamedParameterJdbcTemplate jdbc,
@@ -53,7 +55,8 @@ public class WorkDataService {
             AuditWriter auditWriter,
             FormPayloadValidator payloadValidator,
             ObjectMapper objectMapper,
-            DailyReportRoutineProjectionService routineProjectionService
+            DailyReportRoutineProjectionService routineProjectionService,
+            StoreWorkUsageService usageService
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -62,6 +65,7 @@ public class WorkDataService {
         this.payloadValidator = payloadValidator;
         this.objectMapper = objectMapper;
         this.routineProjectionService = routineProjectionService;
+        this.usageService = usageService;
     }
 
     @Transactional(readOnly = true)
@@ -232,6 +236,7 @@ public class WorkDataService {
                 where supplement.tenant_id = :tenantId and supplement.work_record_id = :recordId
                 order by supplement.created_at, supplement.id
                 """, params));
+        result.put("inventoryUsage", usageService.detail(recordId));
         return result;
     }
 
@@ -313,9 +318,10 @@ public class WorkDataService {
         auditWriter.record("DRAFT".equals(status) ? "WORK_RECORD_DRAFT_CREATED" : "WORK_RECORD_SUBMITTED",
                 "WORK_RECORD", id, request.payload().toString());
         if ("SUBMITTED".equals(status)) {
+            usageService.registerSubmitted(id);
             emitSubmitted(principal, id);
             routineProjectionService.projectWorkRecord(id);
-            if (applicable) {
+            if (applicable && !usageService.hasUsage(id)) {
                 notifySubmittedForReview(principal, id);
             }
         }
@@ -390,9 +396,10 @@ public class WorkDataService {
         updateExpectationAfterRecord(principal, record.expectationId(), "SUBMITTED", applicable,
                 record.repeatableEntry());
         auditWriter.record("WORK_RECORD_SUBMITTED", "WORK_RECORD", recordId, record.payloadJson());
+        usageService.registerSubmitted(recordId);
         emitSubmitted(principal, recordId);
         routineProjectionService.projectWorkRecord(recordId);
-        if (applicable) {
+        if (applicable && !usageService.hasUsage(recordId)) {
             notifySubmittedForReview(principal, recordId);
         }
         return response("id", recordId, "status", "SUBMITTED", "rowVersion", request.expectedVersion() + 1,
@@ -405,13 +412,17 @@ public class WorkDataService {
         accessPolicy.requirePermission("work-record.review");
         RecordAccess record = recordAccessForUpdate(principal, recordId);
         accessPolicy.requireOrgScope(record.targetOrgUnitId());
+        if (usageService.isReviewRetry(recordId, request.outcome().trim().toUpperCase(Locale.ROOT), request.expectedVersion())) {
+            return response("id", recordId, "status", record.status(), "rowVersion", request.expectedVersion() + 1);
+        }
         if (!"SUBMITTED".equals(record.status())) {
             throw new IllegalArgumentException("只有已提交工作记录可以复核");
         }
         if (principal.actorId().equals(record.submittedByAccountId())) {
             throw new AccessDeniedException("提交人不能复核自己的工作记录");
         }
-        requireConfiguredReviewer(principal, record);
+        if (usageService.hasUsage(recordId)) usageService.requireReviewer(recordId);
+        else requireConfiguredReviewer(principal, record);
         String outcome = request.outcome().trim().toUpperCase(Locale.ROOT);
         if (!Set.of("APPROVED", "REJECTED").contains(outcome)) {
             throw new IllegalArgumentException("复核结果只能是APPROVED或REJECTED");
@@ -446,6 +457,7 @@ public class WorkDataService {
                     .addValue("expectationId", record.expectationId())
                     .addValue("expectationStatus", "APPROVED".equals(outcome) ? "SATISFIED" : "FAILED"));
         }
+        usageService.onReview(recordId, outcome);
         auditWriter.record("WORK_RECORD_" + outcome, "WORK_RECORD", recordId,
                 "{\"reason\":\"" + jsonEscape(request.reason() == null ? "" : request.reason().trim()) + "\"}");
         auditWriter.emit("WORK_RECORD", recordId,

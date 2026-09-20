@@ -83,6 +83,7 @@ export type WorkPackage = {
 
 export type WorkExpectation = {
   id: string
+  itemCode?: string
   title: string
   packageName: string
   itemName: string
@@ -230,6 +231,7 @@ export type DelegationCandidate = {
 }
 
 export type SubmissionPolicy = {
+  inventoryUsage?: boolean
   completionStatementRequired: boolean
   exceptionStatementRequired: boolean
   nextActionRequired: boolean
@@ -282,6 +284,7 @@ export type WorkRecordAttachment = {
 
 export type WorkRecordDetail = {
   id: string
+  inventoryUsage?: import('./features/storeResources/workUsage').UsageDetail
   status: string
   rowVersion: number
   businessDate?: string

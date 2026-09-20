@@ -35,6 +35,13 @@ management:
         enabled: true
 
 app:
+  store-cost:
+    pms-source:
+      # Read-only sanitized PMS aggregates. Tenant binding is mandatory; disabled by default.
+      tenant-id: ${STORE_COST_PMS_TENANT_ID:}
+      allowed-tenant-code: ${STORE_COST_PMS_TENANT_CODE:${KPI_OTA_ALLOWED_TENANT_CODE:}}
+      hotel-directory-path: ${STORE_COST_PMS_HOTEL_DIRECTORY_PATH:${KPI_OTA_HOTEL_DIRECTORY_PATH:}}
+      summary-path: ${STORE_COST_PMS_SUMMARY_PATH:${KPI_PMS_MONTHLY_SUMMARY_PATH:}}
   group-management:
     work-plans-enabled: ${GROUP_MANAGEMENT_WORK_PLANS_ENABLED:false}
     executive-tasks-enabled: ${GROUP_MANAGEMENT_EXECUTIVE_TASKS_ENABLED:false}

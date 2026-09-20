@@ -43,13 +43,16 @@ import java.util.UUID;
 @Service
 public class StoreResourceImportService {
     private static final String IMPORT_TYPE = "STORE_RESOURCE_INITIALIZATION";
-    private static final int TEMPLATE_VERSION = 1;
+    private static final int TEMPLATE_VERSION = 2;
     private static final String ITEM_SHEET = "物品与期初库存";
     private static final String ASSET_SHEET = "固定资产";
     private static final String XLSX_MEDIA_TYPE =
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     private static final List<String> ITEM_HEADERS = List.of(
             "物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*");
+    private static final List<String> ITEM_TEMPLATE_HEADERS = List.of(
+            "物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*",
+            "规格型号", "采购单位", "采购换算比例", "领用耗用单位", "领用耗用换算比例");
     private static final List<String> ASSET_HEADERS = List.of(
             "资产编号*", "资产名称*", "资产分类*", "规格型号", "序列号", "计量单位*",
             "原值*", "购置日期", "存放位置", "责任人工号", "责任人岗位编码", "状态");
@@ -89,14 +92,16 @@ public class StoreResourceImportService {
                 List.of("1", "只支持.xlsx，文件不超过10MB、合计不超过5000行；禁止公式、宏和外部链接。"),
                 List.of("2", "不要修改工作表名称和首行字段。整份文件先预检，有任一错误时不会写入正式数据。"),
                 List.of("3", "物品分类可填：耗品、布草、清洁用品、经营物品。期初数量为0时只创建物品主档。"),
-                List.of("4", "单位成本用于计算期初库存金额；期初库存会生成不可变的期初导入流水。"),
+                List.of("4", "计量单位是库存基础单位；单位成本、最低库存、期初数量全部按基础单位填写。期初数量×单位成本为期初金额，并生成不可变流水。"),
                 List.of("5", "责任人工号可留空；同一员工有多个任职时请同时填写责任人岗位编码。"),
                 List.of("6", "资产状态可填：在用、维修中、损坏、盘亏、已退役；留空默认为在用。"),
-                List.of("7", "当前版本为仅新增模式：门店内重复SKU或资产编号会被拦截，不会覆盖原数据。")
+                List.of("7", "当前版本为仅新增模式：门店内重复SKU或资产编号会被拦截，不会覆盖原数据。"),
+                List.of("8", "规格和采购/领用耗用单位为选填；不填则沿用基础单位。1个采购或领用耗用单位=换算比例个基础单位；异名单位必须填比例，同名单位比例必须相同。"),
+                List.of("9", "例如基础单位支、采购单位箱、采购换算比例100；2箱期初库存请填200支，单支成本填0.5而非整箱50。旧V1模板仍可导入。")
         ));
-        sheets.put(ITEM_SHEET, List.of(ITEM_HEADERS));
+        sheets.put(ITEM_SHEET, List.of(ITEM_TEMPLATE_HEADERS));
         sheets.put(ASSET_SHEET, List.of(ASSET_HEADERS));
-        return new ImportFile("新店库存与固定资产导入模板_V1.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
+        return new ImportFile("新店库存与固定资产导入模板_V2.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
     }
 
     @Transactional
@@ -169,7 +174,7 @@ public class StoreResourceImportService {
             jobId = uuid(existing.get("id"));
             int changed = jdbc.update("""
                     update tabular_import_job
-                    set original_name = :name, scan_status = :scanStatus, status = :status,
+                    set original_name = :name, scan_status = :scanStatus, status = :status, template_version = :templateVersion,
                         parsed_payload = cast(:payload as jsonb), validation_errors = cast(:errors as jsonb),
                         row_count = :rowCount, valid_row_count = :validRows, error_count = :errorCount
                     where tenant_id = :tenantId and target_org_unit_id = :hotelId
@@ -240,20 +245,25 @@ public class StoreResourceImportService {
         List<UUID> assetIds = new ArrayList<>();
         String fileSha = String.valueOf(job.get("sha256"));
         for (ImportedItem item : payload.items()) {
+            StoreItemUnits units = new StoreItemUnits(item.unit(), item.purchaseUnit(), item.purchaseFactor(),
+                    item.issueUnit(), item.issueFactor());
             UUID itemId = UUID.randomUUID();
             itemIds.add(itemId);
             MapSqlParameterSource params = hotel(principal, hotelId)
                     .addValue("itemId", itemId).addValue("sku", item.sku()).addValue("name", item.name())
                     .addValue("category", item.category()).addValue("unit", item.unit())
+                    .addValue("specification", text(item.specification()))
+                    .addValue("purchaseUnit", units.purchaseUnit()).addValue("purchaseFactor", units.purchaseFactor())
+                    .addValue("issueUnit", units.issueUnit()).addValue("issueFactor", units.issueFactor())
                     .addValue("unitCost", scale4(item.unitCost()))
                     .addValue("minimumQuantity", scale4(item.minimumQuantity()))
                     .addValue("actorId", principal.actorId());
             jdbc.update("""
                     insert into store_resource_item
                       (id, tenant_id, hotel_org_unit_id, sku, name, category, unit,
-                       unit_cost, minimum_quantity, created_by)
+                       unit_cost, minimum_quantity, specification, purchase_unit, purchase_factor, issue_unit, issue_factor, created_by)
                     values (:itemId, :tenantId, :hotelId, :sku, :name, :category, :unit,
-                            :unitCost, :minimumQuantity, :actorId)
+                            :unitCost, :minimumQuantity, :specification, :purchaseUnit, :purchaseFactor, :issueUnit, :issueFactor, :actorId)
                     """, params);
             BigDecimal quantity = scale4(item.openingQuantity());
             BigDecimal value = quantity.multiply(scale4(item.unitCost())).setScale(4, RoundingMode.HALF_UP);
@@ -272,12 +282,13 @@ public class StoreResourceImportService {
                            quantity_delta, quantity_before, quantity_after,
                            unit_cost_snapshot, value_delta, reason, source_type, source_id,
                            idempotency_key, request_hash, actor_assignment_id, actor_account_id,
-                           occurred_at)
+                           occurred_at, base_unit_snapshot, input_unit, input_quantity, conversion_factor, input_unit_cost)
                         values
                           (:movementId, :tenantId, :hotelId, :itemId, 'OPENING',
                            :quantity, 0, :quantity, :unitCost, :inventoryValue,
                            '新店期初库存导入', 'IMPORT', :jobId,
-                           :movementKey, :requestHash, :actorAssignmentId, :actorId, :occurredAt)
+                           :movementKey, :requestHash, :actorAssignmentId, :actorId, :occurredAt,
+                           :unit, :unit, :quantity, 1, :unitCost)
                         """, params.addValue("movementId", movementId).addValue("jobId", jobId)
                         .addValue("movementKey", movementKey)
                         .addValue("requestHash", sha256((fileSha + "|" + item.rowNumber()).getBytes(StandardCharsets.UTF_8)))
@@ -365,6 +376,22 @@ public class StoreResourceImportService {
             BigDecimal unitCost = decimal(cell(row, columns, "单位成本"), ITEM_SHEET, rowNumber, "单位成本", 4, 14, errors);
             BigDecimal minimum = decimal(cell(row, columns, "最低库存"), ITEM_SHEET, rowNumber, "最低库存", 4, 14, errors);
             BigDecimal opening = decimal(cell(row, columns, "期初数量"), ITEM_SHEET, rowNumber, "期初数量", 4, 14, errors);
+            String specification = optional(cell(row, columns, "规格型号"), ITEM_SHEET, rowNumber, "规格型号", 240, errors);
+            String purchaseUnit = optional(cell(row, columns, "采购单位"), ITEM_SHEET, rowNumber, "采购单位", 32, errors);
+            String issueUnit = optional(cell(row, columns, "领用耗用单位"), ITEM_SHEET, rowNumber, "领用耗用单位", 32, errors);
+            BigDecimal purchaseFactor = optionalFactor(row, columns, "采购换算比例", rowNumber, errors);
+            BigDecimal issueFactor = optionalFactor(row, columns, "领用耗用换算比例", rowNumber, errors);
+            if (unit != null) {
+                try {
+                    StoreItemUnits units = new StoreItemUnits(unit, purchaseUnit, purchaseFactor, issueUnit, issueFactor);
+                    purchaseUnit = units.purchaseUnit();
+                    purchaseFactor = units.purchaseFactor();
+                    issueUnit = units.issueUnit();
+                    issueFactor = units.issueFactor();
+                } catch (IllegalArgumentException exception) {
+                    errors.add(new ImportError(ITEM_SHEET, rowNumber, "单位换算", exception.getMessage(), ""));
+                }
+            }
             if (unitCost != null && opening != null) {
                 BigDecimal openingValue = opening.multiply(unitCost).setScale(4, RoundingMode.HALF_UP);
                 if ((long) openingValue.precision() - openingValue.scale() > 16) {
@@ -376,9 +403,16 @@ public class StoreResourceImportService {
                 errors.add(new ImportError(ITEM_SHEET, rowNumber, "物品编码", "文件内物品编码重复", sku));
             }
             result.add(new ImportedItem(rowNumber, text(sku), text(name), text(category), text(unit),
-                    value(unitCost), value(minimum), value(opening)));
+                    value(unitCost), value(minimum), value(opening), specification,
+                    purchaseUnit, purchaseFactor, issueUnit, issueFactor));
         }
         return List.copyOf(result);
+    }
+
+    private BigDecimal optionalFactor(List<String> row, Map<String, Integer> columns, String field,
+                                      int rowNumber, List<ImportError> errors) {
+        String raw = cell(row, columns, field);
+        return raw.isBlank() ? null : decimal(raw, ITEM_SHEET, rowNumber, field, 6, 12, errors);
     }
 
     private List<ImportedAssetDraft> parseAssets(XlsxWorkbook.SheetData sheet, List<ImportError> errors) {
@@ -875,7 +909,9 @@ public class StoreResourceImportService {
 
     public record ImportedItem(
             int rowNumber, String sku, String name, String category, String unit,
-            BigDecimal unitCost, BigDecimal minimumQuantity, BigDecimal openingQuantity
+            BigDecimal unitCost, BigDecimal minimumQuantity, BigDecimal openingQuantity,
+            String specification, String purchaseUnit, BigDecimal purchaseFactor,
+            String issueUnit, BigDecimal issueFactor
     ) {
     }
 

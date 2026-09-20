@@ -125,6 +125,14 @@ public class StoreResourceService {
         return jdbc.queryForList("""
                 select item.id, item.hotel_org_unit_id, item.sku, item.name,
                        item.category, item.unit, item.unit_cost, item.minimum_quantity,
+                       item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
+                       (exists (select 1 from store_inventory_movement history
+                         where history.tenant_id = item.tenant_id and history.hotel_org_unit_id = item.hotel_org_unit_id
+                           and history.item_id = item.id)
+                        or exists (select 1 from store_work_usage_line usage_line
+                          where usage_line.tenant_id=item.tenant_id and usage_line.item_id=item.id)
+                        or exists (select 1 from store_laundry_rate rate
+                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)) as base_unit_locked,
                        item.status, item.row_version,
                        coalesce(balance.quantity, 0) as current_quantity,
                        coalesce(balance.inventory_value, 0) as inventory_value,
@@ -144,24 +152,29 @@ public class StoreResourceService {
     public Map<String, Object> createItem(UUID hotelId, StoreResourceModels.CreateItemRequest request) {
         TenantPrincipal principal = prepareHotel("store-resource.item-manage", hotelId);
         String category = enumValue(request.category(), ITEM_CATEGORIES, "物品分类");
+        StoreItemUnits units = new StoreItemUnits(request.unit(), request.purchaseUnit(), request.purchaseFactor(),
+                request.issueUnit(), request.issueFactor());
         UUID id = UUID.randomUUID();
         MapSqlParameterSource params = hotel(principal, hotelId)
                 .addValue("id", id)
                 .addValue("sku", clean(request.sku()))
                 .addValue("name", clean(request.name()))
                 .addValue("category", category)
-                .addValue("unit", clean(request.unit()))
-                .addValue("unitCost", scale(request.unitCost()))
-                .addValue("minimumQuantity", scale(request.minimumQuantity()))
+                .addValue("unit", units.baseUnit())
+                .addValue("specification", request.specification() == null ? "" : request.specification().trim())
+                .addValue("purchaseUnit", units.purchaseUnit()).addValue("purchaseFactor", units.purchaseFactor())
+                .addValue("issueUnit", units.issueUnit()).addValue("issueFactor", units.issueFactor())
+                .addValue("unitCost", StoreItemUnits.exact(request.unitCost(), 4, 14, "基础单位成本"))
+                .addValue("minimumQuantity", StoreItemUnits.exact(request.minimumQuantity(), 4, 14, "最低库存"))
                 .addValue("actorId", principal.actorId());
         try {
             jdbc.update("""
                     insert into store_resource_item
                       (id, tenant_id, hotel_org_unit_id, sku, name, category, unit,
-                       unit_cost, minimum_quantity, created_by)
+                       unit_cost, minimum_quantity, specification, purchase_unit, purchase_factor, issue_unit, issue_factor, created_by)
                     values
                       (:id, :tenantId, :hotelId, :sku, :name, :category, :unit,
-                       :unitCost, :minimumQuantity, :actorId)
+                       :unitCost, :minimumQuantity, :specification, :purchaseUnit, :purchaseFactor, :issueUnit, :issueFactor, :actorId)
                     """, params);
         } catch (DataIntegrityViolationException exception) {
             throw conflict("该门店已存在相同物品编码");
@@ -172,7 +185,7 @@ public class StoreResourceService {
                 values (:tenantId, :hotelId, :id, 0, 0)
                 """, params);
         audit(principal, "STORE_RESOURCE_ITEM_CREATED", "STORE_RESOURCE_ITEM", id,
-                Map.of("hotelId", hotelId, "sku", clean(request.sku()), "category", category));
+                Map.of("hotelId", hotelId, "sku", clean(request.sku()), "category", category, "units", units));
         return requireItem(principal, hotelId, id);
     }
 
@@ -182,12 +195,35 @@ public class StoreResourceService {
     ) {
         TenantPrincipal principal = prepareHotel("store-resource.item-manage", hotelId);
         String category = enumValue(request.category(), ITEM_CATEGORIES, "物品分类");
+        Map<String, Object> current = lockItem(principal, hotelId, itemId);
+        if (((Number) current.get("row_version")).longValue() != request.expectedVersion()) {
+            throw conflict("物品配置已变化，请刷新后重试");
+        }
+        // Omitted optional fields from older clients preserve existing conversion configuration.
+        boolean baseChanged = !clean(request.unit()).equals(current.get("unit"));
+        if (baseChanged && Boolean.TRUE.equals(requireItem(principal, hotelId, itemId).get("base_unit_locked"))) {
+            throw conflict("该物品已有库存、耗用记录或洗涤配置，不能修改基础单位；规格变更请新建物品");
+        }
+        if (!category.equals(current.get("category")) && jdbc.queryForObject(
+                "select count(*) from store_laundry_rate where tenant_id=:tenantId and item_id=:itemId",
+                hotel(principal, hotelId).addValue("itemId", itemId), Long.class) > 0) {
+            throw conflict("该物品已有洗涤配置，不能修改布草分类；请新建物品");
+        }
+        StoreItemUnits units = new StoreItemUnits(request.unit(),
+                request.purchaseUnit() == null ? (baseChanged ? request.unit() : (String) current.get("purchase_unit")) : request.purchaseUnit(),
+                request.purchaseFactor() == null && request.purchaseUnit() == null
+                        ? (baseChanged ? BigDecimal.ONE : decimal(current.get("purchase_factor"))) : request.purchaseFactor(),
+                request.issueUnit() == null ? (baseChanged ? request.unit() : (String) current.get("issue_unit")) : request.issueUnit(),
+                request.issueFactor() == null && request.issueUnit() == null
+                        ? (baseChanged ? BigDecimal.ONE : decimal(current.get("issue_factor"))) : request.issueFactor());
         int changed;
         try {
             changed = jdbc.update("""
                     update store_resource_item
                     set sku = :sku, name = :name, category = :category, unit = :unit,
                         unit_cost = :unitCost, minimum_quantity = :minimumQuantity,
+                        specification = :specification, purchase_unit = :purchaseUnit, purchase_factor = :purchaseFactor,
+                        issue_unit = :issueUnit, issue_factor = :issueFactor,
                         row_version = row_version + 1
                     where tenant_id = :tenantId and hotel_org_unit_id = :hotelId
                       and id = :itemId and row_version = :expectedVersion
@@ -196,16 +232,20 @@ public class StoreResourceService {
                     .addValue("sku", clean(request.sku()))
                     .addValue("name", clean(request.name()))
                     .addValue("category", category)
-                    .addValue("unit", clean(request.unit()))
-                    .addValue("unitCost", scale(request.unitCost()))
-                    .addValue("minimumQuantity", scale(request.minimumQuantity()))
+                    .addValue("unit", units.baseUnit())
+                    .addValue("specification", request.specification() == null ? current.get("specification") : request.specification().trim())
+                    .addValue("purchaseUnit", units.purchaseUnit()).addValue("purchaseFactor", units.purchaseFactor())
+                    .addValue("issueUnit", units.issueUnit()).addValue("issueFactor", units.issueFactor())
+                    .addValue("unitCost", StoreItemUnits.exact(request.unitCost(), 4, 14, "基础单位成本"))
+                    .addValue("minimumQuantity", StoreItemUnits.exact(request.minimumQuantity(), 4, 14, "最低库存"))
                     .addValue("expectedVersion", request.expectedVersion()));
         } catch (DataIntegrityViolationException exception) {
             throw conflict("该门店已存在相同物品编码");
         }
         changed(changed, "物品配置已变化，请刷新后重试");
         audit(principal, "STORE_RESOURCE_ITEM_UPDATED", "STORE_RESOURCE_ITEM", itemId,
-                Map.of("hotelId", hotelId, "sku", clean(request.sku())));
+                Map.of("hotelId", hotelId, "sku", clean(request.sku()),
+                        "unitsBefore", StoreItemUnits.from(current), "unitsAfter", units));
         return requireItem(principal, hotelId, itemId);
     }
 
@@ -265,7 +305,11 @@ public class StoreResourceService {
         TenantPrincipal principal = prepareHotel("store-resource.read", hotelId);
         int bounded = Math.max(1, Math.min(limit, 500));
         return jdbc.queryForList("""
-                select movement.id, movement.item_id, item.sku, item.name as item_name, item.unit,
+                select movement.id, movement.item_id, item.sku, item.name as item_name,
+                       coalesce(movement.base_unit_snapshot, item.unit) as unit,
+                       coalesce(movement.input_unit, item.unit) as input_unit,
+                       coalesce(movement.input_quantity, movement.quantity_delta) as input_quantity,
+                       coalesce(movement.conversion_factor, 1) as conversion_factor, movement.input_unit_cost,
                        movement.movement_type, movement.quantity_delta,
                        movement.quantity_before, movement.quantity_after,
                        movement.unit_cost_snapshot, movement.value_delta, movement.reason,
@@ -288,37 +332,102 @@ public class StoreResourceService {
             UUID hotelId, String idempotencyKey, StoreResourceModels.CreateMovementRequest request
     ) {
         TenantPrincipal principal = prepareHotel("store-resource.movement-create", hotelId);
+        if (request.occurredAt() != null && request.occurredAt().isAfter(OffsetDateTime.now(ZoneOffset.UTC))) {
+            throw new IllegalArgumentException("库存变动时间不能晚于当前时间");
+        }
         String key = cleanKey(idempotencyKey);
         String type = enumValue(request.movementType(), MOVEMENT_TYPES, "库存变动类型");
         if (request.quantity() == null || request.quantity().compareTo(BigDecimal.ZERO) == 0) {
             throw new IllegalArgumentException("库存变动数量不能为0");
         }
-        BigDecimal submitted = scale(request.quantity());
-        BigDecimal delta = switch (type) {
+        BigDecimal submitted = StoreItemUnits.exact(request.quantity(), 4, 14, "录入数量");
+        BigDecimal inputQuantity = switch (type) {
             case "RECEIPT", "RETURN" -> submitted.abs();
             case "CONSUMPTION", "DAMAGE" -> submitted.abs().negate();
             default -> submitted;
         };
-        String requestHash = sha256(request.itemId() + "|" + type + "|" + delta + "|"
-                + request.unitCost() + "|" + clean(request.reason()) + "|" + request.occurredAt());
+        String hashInput = request.itemId() + "|" + type + "|" + inputQuantity + "|"
+                + request.unitCost() + "|" + clean(request.reason()) + "|" + request.occurredAt();
+        // Keep the old hash for base-unit-only callers, including in-flight retries after upgrade.
+        if (request.quantityUnit() != null && !request.quantityUnit().isBlank()) {
+            hashInput += "|unit=" + request.quantityUnit().trim().toLowerCase(java.util.Locale.ROOT);
+        }
+        String requestHash = sha256(hashInput);
+        jdbc.queryForList("select pg_advisory_xact_lock(hashtextextended(:movementKey, 63))",
+                new MapSqlParameterSource("movementKey", principal.tenantId() + ":" + key));
         List<Map<String, Object>> existing = jdbc.queryForList("""
-                select movement.*, item.name as item_name, item.unit,
-                       coalesce(account.display_name, '系统') as operator_name
+                select movement.id, movement.request_hash, movement.hotel_org_unit_id
                 from store_inventory_movement movement
-                join store_resource_item item on item.tenant_id = movement.tenant_id and item.id = movement.item_id
-                left join user_account account on account.tenant_id = movement.tenant_id
-                  and account.id = movement.actor_account_id
                 where movement.tenant_id = :tenantId and movement.idempotency_key = :idempotencyKey
                 """, base(principal).addValue("idempotencyKey", key));
         if (!existing.isEmpty()) {
-            if (!requestHash.equals(existing.getFirst().get("request_hash"))) {
+            if (!hotelId.equals(existing.getFirst().get("hotel_org_unit_id"))
+                    || !requestHash.equals(existing.getFirst().get("request_hash"))) {
                 throw conflict("同一幂等键不能用于不同的库存变动");
             }
-            return existing.getFirst();
+            return requireMovement(principal, uuid(existing.getFirst().get("id")));
         }
 
-        Map<String, Object> item = requireItem(principal, hotelId, request.itemId());
+        Map<String, Object> item = lockItem(principal, hotelId, request.itemId());
         if (!"ACTIVE".equals(item.get("status"))) throw conflict("该物品已停用，不能登记库存变动");
+        if (request.expectedItemVersion() != null
+                && request.expectedItemVersion() != ((Number) item.get("row_version")).longValue()) {
+            throw conflict("物品规格或换算比例已变化，请刷新后核对再提交");
+        }
+        StoreItemUnits units = StoreItemUnits.from(item);
+        String inputUnit = units.selectedUnit(request.quantityUnit());
+        BigDecimal factor = units.factorFor(inputUnit);
+        BigDecimal delta = units.baseQuantity(inputQuantity, inputUnit);
+        return postMovementFact(principal, hotelId, request, item, type, inputQuantity, units,
+                inputUnit, factor, delta, key, requestHash, "MANUAL", null, null);
+    }
+
+    // Package-private: called only after the linked work record is locked and its reviewer authorized.
+    // Unit/quantity snapshots were validated at submission; later ratio edits must not change them.
+    Map<String, Object> postWorkUsage(TenantPrincipal principal, UUID hotelId, UUID recordId,
+                                    Map<String, Object> line, boolean reversal, BigDecimal originalValue) {
+        return postUsageRevision(principal, hotelId, recordId, "WORK_RECORD", line, reversal, originalValue);
+    }
+
+    Map<String, Object> postUsageRevision(TenantPrincipal principal, UUID hotelId, UUID sourceId, String sourceType,
+                                    Map<String, Object> line, boolean reversal, BigDecimal originalValue) {
+        UUID itemId = uuid(line.get("item_id"));
+        Map<String, Object> item = lockItem(principal, hotelId, itemId);
+        String baseUnit = (String) line.get("base_unit");
+        if (!baseUnit.equals(item.get("unit"))) throw conflict("库存基础单位发生变化，无法安全过账");
+        String inputUnit = (String) line.get("input_unit");
+        BigDecimal factor = decimal(line.get("conversion_factor"));
+        BigDecimal quantity = decimal(line.get("input_quantity")).multiply(BigDecimal.valueOf(reversal ? 1 : -1));
+        BigDecimal delta = decimal(line.get("base_quantity")).multiply(BigDecimal.valueOf(reversal ? 1 : -1));
+        StoreItemUnits units = new StoreItemUnits(baseUnit, inputUnit, factor, inputUnit, factor);
+        String key = "work-usage:" + sourceId + ":" + itemId + (reversal ? ":reverse" : ":consume");
+        var request = new StoreResourceModels.CreateMovementRequest(itemId, reversal ? "RETURN" : "CONSUMPTION",
+                quantity, null, (reversal ? "日清耗用冲销：" : "日清耗用审核：") + line.get("item_name"),
+                null, inputUnit, null);
+        return postMovementFact(principal, hotelId, request, item, request.movementType(), quantity, units,
+                inputUnit, factor, delta, key, sha256(key), sourceType, sourceId, reversal ? originalValue : null);
+    }
+
+    // Called inside the laundry transaction, after order and item locks and explicit write-off confirmation.
+    Map<String, Object> postLaundryLoss(TenantPrincipal principal, UUID hotelId, UUID receiptId,
+                                       Map<String, Object> line, boolean reversal, BigDecimal originalValue) {
+        UUID itemId = uuid(line.get("item_id"));
+        Map<String, Object> item = lockItem(principal, hotelId, itemId);
+        String unit = (String) line.get("base_unit");
+        if (!unit.equals(item.get("unit"))) throw conflict("布草基础单位发生变化，无法安全过账");
+        BigDecimal delta = decimal(line.get("written_off_quantity")).multiply(BigDecimal.valueOf(reversal ? 1 : -1));
+        String key = "laundry:" + receiptId + ":" + itemId + (reversal ? ":reverse" : ":loss");
+        var request = new StoreResourceModels.CreateMovementRequest(itemId, reversal ? "RETURN" : "DAMAGE", delta,
+                null, (reversal ? "洗涤报损冲销：" : "洗涤确认报损：") + line.get("difference_reason"), null, unit, null);
+        var units = new StoreItemUnits(unit, unit, BigDecimal.ONE, unit, BigDecimal.ONE);
+        return postMovementFact(principal, hotelId, request, item, request.movementType(), delta, units,
+                unit, BigDecimal.ONE, delta, key, sha256(key), "LAUNDRY", receiptId, reversal ? originalValue : null);
+    }
+
+    private Map<String, Object> postMovementFact(TenantPrincipal principal, UUID hotelId,
+            StoreResourceModels.CreateMovementRequest request, Map<String, Object> item, String type,
+            BigDecimal inputQuantity, StoreItemUnits units, String inputUnit, BigDecimal factor,
+            BigDecimal delta, String key, String requestHash, String sourceType, UUID sourceId, BigDecimal reversalValue) {
         Map<String, Object> balance = jdbc.queryForMap("""
                 select quantity, inventory_value, row_version
                 from store_inventory_balance
@@ -326,23 +435,44 @@ public class StoreResourceService {
                 for update
                 """, hotel(principal, hotelId).addValue("itemId", request.itemId()));
         BigDecimal before = decimal(balance.get("quantity"));
-        BigDecimal after = before.add(delta).setScale(4, RoundingMode.HALF_UP);
+        BigDecimal after = StoreItemUnits.exact(before.add(delta), 4, 14, "变动后库存");
         if (after.compareTo(BigDecimal.ZERO) < 0) {
-            throw conflict("库存不足：当前库存为 " + before.stripTrailingZeros().toPlainString());
+            throw conflict(item.get("name") + " 库存不足：当前库存为 " + before.stripTrailingZeros().toPlainString()
+                    + " " + units.baseUnit() + "，本次审核未扣库，请先补充库存或退回更正");
+        }
+        if (delta.signum() < 0 && "LINEN".equals(item.get("category"))
+                && StoreLaundryService.heldQuantity(jdbc, principal, hotelId, request.itemId()).compareTo(after) > 0) {
+            throw conflict("本次扣减会占用尚未回收的送洗布草，请先核对洗涤台账");
         }
         BigDecimal valueBefore = decimal(balance.get("inventory_value"));
         BigDecimal configuredCost = decimal(item.get("unit_cost"));
         BigDecimal averageCost = before.compareTo(BigDecimal.ZERO) > 0
                 ? valueBefore.divide(before, 4, RoundingMode.HALF_UP)
                 : configuredCost;
-        BigDecimal unitCost = delta.signum() < 0
-                ? averageCost
-                : request.unitCost() == null ? averageCost : scale(request.unitCost());
-        if (unitCost.compareTo(BigDecimal.ZERO) < 0) throw new IllegalArgumentException("单位成本不能小于0");
-        BigDecimal valueDelta = delta.multiply(unitCost).setScale(4, RoundingMode.HALF_UP);
-        BigDecimal valueAfter = after.compareTo(BigDecimal.ZERO) == 0
-                ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)
-                : valueBefore.add(valueDelta).max(BigDecimal.ZERO).setScale(4, RoundingMode.HALF_UP);
+        BigDecimal inputUnitCost = request.unitCost() == null ? null
+                : StoreItemUnits.exact(request.unitCost(), 4, 14, "所选单位成本");
+        if (inputUnitCost != null && inputUnitCost.signum() < 0) throw new IllegalArgumentException("单位成本不能小于0");
+        if (delta.signum() < 0) inputUnitCost = null; // Outflows always use weighted-average stock value.
+        BigDecimal unitCost = inputUnitCost == null ? averageCost
+                : StoreItemUnits.exact(inputUnitCost.divide(factor, 4, RoundingMode.HALF_UP), 4, 14, "基础单位成本");
+        BigDecimal valueDelta;
+        if (delta.signum() < 0) {
+            // Use the unrounded balance ratio, and consume all remaining value on the final outflow.
+            valueDelta = after.signum() == 0 ? valueBefore.negate()
+                    : valueBefore.multiply(delta).divide(before, 4, RoundingMode.HALF_UP);
+        } else {
+            valueDelta = inputUnitCost == null
+                    ? (before.signum() > 0 ? valueBefore.multiply(delta).divide(before, 4, RoundingMode.HALF_UP)
+                        : delta.multiply(configuredCost))
+                    : inputQuantity.multiply(inputUnitCost);
+            valueDelta = valueDelta.setScale(4, RoundingMode.HALF_UP);
+        }
+        if (reversalValue != null) {
+            valueDelta = reversalValue;
+            unitCost = reversalValue.divide(delta, 4, RoundingMode.HALF_UP);
+        }
+        valueDelta = StoreItemUnits.exact(valueDelta, 4, 16, "变动金额");
+        BigDecimal valueAfter = StoreItemUnits.exact(valueBefore.add(valueDelta), 4, 16, "变动后库存金额");
         int updated = jdbc.update("""
                 update store_inventory_balance
                 set quantity = :after, inventory_value = :valueAfter, row_version = row_version + 1
@@ -359,15 +489,19 @@ public class StoreResourceService {
                 insert into store_inventory_movement
                   (id, tenant_id, hotel_org_unit_id, item_id, movement_type,
                    quantity_delta, quantity_before, quantity_after, unit_cost_snapshot,
-                   value_delta, reason, source_type, idempotency_key, request_hash,
-                   actor_assignment_id, actor_account_id, occurred_at)
+                   value_delta, reason, source_type, source_id, idempotency_key, request_hash,
+                   actor_assignment_id, actor_account_id, occurred_at,
+                   base_unit_snapshot, input_unit, input_quantity, conversion_factor, input_unit_cost)
                 values
                   (:id, :tenantId, :hotelId, :itemId, :movementType,
                    :delta, :before, :after, :unitCost, :valueDelta, :reason,
-                   'MANUAL', :idempotencyKey, :requestHash,
-                   :actorAssignmentId, :actorId, :occurredAt)
+                   :sourceType, :sourceId, :idempotencyKey, :requestHash,
+                   :actorAssignmentId, :actorId, :occurredAt,
+                   :baseUnit, :inputUnit, :inputQuantity, :conversionFactor, :inputUnitCost)
                 """, hotel(principal, hotelId)
                 .addValue("id", movementId)
+                .addValue("sourceType", sourceType)
+                .addValue("sourceId", sourceId)
                 .addValue("itemId", request.itemId())
                 .addValue("movementType", type)
                 .addValue("delta", delta)
@@ -375,6 +509,9 @@ public class StoreResourceService {
                 .addValue("after", after)
                 .addValue("unitCost", unitCost)
                 .addValue("valueDelta", valueDelta)
+                .addValue("baseUnit", units.baseUnit()).addValue("inputUnit", inputUnit)
+                .addValue("inputQuantity", inputQuantity).addValue("conversionFactor", factor)
+                .addValue("inputUnitCost", inputUnitCost)
                 .addValue("reason", clean(request.reason()))
                 .addValue("idempotencyKey", key)
                 .addValue("requestHash", requestHash)
@@ -384,7 +521,9 @@ public class StoreResourceService {
                         ? OffsetDateTime.now(ZoneOffset.UTC) : request.occurredAt()));
         audit(principal, "STORE_INVENTORY_MOVEMENT_CREATED", "STORE_INVENTORY_MOVEMENT", movementId,
                 Map.of("hotelId", hotelId, "itemId", request.itemId(), "type", type,
-                        "quantityBefore", before, "quantityAfter", after));
+                        "quantityBefore", before, "quantityAfter", after,
+                        "inputQuantity", inputQuantity, "inputUnit", inputUnit, "conversionFactor", factor,
+                        "baseUnit", units.baseUnit(), "valueDelta", valueDelta));
         return requireMovement(principal, movementId);
     }
 
@@ -946,6 +1085,14 @@ public class StoreResourceService {
         return jdbc.queryForMap("""
                 select item.id, item.hotel_org_unit_id, item.sku, item.name,
                        item.category, item.unit, item.unit_cost, item.minimum_quantity,
+                       item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
+                       (exists (select 1 from store_inventory_movement history
+                         where history.tenant_id = item.tenant_id and history.hotel_org_unit_id = item.hotel_org_unit_id
+                           and history.item_id = item.id)
+                        or exists (select 1 from store_work_usage_line usage_line
+                          where usage_line.tenant_id=item.tenant_id and usage_line.item_id=item.id)
+                        or exists (select 1 from store_laundry_rate rate
+                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)) as base_unit_locked,
                        item.status, item.row_version,
                        coalesce(balance.quantity, 0) as current_quantity,
                        coalesce(balance.inventory_value, 0) as inventory_value,
@@ -957,10 +1104,24 @@ public class StoreResourceService {
                 """, hotel(principal, hotelId).addValue("itemId", itemId));
     }
 
+    private Map<String, Object> lockItem(TenantPrincipal principal, UUID hotelId, UUID itemId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                select * from store_resource_item
+                where tenant_id = :tenantId and hotel_org_unit_id = :hotelId and id = :itemId
+                for update
+                """, hotel(principal, hotelId).addValue("itemId", itemId));
+        if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "该门店不存在此物品");
+        return rows.getFirst();
+    }
+
     private Map<String, Object> requireMovement(TenantPrincipal principal, UUID movementId) {
         return jdbc.queryForMap("""
                 select movement.id, movement.hotel_org_unit_id as hotel_id, movement.item_id,
-                       item.name as item_name, item.unit, movement.movement_type,
+                       item.name as item_name, coalesce(movement.base_unit_snapshot, item.unit) as unit,
+                       coalesce(movement.input_unit, item.unit) as input_unit,
+                       coalesce(movement.input_quantity, movement.quantity_delta) as input_quantity,
+                       coalesce(movement.conversion_factor, 1) as conversion_factor, movement.input_unit_cost,
+                       movement.movement_type,
                        movement.quantity_delta, movement.quantity_before, movement.quantity_after,
                        movement.unit_cost_snapshot, movement.value_delta, movement.reason,
                        movement.source_type, movement.source_id,

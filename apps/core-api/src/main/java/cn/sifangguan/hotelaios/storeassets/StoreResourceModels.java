@@ -23,7 +23,12 @@ public final class StoreResourceModels {
             @NotBlank String category,
             @NotBlank @Size(max = 32) String unit,
             @NotNull @DecimalMin("0") BigDecimal unitCost,
-            @NotNull @DecimalMin("0") BigDecimal minimumQuantity
+            @NotNull @DecimalMin("0") BigDecimal minimumQuantity,
+            @Size(max = 240) String specification,
+            @Size(max = 32) String purchaseUnit,
+            BigDecimal purchaseFactor,
+            @Size(max = 32) String issueUnit,
+            BigDecimal issueFactor
     ) {
     }
 
@@ -34,7 +39,12 @@ public final class StoreResourceModels {
             @NotBlank @Size(max = 32) String unit,
             @NotNull @DecimalMin("0") BigDecimal unitCost,
             @NotNull @DecimalMin("0") BigDecimal minimumQuantity,
-            long expectedVersion
+            long expectedVersion,
+            @Size(max = 240) String specification,
+            @Size(max = 32) String purchaseUnit,
+            BigDecimal purchaseFactor,
+            @Size(max = 32) String issueUnit,
+            BigDecimal issueFactor
     ) {
     }
 
@@ -47,7 +57,9 @@ public final class StoreResourceModels {
             @NotNull BigDecimal quantity,
             BigDecimal unitCost,
             @NotBlank @Size(max = 1000) String reason,
-            OffsetDateTime occurredAt
+            OffsetDateTime occurredAt,
+            @Size(max = 32) String quantityUnit,
+            Long expectedItemVersion
     ) {
     }
 

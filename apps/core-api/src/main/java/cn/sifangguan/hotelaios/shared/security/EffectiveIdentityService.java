@@ -64,6 +64,18 @@ public class EffectiveIdentityService {
         return resolveInternal(tenantId, accountId, correlationId, requestedAssignmentId, true);
     }
 
+    /** Trusted eligibility checks only. Invalid candidates must not roll back the caller's transaction. */
+    @Transactional(readOnly = true)
+    public java.util.Optional<TenantPrincipal> inspectAssignment(
+            UUID tenantId, UUID accountId, UUID correlationId, UUID assignmentId) {
+        if (assignmentId == null) return java.util.Optional.empty();
+        try {
+            return java.util.Optional.of(resolveInternal(tenantId, accountId, correlationId, assignmentId, true));
+        } catch (IdentityAuthenticationException | BusinessIdentityException ex) {
+            return java.util.Optional.empty();
+        }
+    }
+
     private TenantPrincipal resolveInternal(
             UUID tenantId,
             UUID accountId,

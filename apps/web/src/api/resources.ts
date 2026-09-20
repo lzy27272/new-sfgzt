@@ -1,5 +1,7 @@
 import { apiBlob, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
 import { dashboardApiPaths } from '../app/dashboardContract'
+import { camelizeKeysDeep } from '../features/shared/featureApi'
+import type { UsageDetail } from '../features/storeResources/workUsage'
 import { materializeFileForUpload, readableUploadError } from '../app/uploadFiles'
 import type {
   AccessibleHotels,
@@ -196,6 +198,7 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
     })(),
     workPackageVersionId: text(item, ['workPackageVersionId', 'work_package_version_id'], '') || undefined,
     workPackageItemId: text(item, ['workPackageItemId', 'work_package_item_id'], '') || undefined,
+    itemCode: text(item, ['itemCode', 'item_code'], '') || undefined,
     recordId: text(item, ['recordId', 'workRecordId', 'record_id'], '') || records[0]?.id,
     firstSubmittedAt: text(item, ['firstSubmittedAt', 'first_submitted_at'], '') || records.at(-1)?.submittedAt,
     latestSubmittedAt: text(item, ['latestSubmittedAt', 'latest_submitted_at'], '') || records[0]?.submittedAt,
@@ -207,6 +210,7 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
       const raw = object(jsonColumn(value(item, 'submissionPolicy', 'submission_policy')))
       return {
         completionStatementRequired: raw.completionStatementRequired !== false,
+        inventoryUsage: raw.inventoryUsage === true,
         exceptionStatementRequired: raw.exceptionStatementRequired === true,
         nextActionRequired: raw.nextActionRequired === true,
         attachmentRequired: raw.attachmentRequired === true,
@@ -453,6 +457,7 @@ function normalizeWorkRecord(item: JsonObject): WorkRecordDetail {
     rowVersion: number(item, ['rowVersion', 'row_version'], 0),
     businessDate: text(item, ['businessDate', 'business_date'], '') || undefined,
     payload: rawPayload && typeof rawPayload === 'object' ? rawPayload as Record<string, unknown> : {},
+    inventoryUsage: object(item.inventoryUsage).status ? camelizeKeysDeep<UsageDetail>(item.inventoryUsage) : undefined,
     employeeName: text(item, ['employeeName', 'employee_name'], '提交员工'),
     positionName: text(item, ['positionName', 'position_name'], '执行岗位'),
     formName: text(item, ['formName', 'form_name'], '岗位工作记录'),
@@ -548,11 +553,12 @@ export async function loadWorkRecord(identity: ApiIdentity, recordId: string, fa
   }, fallback ?? normalizeWorkRecord({ id: recordId }))
 }
 
-export async function loadTeamWorkCase(identity: ApiIdentity, initial: WorkExpectation) {
+export async function loadTeamWorkCase(identity: ApiIdentity, initial: WorkExpectation, requestedRecordId?: string) {
   return withFallback<TeamWorkCase>(async () => {
     const expectation = normalizeExpectation(object(await apiRequest<unknown>(`/work-expectations/${initial.id}`, identity)))
-    const recordId = expectation.recordId ?? expectation.records?.[0]?.id
+    const recordId = requestedRecordId ?? expectation.recordId ?? expectation.records?.[0]?.id
     const record = recordId ? normalizeWorkRecord(object(await apiRequest<unknown>(`/work-data/records/${recordId}`, identity))) : undefined
+    if (requestedRecordId && record?.workExpectationId !== expectation.id) throw new Error('所选记录不属于此工作，请刷新后重试')
     if (record) {
       const attachments = await apiRequest<unknown>(`/work-data/records/${record.id}/attachments`, identity).catch(() => record.attachments)
       record.attachments = asList<JsonObject>(attachments).map(normalizeAttachment)
