@@ -107,13 +107,15 @@ class WorkVisibilityIntegrationTest {
         assertThat(summary.findValuesAsText("assignmentId")).doesNotContain(MANAGER.toString());
         JsonNode dashboard = mapper.valueToTree(dashboards.hotelDashboard(HOTEL));
         assertThat(dashboard.path("risks").findValuesAsText("source_id")).doesNotContain(managerWork.toString());
+        // These fixtures use the calendar date, which differs from the default business day before 04:00.
+        LocalDate fixtureDay = LocalDate.now(ZoneId.of("Asia/Shanghai"));
         JsonNode board = mapper.valueToTree(boards.board(false, HOTEL, null, null,
-                null, null, null, null, false, 0, 200));
+                fixtureDay, fixtureDay, null, null, false, 0, 200));
         assertThat(board.path("items").findValuesAsText("id")).contains(ownWork.toString())
                 .doesNotContain(managerWork.toString());
         assertThat(board.path("groups").findValuesAsText("group_id")).doesNotContain(MANAGER.toString());
         JsonNode filtered = mapper.valueToTree(boards.board(false, HOTEL, null, MANAGER,
-                null, null, null, null, false, 0, 200));
+                fixtureDay, fixtureDay, null, null, false, 0, 200));
         assertThat(filtered.path("items")).isEmpty();
         assertThat(filtered.path("filtered").path("item_count").asInt()).isZero();
     }
@@ -180,12 +182,13 @@ class WorkVisibilityIntegrationTest {
         assertThatThrownBy(() -> work.expectationDetail(otherWork)).isInstanceOf(AccessDeniedException.class);
         JsonNode summary = mapper.valueToTree(work.teamWorkbenchSummary(LocalDate.now(ZoneId.of("Asia/Shanghai"))));
         assertThat(summary.findValuesAsText("assignmentId")).doesNotContain(MANAGER.toString());
+        LocalDate fixtureDay = LocalDate.now(ZoneId.of("Asia/Shanghai"));
         JsonNode ownBoard = mapper.valueToTree(boards.board(true, null, null, null,
-                null, null, null, null, false, 0, 200));
+                fixtureDay, fixtureDay, null, null, false, 0, 200));
         assertThat(ownBoard.path("items").findValuesAsText("id")).contains(shared.toString())
                 .doesNotContain(otherWork.toString());
         JsonNode teamBoard = mapper.valueToTree(boards.board(false, HOTEL, null, null,
-                null, null, null, null, false, 0, 200));
+                fixtureDay, fixtureDay, null, null, false, 0, 200));
         assertThat(teamBoard.path("groups").findValuesAsText("group_id")).doesNotContain(MANAGER.toString());
     }
 
