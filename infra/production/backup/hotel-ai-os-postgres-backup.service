@@ -1,5 +1,5 @@
 [Unit]
-Description=Hotel AI OS encrypted PostgreSQL backup
+Description=Hotel AI OS complete encrypted backup and read-only export
 After=postgresql.service
 Requires=postgresql.service
 
@@ -15,3 +15,4 @@ UMask=0077
 PrivateTmp=true
 ProtectHome=true
 NoNewPrivileges=true
+TimeoutStartSec=6h

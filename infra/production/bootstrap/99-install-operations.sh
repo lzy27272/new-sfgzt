@@ -7,6 +7,12 @@ install -o root -g root -m 0750 \
   "${stage}/backup-postgres.sh" \
   /usr/local/lib/hotel-ai-os/backup-postgres.sh
 install -o root -g root -m 0750 \
+  "${stage}/publish-backup-manifest.py" \
+  /usr/local/lib/hotel-ai-os/publish-backup-manifest.py
+install -o root -g root -m 0750 \
+  "${stage}/configure-backup-pull.sh" \
+  /usr/local/lib/hotel-ai-os/configure-backup-pull.sh
+install -o root -g root -m 0750 \
   "${stage}/health-check.sh" \
   /usr/local/lib/hotel-ai-os/health-check.sh
 
@@ -21,6 +27,8 @@ for unit_name in \
 done
 
 bash -n /usr/local/lib/hotel-ai-os/backup-postgres.sh
+bash -n /usr/local/lib/hotel-ai-os/configure-backup-pull.sh
+python3 -m py_compile /usr/local/lib/hotel-ai-os/publish-backup-manifest.py
 bash -n /usr/local/lib/hotel-ai-os/health-check.sh
 systemd-analyze verify \
   /etc/systemd/system/hotel-ai-os-postgres-backup.service \
