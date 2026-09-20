@@ -31,7 +31,8 @@ public class AiDataService {
     private final AuditWriter audit;
     public AiDataService(NamedParameterJdbcTemplate jdbc,TenantDatabaseContext db,AccessPolicy access,
                          WorkVisibilityPolicy visibility,TaskService tasks,ObjectMapper json,AuditWriter audit) {
-        this.jdbc=jdbc;this.db=db;this.access=access;this.visibility=visibility;this.tasks=tasks;this.json=json;this.audit=audit;
+        this.jdbc=jdbc;this.db=db;this.access=access;this.visibility=visibility;this.tasks=tasks;
+        this.json=json.copy().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);this.audit=audit;
     }
     @Transactional(readOnly=true)
     public Map<String,Object> catalog() {
@@ -129,21 +130,24 @@ public class AiDataService {
         }
         boolean more=rows.size()>PAGE_SIZE; var page=rows.stream().limit(PAGE_SIZE).toList();
         UUID snapshotId=UUID.randomUUID(); String payload=stringify(page);
+        String dataHash=AiDataSupport.dataHash(json,parse(payload));
         if(payload.length()>2_000_000) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,"数据超过单次上限，请缩小范围");
         // Expired temporary evidence can be removed: reports retain an independent immutable copy.
         jdbc.update("delete from ai_data_snapshot where id in (select id from ai_data_snapshot where tenant_id=:tenantId and account_id=:actorId and expires_at<now() limit 2000)",params);
         // Bounded audit snapshots, never the arbitrary source payloads or database credentials.
+        jdbc.queryForObject("select pg_advisory_xact_lock(hashtextextended(:key,70))",Map.of("key",p.tenantId()+":"+p.actorId()),Object.class);
         Integer count=jdbc.queryForObject("select count(*) from ai_data_snapshot where tenant_id=:tenantId and account_id=:actorId and created_at>now()-interval '1 day'",params,Integer.class);
         if(count!=null && count>=1000) throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,"已达到每日取数上限");
         params.addValue("id",snapshotId).addValue("scope",AiDataSupport.scope(p)).addValue("dataset",q.dataset())
-            .addValue("binding",binding).addValue("query",stringify(q)).addValue("data",payload).addValue("hash",AiDataSupport.hash(payload));
+            .addValue("binding",binding).addValue("query",stringify(q)).addValue("data",payload).addValue("hash",dataHash);
         jdbc.update("""
             insert into ai_data_snapshot(id,tenant_id,account_id,scope_hash,dataset,source_binding_id,query_json,data_json,data_hash)
             values(:id,:tenantId,:actorId,:scope,:dataset,:binding,cast(:query as jsonb),cast(:data as jsonb),:hash)
             """,params);
         audit.record("AI_DATA_READ","AI_DATA_SNAPSHOT",snapshotId,stringify(Map.of("dataset",q.dataset(),"rowCount",page.size())));
         var result=new LinkedHashMap<String,Object>(); result.put("snapshotId",snapshotId);result.put("dataset",q.dataset());
-        result.put("query",q);result.put("capturedAt",OffsetDateTime.now(ZoneOffset.UTC));result.put("dataHash",AiDataSupport.hash(payload));
+        result.put("query",q);result.put("capturedAt",OffsetDateTime.now(ZoneOffset.UTC));
+        result.put("dataHash",dataHash);result.put("hashFormat","sorted-json-decimal-sha256-v1");
         result.put("rows",page);result.put("hasMore",more);result.put("nextOffset",more?q.offset()+PAGE_SIZE:null);result.put("notice",caveat);
         result.put("coverage",q.dataset().equals("OTA_DAILY")?coverage(page,q,more):Map.of("state","OBSERVED_RECORDS_ONLY","expectedTotalVerified",false));
         return result;
@@ -177,7 +181,9 @@ public class AiDataService {
             // actual periods, but require at least one snapshot for the reported period.
             hasPrimaryPeriod |= input.from().toString().equals(query.path("from").asText())
                 && input.to().toString().equals(query.path("to").asText());
-            row.put("query_json",query);row.put("data_json",parse(row.get("data_json").toString())); evidence.add(row);
+            JsonNode original=parse(row.get("data_json").toString());
+            if(!AiDataSupport.dataHash(json,original).equals(row.get("data_hash"))) throw new IllegalStateException("分析证据校验失败");
+            row.put("query_json",query);row.put("data_json",original);row.put("hash_format","sorted-json-decimal-sha256-v1");evidence.add(row);
         }
         if(!hasPrimaryPeriod) throw new IllegalArgumentException("至少一份快照须对应报告周期；对比周期可另附快照");
         String encoded=stringify(evidence);if(encoded.length()>4_000_000) throw new IllegalArgumentException("报告证据过大，请按门店或期间拆分");
@@ -238,7 +244,11 @@ public class AiDataService {
     }
     static Map<String,Object> coverage(List<Map<String,Object>> rows,AiDataModels.Query q,boolean more) {
         var days=new HashSet<String>();boolean complete=true;
-        for(var row:rows) {days.add(String.valueOf(row.get("business_date")));complete &= "COMPLETE".equals(row.get("completeness"));}
+        for(var row:rows) {
+            days.add(String.valueOf(row.get("business_date")));
+            complete &= "COMPLETE".equals(row.get("completeness")) && row.get("room_revenue")!=null
+                && row.get("sold_room_nights")!=null && row.get("effective_sellable_room_nights")!=null;
+        }
         long expected=ChronoUnit.DAYS.between(q.from(),q.to())+1;
         boolean closed=q.to().isBefore(LocalDate.now(ZoneId.of("Asia/Shanghai")));
         return Map.of("state",q.offset()==0&&!more&&complete&&days.size()==expected&&closed?"COMPLETE":"PARTIAL",

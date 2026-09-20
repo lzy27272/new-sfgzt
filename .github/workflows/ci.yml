@@ -307,6 +307,11 @@ jobs:
     if: needs.classify.outputs.requires_core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Fixtures combine SQL current_date with Asia/Shanghai business dates.
+    # Match the tenant calendar in both the JVM and the isolated PostgreSQL;
+    # otherwise CI changes day eight hours later and fails after China midnight.
+    env:
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

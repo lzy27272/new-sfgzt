@@ -143,6 +143,9 @@ class AiDataIntegrationTest {
     }
 
     @Test void rlsAndInputBoundsRemainFailClosed() throws Exception {
+        assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app','ai_data_source_binding','INSERT')",Boolean.class)).isFalse();
+        assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app','ai_analysis_report','UPDATE')",Boolean.class)).isFalse();
+        assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app','ai_analysis_report','DELETE')",Boolean.class)).isFalse();
         jdbc.execute("create role ai_rls_probe nologin");
         jdbc.execute("grant select on ai_data_connection,ai_data_source_binding,ai_data_snapshot,ai_analysis_report to ai_rls_probe");
         try(var connection=PG.getPostgresDatabase().getConnection();var statement=connection.createStatement()) {
@@ -165,6 +168,10 @@ class AiDataIntegrationTest {
     private JsonNode read(MvcResult result) throws Exception {return json.readTree(result.getResponse().getContentAsString());}
     private MockHttpServletRequestBuilder identity(MockHttpServletRequestBuilder r) {return r.header("X-Tenant-Id",TENANT).header("X-Actor-Id",ADMIN).header("X-SFG-AI-Action","1");}
     private MockHttpServletRequestBuilder rpc(String token,String body) {return post("/api/v1/ai-data/mcp").header("Authorization","Bearer "+token).contentType("application/json").content(body);}
-    private static EmbeddedPostgres start(){try{return EmbeddedPostgres.builder().start();}catch(Exception e){throw new ExceptionInInitializerError(e);}}
+    private static EmbeddedPostgres start(){try{
+        var pg=EmbeddedPostgres.builder().start();
+        try(var c=pg.getPostgresDatabase().getConnection();var s=c.createStatement()){s.execute("create role hotel_ai_os_app nologin");}
+        return pg;
+    }catch(Exception e){throw new ExceptionInInitializerError(e);}}
     private static String url(){try(var c=PG.getPostgresDatabase().getConnection()){return c.getMetaData().getURL();}catch(Exception e){throw new ExceptionInInitializerError(e);}}
 }

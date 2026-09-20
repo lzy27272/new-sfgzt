@@ -137,6 +137,8 @@ END $$;
 REVOKE ALL ON FUNCTION ai_read_ota_history(UUID,TEXT,DATE,DATE,INTEGER,INTEGER) FROM PUBLIC;
 DO $$ BEGIN
   IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='hotel_ai_os_app') THEN
+    -- V4 grants CRUD on future tables by default; explicitly replace those grants.
+    REVOKE ALL ON ai_data_connection,ai_data_source_binding,ai_data_snapshot,ai_analysis_report FROM hotel_ai_os_app;
     GRANT SELECT,INSERT,UPDATE ON ai_data_connection TO hotel_ai_os_app;
     GRANT SELECT ON ai_data_source_binding TO hotel_ai_os_app;
     GRANT SELECT,INSERT,DELETE ON ai_data_snapshot TO hotel_ai_os_app;
