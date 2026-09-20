@@ -9,6 +9,7 @@ import cn.sifangguan.hotelaios.shared.events.BusinessEventPublisher;
 import cn.sifangguan.hotelaios.shared.idempotency.CommandIdempotencyService;
 import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkVisibilityPolicy;
 import cn.sifangguan.hotelaios.shared.time.BusinessDayService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -55,6 +56,7 @@ public class DailyReportService {
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy accessPolicy;
+    private final WorkVisibilityPolicy workVisibility;
     private final CommandIdempotencyService idempotency;
     private final AuditWriter auditWriter;
     private final BusinessEventPublisher eventPublisher;
@@ -66,6 +68,7 @@ public class DailyReportService {
             NamedParameterJdbcTemplate jdbc,
             TenantDatabaseContext databaseContext,
             AccessPolicy accessPolicy,
+            WorkVisibilityPolicy workVisibility,
             CommandIdempotencyService idempotency,
             AuditWriter auditWriter,
             BusinessEventPublisher eventPublisher,
@@ -76,6 +79,7 @@ public class DailyReportService {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
+        this.workVisibility = workVisibility;
         this.idempotency = idempotency;
         this.auditWriter = auditWriter;
         this.eventPublisher = eventPublisher;
@@ -92,6 +96,10 @@ public class DailyReportService {
     ) {
         accessPolicy.requirePermission("daily-report.read");
         TenantPrincipal principal = prepare();
+        MapSqlParameterSource params = base(principal).addValue("actorId", principal.actorId())
+                .addValue("businessDate", businessDate).addValue("status", normalizeStatus(status))
+                .addValue("positionAssignmentId", positionAssignmentId);
+        String visibility = workVisibility.reportScope(principal, params).personal("report");
         return jdbc.queryForList("""
                 select report.id, report.hotel_org_unit_id as "hotelOrgUnitId",
                        report.org_unit_id as "orgUnitId", report.employee_id as "employeeId",
@@ -119,15 +127,13 @@ public class DailyReportService {
                   on template.tenant_id = template_version.tenant_id
                  and template.id = template_version.template_id
                 where report.tenant_id = :tenantId and employee.account_id = :actorId
+                  and %s
                   and (cast(:businessDate as date) is null or report.business_date = :businessDate)
                   and (cast(:status as varchar) is null or report.report_status = :status)
                   and (cast(:positionAssignmentId as uuid) is null
                        or report.position_assignment_id = :positionAssignmentId)
                 order by report.business_date desc, report.created_at desc
-                """, base(principal).addValue("actorId", principal.actorId())
-                .addValue("businessDate", businessDate)
-                .addValue("status", normalizeStatus(status))
-                .addValue("positionAssignmentId", positionAssignmentId));
+                """.formatted(visibility), params);
     }
 
     @Transactional(readOnly = true)
@@ -135,6 +141,9 @@ public class DailyReportService {
         accessPolicy.requirePermission("daily-report.team-read");
         TenantPrincipal principal = prepare();
         accessPolicy.requireOrgScope(orgUnitId);
+        MapSqlParameterSource params = base(principal).addValue("orgUnitId", orgUnitId)
+                .addValue("businessDate", businessDate).addValue("status", normalizeStatus(status));
+        String visibility = workVisibility.reportScope(principal, params).report("report");
         return jdbc.queryForList("""
                 select report.id, report.hotel_org_unit_id as "hotelOrgUnitId",
                        report.org_unit_id as "orgUnitId", report.employee_id as "employeeId",
@@ -162,6 +171,7 @@ public class DailyReportService {
                   on template.tenant_id = template_version.tenant_id
                  and template.id = template_version.template_id
                 where report.tenant_id = :tenantId
+                  and %s
                   and exists (
                     select 1 from org_unit_closure scope
                     where scope.tenant_id = report.tenant_id and scope.ancestor_id = :orgUnitId
@@ -170,8 +180,7 @@ public class DailyReportService {
                   and (cast(:businessDate as date) is null or report.business_date = :businessDate)
                   and (cast(:status as varchar) is null or report.report_status = :status)
                 order by report.business_date desc, employee.name, position.name
-                """, base(principal).addValue("orgUnitId", orgUnitId)
-                .addValue("businessDate", businessDate).addValue("status", normalizeStatus(status)));
+                """.formatted(visibility), params);
     }
 
     @Transactional
@@ -476,6 +485,7 @@ public class DailyReportService {
             String idempotencyKey
     ) {
         TenantPrincipal principal = prepare();
+        requireVisible(principal, reportId);
         ReportLock report = lockReport(principal, reportId);
         requireExpected(report, request.expectedVersion());
         RevisionLock revision = lockRevision(principal, reportId, report.currentRevisionId());
@@ -824,16 +834,7 @@ public class DailyReportService {
     }
 
     private void requireVisible(TenantPrincipal principal, UUID reportId) {
-        Map<String, Object> row = jdbc.queryForMap("""
-                select report.org_unit_id, report.created_by_account_id, employee.account_id
-                from daily_report report
-                join employee on employee.tenant_id = report.tenant_id and employee.id = report.employee_id
-                where report.tenant_id = :tenantId and report.id = :reportId
-                """, base(principal).addValue("reportId", reportId));
-        if (principal.actorId().equals(row.get("created_by_account_id"))
-                || principal.actorId().equals(row.get("account_id"))) return;
-        accessPolicy.requirePermission("daily-report.team-read");
-        accessPolicy.requireOrgScope((UUID) row.get("org_unit_id"));
+        workVisibility.requireReport(principal, reportId);
     }
 
     private ReportLock lockReport(TenantPrincipal principal, UUID reportId) {

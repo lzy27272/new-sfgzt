@@ -6,6 +6,7 @@ import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkVisibilityPolicy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -30,6 +31,8 @@ public class WorkPackageService {
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy accessPolicy;
+    private final WorkVisibilityPolicy workVisibility;
+    private final OperationalDailyAllocationService operationalAllocations;
     private final AuditWriter auditWriter;
     private final ObjectMapper objectMapper;
     private final EmployeePerformanceSnapshotService employeePerformanceSnapshotService;
@@ -38,6 +41,8 @@ public class WorkPackageService {
             NamedParameterJdbcTemplate jdbc,
             TenantDatabaseContext databaseContext,
             AccessPolicy accessPolicy,
+            WorkVisibilityPolicy workVisibility,
+            OperationalDailyAllocationService operationalAllocations,
             AuditWriter auditWriter,
             ObjectMapper objectMapper,
             EmployeePerformanceSnapshotService employeePerformanceSnapshotService
@@ -45,6 +50,8 @@ public class WorkPackageService {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
+        this.workVisibility = workVisibility;
+        this.operationalAllocations = operationalAllocations;
         this.auditWriter = auditWriter;
         this.objectMapper = objectMapper;
         this.employeePerformanceSnapshotService = employeePerformanceSnapshotService;
@@ -545,6 +552,15 @@ public class WorkPackageService {
         return generateExpectationsInternal(principal, request);
     }
 
+    /** Internal activation hook; the organization/onboarding caller has authorized this assignment. */
+    @Transactional
+    public void initializeOperationalAssignment(UUID assignmentId) {
+        TenantPrincipal principal = prepare();
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
+        operationalAllocations.reconcile(principal, assignmentId, today);
+        generateDailyExpectations(principal, today, assignmentId);
+    }
+
     /**
      * Materializes every active DAY allocation for the tenant. The method is intentionally
      * package-private: only the trusted SLA scheduler invokes it under a tenant-scoped system
@@ -552,6 +568,11 @@ public class WorkPackageService {
      */
     int generateDailyExpectationsForAutomation(LocalDate businessDate) {
         TenantPrincipal principal = prepare();
+        operationalAllocations.ensureInitialAllocations(principal, businessDate);
+        return generateDailyExpectations(principal, businessDate, null);
+    }
+
+    private int generateDailyExpectations(TenantPrincipal principal, LocalDate businessDate, UUID assignmentId) {
         List<AllocationTarget> targets = jdbc.query("""
                 select distinct a.position_assignment_id, a.target_org_unit_id
                 from work_package_allocation a
@@ -565,6 +586,7 @@ public class WorkPackageService {
                   on employee_row.tenant_id = assignment.tenant_id
                  and employee_row.id = assignment.employee_id
                 where a.tenant_id = :tenantId
+                  and (cast(:assignmentId as uuid) is null or a.position_assignment_id = :assignmentId)
                   and a.status = 'ACTIVE'
                   and a.valid_from <= :businessDate
                   and (a.valid_to is null or a.valid_to >= :businessDate)
@@ -580,7 +602,7 @@ public class WorkPackageService {
                   and (assignment.valid_to is null or assignment.valid_to >= :businessDate)
                   and employee_row.employment_status = 'ACTIVE'
                 order by a.position_assignment_id, a.target_org_unit_id
-                """, base(principal).addValue("businessDate", businessDate),
+                """, base(principal).addValue("businessDate", businessDate).addValue("assignmentId", assignmentId),
                 (rs, rowNum) -> new AllocationTarget(
                         rs.getObject("position_assignment_id", UUID.class),
                         rs.getObject("target_org_unit_id", UUID.class)));
@@ -604,8 +626,8 @@ public class WorkPackageService {
             int size
     ) {
         accessPolicy.requireAnyPermission("work-record.review", "work-record.team-read");
-        return expectations(status, null, null, businessDate,
-                fromBusinessDate, toBusinessDate, false, page, size);
+        return expectationsScoped(status, null, null, businessDate,
+                fromBusinessDate, toBusinessDate, false, true, page, size);
     }
 
     @Transactional
@@ -622,7 +644,7 @@ public class WorkPackageService {
         MapSqlParameterSource params = base(principal)
                 .addValue("monthStart", monthStart)
                 .addValue("asOfDate", asOfDate);
-        String visibility = orgVisibility(principal, params, "x.target_org_unit_id");
+        String visibility = " and " + workVisibility.scope(principal, params).summary("x");
         List<WorkbenchMetricRow> rows = jdbc.query("""
                 select x.business_date, x.due_at, x.status,
                        first_record.submitted_at as first_submitted_at,
@@ -750,8 +772,18 @@ public class WorkPackageService {
             int page,
             int size
     ) {
+        return expectationsScoped(status, positionAssignmentId, targetOrgUnitId, businessDate,
+                fromBusinessDate, toBusinessDate, mineOnly, false, page, size);
+    }
+
+    private List<Map<String, Object>> expectationsScoped(
+            String status, UUID positionAssignmentId, UUID targetOrgUnitId, LocalDate businessDate,
+            LocalDate fromBusinessDate, LocalDate toBusinessDate, boolean mineOnly,
+            boolean teamOnly, int page, int size
+    ) {
         ExpectationQuery query = expectationQuery(status, positionAssignmentId, targetOrgUnitId,
-                businessDate, fromBusinessDate, toBusinessDate, mineOnly, page, size, false);
+                businessDate, fromBusinessDate, toBusinessDate, mineOnly, page, size, false,
+                null, null, teamOnly);
         return jdbc.queryForList("select legacy.* from (" + query.sql() + ") legacy order by case "
                 + "when business_date = current_date and status = 'SUBMITTED' then 0 "
                 + "when business_date = current_date then 1 "
@@ -778,6 +810,17 @@ public class WorkPackageService {
             LocalDate businessDate, LocalDate fromBusinessDate, LocalDate toBusinessDate,
             boolean mineOnly, int page, int size, boolean currentAssignmentOnly,
             LocalDate boardScanFrom, LocalDate boardScanTo
+    ) {
+        return expectationQuery(status, positionAssignmentId, targetOrgUnitId, businessDate,
+                fromBusinessDate, toBusinessDate, mineOnly, page, size, currentAssignmentOnly,
+                boardScanFrom, boardScanTo, !mineOnly);
+    }
+
+    private ExpectationQuery expectationQuery(
+            String status, UUID positionAssignmentId, UUID targetOrgUnitId,
+            LocalDate businessDate, LocalDate fromBusinessDate, LocalDate toBusinessDate,
+            boolean mineOnly, int page, int size, boolean currentAssignmentOnly,
+            LocalDate boardScanFrom, LocalDate boardScanTo, boolean teamOnly
     ) {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission(
@@ -842,56 +885,6 @@ public class WorkPackageService {
             }
         }
         if (mineOnly) {
-            predicates.add("""
-                    (
-                      e.account_id = :actorId
-                      or exists (
-                        select 1
-                        from work_expectation_delegation delegation
-                        join employee_position_assignment delegated_assignment
-                          on delegated_assignment.tenant_id = delegation.tenant_id
-                         and delegated_assignment.id = delegation.delegate_assignment_id
-                        join employee delegated_employee
-                          on delegated_employee.tenant_id = delegated_assignment.tenant_id
-                         and delegated_employee.id = delegated_assignment.employee_id
-                        where delegation.tenant_id = x.tenant_id
-                          and delegation.work_expectation_id = x.id
-                          and delegation.status = 'ACTIVE'
-                          and delegated_employee.account_id = :actorId
-                      )
-                      or (
-                        not exists (
-                          select 1 from work_expectation_delegation active_delegation
-                          where active_delegation.tenant_id = x.tenant_id
-                            and active_delegation.work_expectation_id = x.id
-                            and active_delegation.status = 'ACTIVE'
-                        )
-                        and exists (
-                          select 1
-                          from employee_position_assignment shared_assignment
-                          join employee shared_employee
-                            on shared_employee.tenant_id = shared_assignment.tenant_id
-                           and shared_employee.id = shared_assignment.employee_id
-                          join position_definition shared_position
-                            on shared_position.tenant_id = shared_assignment.tenant_id
-                           and shared_position.id = shared_assignment.position_id
-                          where shared_assignment.tenant_id = x.tenant_id
-                            and exists (
-                              select 1
-                              from org_unit_closure shared_scope
-                              where shared_scope.tenant_id = x.tenant_id
-                                and shared_scope.ancestor_id = x.target_org_unit_id
-                                and shared_scope.descendant_id = shared_assignment.org_unit_id
-                            )
-                            and shared_assignment.status = 'ACTIVE'
-                            and shared_assignment.valid_from <= x.business_date
-                            and (shared_assignment.valid_to is null or shared_assignment.valid_to >= x.business_date)
-                            and shared_employee.account_id = :actorId
-                            and jsonb_exists(coalesce(i.execution_policy -> 'allowedPositionCodes', '[]'::jsonb), shared_position.code)
-                        )
-                      )
-                    )
-                    """);
             if (currentAssignmentOnly) {
                 params.addValue("businessAssignmentId", principal.businessActorAssignmentId());
                 if (principal.businessActorAssignmentId() == null) {
@@ -927,7 +920,8 @@ public class WorkPackageService {
             }
         }
         String filters = predicates.isEmpty() ? "" : " and " + String.join(" and ", predicates);
-        String visibility = mineOnly ? "" : orgVisibility(principal, params, "x.target_org_unit_id");
+        WorkVisibilityPolicy.Scope workScope = workVisibility.scope(principal, params);
+        String visibility = " and " + (teamOnly ? workScope.summary("x") : workScope.expectation("x", !mineOnly));
         return new ExpectationQuery("""
                 select x.id, x.business_date, x.period_key, x.available_at, x.due_at, x.status,
                        x.row_version, x.waiver_allowed,
@@ -1100,8 +1094,7 @@ public class WorkPackageService {
                  and delegated_employee.id = delegated_assignment.employee_id
                 where x.tenant_id = :tenantId and x.id = :expectationId
                 """, params));
-        accessPolicy.requireOrgScopeOrOwnWork((UUID) result.get("target_org_unit_id"),
-                (UUID) result.get("position_assignment_id"));
+        workVisibility.requireExpectation(principal, expectationId);
         result.put("standards", jdbc.queryForList("""
                 select s.standard_version_id, s.usage_type, s.weight, sd.code as standard_code,
                        sv.version_no as standard_version_no, sv.title

@@ -1208,7 +1208,7 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
     {opening && <p role="status">正在打开工作详情…</p>}
     {delegationNotice && <div className="inline-success" role="status">{delegationNotice}</div>}
     <WorkBoardList data={resource.data} loading={resource.loading} error={resource.error} params={routeParams}
-      onChange={change} own onOpen={item => go('my-work', { ...routeParams, expectationId: item.id })} onRetry={resource.reload} />
+      onChange={change} own assignmentId={identity.businessActorAssignmentId} onOpen={item => go('my-work', { ...routeParams, expectationId: item.id })} onRetry={resource.reload} />
     {editing && <WorkRecordDialog key={identity.key + ':' + editing.id} item={editing} identity={identity}
       onClose={() => go('my-work', { ...routeParams, expectationId: undefined })} onSaved={resource.reload} onDelegated={setDelegationNotice} />}
   </section>

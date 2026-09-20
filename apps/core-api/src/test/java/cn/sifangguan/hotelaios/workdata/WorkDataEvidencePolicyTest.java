@@ -5,6 +5,7 @@ import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkVisibilityPolicy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -142,6 +143,7 @@ class WorkDataEvidencePolicyTest {
                 jdbc,
                 mock(TenantDatabaseContext.class),
                 mock(AccessPolicy.class),
+                mock(WorkVisibilityPolicy.class),
                 mock(AuditWriter.class),
                 mock(FormPayloadValidator.class),
                 objectMapper,
@@ -258,6 +260,7 @@ class WorkDataEvidencePolicyTest {
                 jdbc,
                 mock(TenantDatabaseContext.class),
                 mock(AccessPolicy.class),
+                mock(WorkVisibilityPolicy.class),
                 mock(AuditWriter.class),
                 mock(FormPayloadValidator.class),
                 objectMapper,

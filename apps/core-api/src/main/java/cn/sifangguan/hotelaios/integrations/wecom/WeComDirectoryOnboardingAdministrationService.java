@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.integrations.wecom;
 
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
+import cn.sifangguan.hotelaios.workpackage.WorkPackageService;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
@@ -49,6 +50,7 @@ public class WeComDirectoryOnboardingAdministrationService {
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy accessPolicy;
     private final AuditWriter auditWriter;
+    private final WorkPackageService workPackages;
     private final ObjectMapper objectMapper;
     private final WeComDirectoryProperties properties;
     private final WeComDirectorySecretCodec codec;
@@ -61,6 +63,7 @@ public class WeComDirectoryOnboardingAdministrationService {
             TenantDatabaseContext databaseContext,
             AccessPolicy accessPolicy,
             AuditWriter auditWriter,
+            WorkPackageService workPackages,
             ObjectMapper objectMapper,
             WeComDirectoryProperties properties,
             WeComDirectorySecretCodec codec,
@@ -72,6 +75,7 @@ public class WeComDirectoryOnboardingAdministrationService {
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
         this.auditWriter = auditWriter;
+        this.workPackages = workPackages;
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.codec = codec;
@@ -671,6 +675,7 @@ public class WeComDirectoryOnboardingAdministrationService {
                 throw new IllegalArgumentException("申请部门没有可用的所属门店，不能配置指定负责门店范围");
             }
         }
+        workPackages.initializeOperationalAssignment(assignmentId);
         if (sourceIdentity != null) {
             if (transfer != null) revokeTransferredBinding(principal, transfer);
             int rebound = jdbc.update("""

@@ -4,6 +4,7 @@ import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkVisibilityPolicy;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -19,11 +20,13 @@ public class DashboardService {
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy accessPolicy;
+    private final WorkVisibilityPolicy workVisibility;
 
-    public DashboardService(NamedParameterJdbcTemplate jdbc, TenantDatabaseContext databaseContext, AccessPolicy accessPolicy) {
+    public DashboardService(NamedParameterJdbcTemplate jdbc, TenantDatabaseContext databaseContext, AccessPolicy accessPolicy, WorkVisibilityPolicy workVisibility) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.accessPolicy = accessPolicy;
+        this.workVisibility = workVisibility;
     }
 
     @Transactional(readOnly = true)
@@ -34,11 +37,12 @@ public class DashboardService {
             throw new IllegalArgumentException("CEO驾驶舱需要集团数据范围");
         }
         MapSqlParameterSource params = base(principal);
+        WorkVisibilityPolicy.Scope workScope = workVisibility.scope(principal, params);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("hotelCount", scalar("select count(*) from org_unit where tenant_id = :tenantId and unit_type = 'HOTEL' and status = 'ACTIVE'", params));
         result.put("employeeCount", scalar("select count(*) from employee where tenant_id = :tenantId and employment_status = 'ACTIVE'", params));
         result.put("publishedStandardCount", scalar("select count(*) from standard_version where tenant_id = :tenantId and lifecycle_status = 'PUBLISHED'", params));
-        result.put("todayWorkSubmissionCount", scalar("select count(*) from work_record where tenant_id = :tenantId and business_date = current_date and status <> 'DRAFT'", params));
+        result.put("todayWorkSubmissionCount", scalar("select count(*) from work_record w where w.tenant_id = :tenantId and w.business_date = current_date and w.status <> 'DRAFT' and " + workScope.summary("w"), params));
         result.put("hotels", jdbc.queryForList("""
                 select o.id, o.name, h.city, h.room_count
                 from org_unit o join hotel_profile h on h.tenant_id = o.tenant_id and h.org_unit_id = o.id
@@ -64,6 +68,7 @@ public class DashboardService {
         TenantPrincipal principal = prepare();
         requireHotelScope(principal, hotelId);
         MapSqlParameterSource params = base(principal).addValue("hotelId", hotelId);
+        WorkVisibilityPolicy.Scope workScope = workVisibility.scope(principal, params);
         Map<String, Object> hotel = jdbc.queryForMap("""
                 select o.id, o.name, h.city, h.room_count
                 from org_unit o join hotel_profile h on h.tenant_id = o.tenant_id and h.org_unit_id = o.id
@@ -78,11 +83,11 @@ public class DashboardService {
                 where a.tenant_id = :tenantId and c.ancestor_id = :hotelId and a.status = 'ACTIVE'
                 """, params));
         result.put("todayWorkSubmissionCount", scalar("""
-                select count(*) from work_record
-                where tenant_id = :tenantId and org_unit_id in (
+                select count(*) from work_record w
+                where w.tenant_id = :tenantId and org_unit_id in (
                     select descendant_id from org_unit_closure where tenant_id = :tenantId and ancestor_id = :hotelId
-                ) and business_date = current_date and status <> 'DRAFT'
-                """, params));
+                ) and w.business_date = current_date and w.status <> 'DRAFT'
+                """ + " and " + workScope.summary("w"), params));
         result.put("latestMetrics", jdbc.queryForList("""
                 select distinct on (m.code) m.code, m.name, m.unit, o.business_date, o.value
                 from metric_observation o
@@ -90,7 +95,7 @@ public class DashboardService {
                 where o.tenant_id = :tenantId and o.hotel_org_unit_id = :hotelId
                 order by m.code, o.business_date desc, o.created_at desc
                 """, params));
-        result.put("risks", hotelRisks(params));
+        result.put("risks", hotelRisks(params, workScope));
         result.put("incompleteTasks", incompleteTasks(params));
         result.put("openTaskCount", scalar("""
                 select count(*) from management_task t
@@ -118,7 +123,7 @@ public class DashboardService {
                     select descendant_id from org_unit_closure
                     where tenant_id = :tenantId and ancestor_id = :hotelId
                   ) and x.status = 'MISSED'
-                """, params));
+                """ + " and " + workScope.summary("x"), params));
         return result;
     }
 
@@ -163,6 +168,7 @@ public class DashboardService {
             return Map.of("hotels", List.of());
         }
         MapSqlParameterSource params = base(principal);
+        WorkVisibilityPolicy.Scope workScope = workVisibility.scope(principal, params);
         String visibility = "";
         if (!principal.hasTenantScope()) {
             params.addValue("scopeIds", principal.orgScopes());
@@ -203,17 +209,17 @@ public class DashboardService {
                           and x.target_org_unit_id in (
                             select descendant_id from org_unit_closure
                             where tenant_id = hotel.tenant_id and ancestor_id = hotel.id
-                          ) and x.status = 'MISSED') as missed_work_count,
+                          ) and x.status = 'MISSED' and %1$s) as missed_work_count,
                        (select count(*) from work_record w
                         where w.tenant_id = hotel.tenant_id
                           and w.target_org_unit_id in (
                             select descendant_id from org_unit_closure
                             where tenant_id = hotel.tenant_id and ancestor_id = hotel.id
-                          ) and w.business_date = current_date and w.status <> 'DRAFT') as today_submission_count
+                          ) and w.business_date = current_date and w.status <> 'DRAFT' and %2$s) as today_submission_count
                 from org_unit hotel
                 join hotel_profile profile on profile.tenant_id = hotel.tenant_id and profile.org_unit_id = hotel.id
                 where hotel.tenant_id = :tenantId and hotel.unit_type = 'HOTEL' and hotel.status = 'ACTIVE'
-                """ + visibility + " order by hotel.name", params);
+                """.formatted(workScope.summary("x"), workScope.summary("w")) + visibility + " order by hotel.name", params);
         long riskCount = hotels.stream()
                 .mapToLong(item -> number(item.get("overdue_task_count"))
                         + number(item.get("failed_evaluation_count")) + number(item.get("missed_work_count")))
@@ -253,7 +259,7 @@ public class DashboardService {
         }
     }
 
-    private List<Map<String, Object>> hotelRisks(MapSqlParameterSource params) {
+    private List<Map<String, Object>> hotelRisks(MapSqlParameterSource params, WorkVisibilityPolicy.Scope workScope) {
         return jdbc.queryForList("""
                 select risk_type, source_id, title, severity, status, occurred_at, org_unit_id
                 from (
@@ -285,7 +291,7 @@ public class DashboardService {
                            'HIGH'::text, x.status::text, coalesce(x.due_at, x.updated_at), x.target_org_unit_id
                     from work_expectation x
                     join work_package_item i on i.tenant_id = x.tenant_id and i.id = x.work_package_item_id
-                    where x.tenant_id = :tenantId and x.status = 'MISSED'
+                    where x.tenant_id = :tenantId and x.status = 'MISSED' and %s
                       and x.target_org_unit_id in (
                         select descendant_id from org_unit_closure
                         where tenant_id = :tenantId and ancestor_id = :hotelId
@@ -293,7 +299,7 @@ public class DashboardService {
                 ) risk
                 order by occurred_at desc, source_id
                 limit 50
-                """, params);
+                """.formatted(workScope.expectation("x", true)), params);
     }
 
     private List<Map<String, Object>> incompleteTasks(MapSqlParameterSource params) {

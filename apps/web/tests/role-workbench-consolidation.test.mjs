@@ -81,7 +81,7 @@ test('headquarters personal work is loaded independently and is never counted as
   assert.match(workbench, /group.dimension === 'hotel' && group.group_id/)
   assert.match(workbench, /!executive && hotels.length === 1/)
   assert.match(boardService, /groupAggregate\("employee", "position_assignment_id"/)
-  assert.match(workPackageService, /requireOrgScopeOrOwnWork/)
+  assert.match(workPackageService, /workVisibility\.requireExpectation/)
 })
 
 test('closure, submission and on-time rates stay distinct from settled KPI snapshots', () => {

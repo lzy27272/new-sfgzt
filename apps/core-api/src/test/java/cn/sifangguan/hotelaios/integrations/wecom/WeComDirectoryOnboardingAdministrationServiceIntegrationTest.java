@@ -134,6 +134,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 mock(TenantDatabaseContext.class),
                 accessPolicy,
                 mock(AuditWriter.class),
+                mock(cn.sifangguan.hotelaios.workpackage.WorkPackageService.class),
                 new ObjectMapper(),
                 properties,
                 codec,
