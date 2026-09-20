@@ -903,18 +903,23 @@ public class OrganizationService {
 
     @Transactional(readOnly = true)
     public List<Map<String, Object>> listEmployees() {
+        return listEmployees(false);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> listEmployees(boolean includeHistory) {
         accessPolicy.requirePermission("org.read");
         TenantPrincipal principal = prepare();
         if (!principal.hasTenantScope() && principal.orgScopes().isEmpty()) {
             return List.of();
         }
-        MapSqlParameterSource parameters = base(principal);
+        MapSqlParameterSource parameters = base(principal).addValue("includeHistory", includeHistory);
         String visibility = visibility("o", principal, parameters);
         return jdbc.queryForList("""
                 select distinct e.id, e.account_id, u.login_name, u.status as account_status,
                        e.employee_no, e.name, e.mobile, e.employment_status, e.hired_on,
                        a.id as assignment_id, a.manager_assignment_id, a.is_primary,
-                       a.assignment_type, a.valid_from, a.valid_to,
+                       a.assignment_type, a.status as assignment_status, a.valid_from, a.valid_to,
                        o.id as org_unit_id, o.name as org_unit_name,
                        p.id as position_id, p.name as position_name,
                        published.authorization_scope_type,
@@ -923,7 +928,7 @@ public class OrganizationService {
                 from employee e
                 left join user_account u on u.tenant_id = e.tenant_id and u.id = e.account_id
                 left join employee_position_assignment a
-                  on a.tenant_id = e.tenant_id and a.employee_id = e.id and a.status = 'ACTIVE'
+                  on a.tenant_id = e.tenant_id and a.employee_id = e.id and (:includeHistory or a.status = 'ACTIVE')
                 left join org_unit o on o.tenant_id = a.tenant_id and o.id = a.org_unit_id
                 left join position_definition p on p.tenant_id = a.tenant_id and p.id = a.position_id
                 left join position_function_profile profile

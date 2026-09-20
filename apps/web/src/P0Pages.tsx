@@ -7,7 +7,7 @@ import {
   loadAccessibleHotels,
   loadHotelDashboard,
   loadOperationsDashboard,
-  loadTeamWork,
+  loadExpectation,
   loadTeamWorkCase,
   reviewWorkRecord,
 } from './api/resources'
@@ -23,6 +23,9 @@ import type {
   WorkRecordAttachment,
 } from './domain'
 import { useResource } from './useResource'
+import type { NavigationParams } from './domain'
+import { useWorkBoard, WorkDateToolbar, WorkStatusCards, CompletionRates, WorkQueueAlerts, WorkBoardList } from './features/workbench/WorkBoard'
+import { withBoardParams } from './features/workbench/workBoardModel'
 
 const statusLabels: Record<string, string> = {
   PLANNED: '待开放', AVAILABLE: '可填报', PENDING: '待完成', IN_PROGRESS: '执行中',
@@ -71,104 +74,44 @@ function PageHeader({ eyebrow, title, description, source, actions }: { eyebrow:
   return <header className="page-title"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div><div className="page-actions"><SourceFlag source={source} />{actions}</div></header>
 }
 
-function demoScopedTeam(items: WorkExpectation[], roleCode: string) {
-  if (roleCode === 'HOUSEKEEPING_SUPERVISOR') return items.filter((item) => item.targetOrgName.includes('客房'))
-  if (roleCode === 'FRONT_OFFICE_SUPERVISOR') return items.filter((item) => !item.targetOrgName.includes('客房') && !item.packageName.includes('OTA'))
-  return items
-}
-
-const exceptionStatuses = new Set(['OVERDUE', 'MISSED', 'FAILED'])
-const exceptionOutcomes = new Set(['FAIL', 'WARNING'])
-
-function currentBusinessDate() {
-  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(new Date())
-}
-
-function isDailyChecklist(item: WorkExpectation) {
-  return item.periodType === 'DAY' || item.periodKey?.startsWith('DAY:') === true
-}
-
-function isException(item: WorkExpectation) {
-  return exceptionStatuses.has(item.status) || exceptionOutcomes.has(item.evaluationOutcome ?? '')
-}
-
-function isCurrentException(item: WorkExpectation, today: string) {
-  return isException(item) && (!isDailyChecklist(item) || item.businessDate === today)
-}
-
-function teamWorkPriority(item: WorkExpectation, today: string) {
-  if (item.status === 'SUBMITTED') return 0
-  if (item.businessDate === today && isException(item)) return 1
-  if (item.businessDate === today) return 2
-  if (!isDailyChecklist(item) && isException(item)) return 3
-  return 4
-}
-
 export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { identity: RoleContext; permissions: string[]; routeParams?: RouteParams; go: Navigate }) {
-  const resource = useResource(`${identity.key}:p0-team-work:${routeParams.hotelId ?? 'all'}`, () => loadTeamWork(identity, {
-    orgUnitId: routeParams.hotelId,
-  }), [])
+  const resource = useWorkBoard(identity, 'team', routeParams)
   const [selected, setSelected] = useState<WorkExpectation>()
-  const scopedItems = resource.source === 'demo' ? demoScopedTeam(resource.data, identity.roleCode) : resource.data
-  const today = currentBusinessDate()
-  const currentItems = scopedItems.filter((item) => !isDailyChecklist(item) || item.businessDate === today)
-  const historicalDailyItems = scopedItems.filter((item) => isDailyChecklist(item) && item.businessDate !== today)
-  const statusFilter = (routeParams.status || 'ALL').toUpperCase()
-  const filterSource = statusFilter === 'HISTORY' ? historicalDailyItems : currentItems
-  const items = filterSource.filter((item) => {
-    if (statusFilter === 'ALL') return true
-    if (statusFilter === 'PENDING_WORK') return !['SUBMITTED', 'SATISFIED', 'WAIVED', 'CANCELLED'].includes(item.status)
-    if (statusFilter === 'SUBMITTED') return ['SUBMITTED', 'COMPLETED', 'SATISFIED'].includes(item.status)
-    if (statusFilter === 'EXCEPTION') return isCurrentException(item, today)
-    if (statusFilter === 'HISTORY') return true
-    return item.status === statusFilter
-  }).sort((left, right) => {
-    const priority = teamWorkPriority(left, today) - teamWorkPriority(right, today)
-    if (priority) return priority
-    const rightTime = right.latestSubmittedAt ?? right.records?.[0]?.submittedAt ?? right.dueAt ?? right.businessDate
-    const leftTime = left.latestSubmittedAt ?? left.records?.[0]?.submittedAt ?? left.dueAt ?? left.businessDate
-    return rightTime.localeCompare(leftTime)
-  })
+  const [detailError, setDetailError] = useState<string>()
+  const change = (patch: NavigationParams) => go('team-work', withBoardParams(routeParams, patch))
   useEffect(() => {
-    if (!routeParams.expectationId) return
-    const linkedExpectation = scopedItems.find((item) => item.id === routeParams.expectationId)
-    if (linkedExpectation) setSelected(linkedExpectation)
-  }, [routeParams.expectationId, scopedItems])
-  const submitted = currentItems.filter((item) => ['SUBMITTED', 'COMPLETED', 'SATISFIED'].includes(item.status)).length
-  const pendingReview = currentItems.filter((item) => item.status === 'SUBMITTED').length
-  const exceptionItems = currentItems.filter((item) => isCurrentException(item, today))
-  const hotelSummaries = Array.from(currentItems.reduce((groups, item) => {
-    const id = item.hotelOrgUnitId ?? item.orgUnitId
-    if (!id) return groups
-    const current = groups.get(id) ?? { id, name: item.hotelName ?? item.targetOrgName, total: 0, exception: 0 }
-    current.total += 1
-    if (isCurrentException(item, today)) current.exception += 1
-    groups.set(id, current)
-    return groups
-  }, new Map<string, { id: string; name: string; total: number; exception: number }>()).values())
-    .sort((left, right) => right.exception - left.exception || left.name.localeCompare(right.name, 'zh-CN'))
-  const completionRate = currentItems.length ? Math.round(submitted / currentItems.length * 100) : 0
-  const switchStatus = (status?: string) => go('team-work', { ...routeParams, status, expectationId: undefined })
-
-  return <section className="page-section">
-    <PageHeader eyebrow="团队执行" title="团队工作看板" description="日工作清单只纳入当日统计；跨日异常仅保留非日清任务，避免历史漏交持续累加。" source={resource.source} />
-    <section className="mini-metrics team-metrics"><button type="button" className={statusFilter === 'ALL' ? 'active' : ''} onClick={() => switchStatus(undefined)}><strong>{currentItems.length}</strong>当前范围工作</button><button type="button" className={statusFilter === 'SUBMITTED' ? 'active' : ''} onClick={() => switchStatus('SUBMITTED')}><strong>{submitted}</strong>已提交/完成</button><button type="button" className={`danger ${statusFilter === 'EXCEPTION' ? 'active' : ''}`} onClick={() => switchStatus('EXCEPTION')}><strong>{exceptionItems.length}</strong>当日及持续异常</button><span><strong>{completionRate}%</strong>当前完成率</span></section>
-    <div className="filters team-work-filters"><button className={statusFilter === 'ALL' ? 'active' : ''} onClick={() => switchStatus(undefined)}>当前工作</button><button className={statusFilter === 'SUBMITTED' ? 'active' : ''} onClick={() => switchStatus('SUBMITTED')}>待复核/已完成</button><button className={statusFilter === 'EXCEPTION' ? 'active' : ''} onClick={() => switchStatus('EXCEPTION')}>异常与逾期</button><button className={statusFilter === 'HISTORY' ? 'active' : ''} onClick={() => switchStatus('HISTORY')}>历史日清记录</button>{routeParams.hotelId && <button onClick={() => go('team-work', { status: routeParams.status })}>返回全部门店</button>}</div>
-    {pendingReview > 0 && statusFilter !== 'SUBMITTED' && <button type="button" className="team-review-alert" onClick={() => switchStatus('SUBMITTED')}><span><strong>{pendingReview} 项工作等待复核</strong><small>新提交记录已置顶，点击进入集中处理</small></span><b>立即查看 →</b></button>}
-    {hotelSummaries.length > 1 && <section className="team-hotel-summary"><header><div><span className="panel-kicker">门店异常</span><h2>按门店查看异常</h2></div><small>点击门店进入该门店的当日逾期与持续性任务异常</small></header><div>{hotelSummaries.map((hotel) => <button type="button" className={hotel.exception ? 'has-exception' : ''} key={hotel.id} onClick={() => go('team-work', { hotelId: hotel.id, status: 'EXCEPTION' })}><span><strong>{hotel.name}</strong><small>当前工作 {hotel.total} 项</small></span><b>{hotel.exception}</b><em>{hotel.exception ? '项异常，点击查看' : '当前正常'}</em></button>)}</div></section>}
-    <article className="panel table-panel">
-      <LoadingState loading={resource.loading} error={resource.error} empty={!items.length} retry={resource.reload} />
-      {!resource.loading && !resource.error && !!items.length && <div className="data-table p0-team-table">
-        <div className="table-row table-head"><span>工作记录</span><span>目标组织</span><span>负责人</span><span>评价</span><span>状态</span><span>管理操作</span></div>
-        {items.map((item) => <div className={`table-row ${item.status === 'SUBMITTED' ? 'awaiting-review' : ''}`} key={item.id}>
-          <span><strong>{item.title}</strong><small>{item.packageName} · {item.itemName}</small></span>
-          <span>{item.hotelName ?? item.targetOrgName}{item.hotelName && item.hotelName !== item.targetOrgName && <small>{item.targetOrgName}</small>}</span><span>{item.assigneeName}<small>{formatDate(item.dueAt)}</small></span>
-          <span>{item.evaluationOutcome ? <Status value={item.evaluationOutcome} /> : '—'}</span><span><Status value={item.status} /></span>
-          <span><button className="link-button" onClick={() => setSelected(item)}>{item.status === 'SUBMITTED' ? '待复核：打开记录' : '详情、复核与整改'}</button></span>
-        </div>)}
-      </div>}
-    </article>
-    {selected && <TeamWorkDrawer initial={selected} identity={identity} permissions={permissions} go={go} onClose={() => setSelected(undefined)} onChanged={resource.reload} />}
+    let active = true
+    setSelected(undefined); setDetailError(undefined)
+    if (routeParams.expectationId) {
+      loadExpectation(identity, routeParams.expectationId).then(result => { if (active) setSelected(result.data) })
+        .catch(reason => { if (active) setDetailError(reason instanceof Error ? reason.message : '详情读取失败') })
+    }
+    return () => { active = false }
+  }, [identity.key, routeParams.expectationId])
+  const departmentGroups = resource.data.groups.filter(group => group.dimension === 'department' && group.group_id)
+  const employeeGroups = resource.data.groups.filter(group => group.dimension === 'employee' && group.group_id)
+  return <section className="wb-page">
+    <header className="wb-page-heading"><div><h1>团队工作看板</h1><p>按原工作日期汇总；待审核独立于完成，补交保留完整证据链。</p></div>
+      <button className="secondary" onClick={() => go('workbench', withBoardParams(routeParams, { status: undefined, queue: undefined, departmentId: undefined, assignmentId: undefined }))}>返回工作台</button></header>
+    <WorkDateToolbar params={routeParams} businessDate={resource.data.businessDate} onChange={change} />
+    <div className="wb-scope-filters">
+      <label>部门 <select aria-label="部门筛选" value={routeParams.departmentId || ''} onChange={event => change({ departmentId: event.target.value || undefined, assignmentId: undefined })}>
+        <option value="">全部授权部门</option>{departmentGroups.map(group => <option value={group.group_id!} key={group.group_id}>{group.group_name}</option>)}
+      </select></label>
+      <label>员工 <select aria-label="员工筛选" value={routeParams.assignmentId || ''} onChange={event => change({ assignmentId: event.target.value || undefined })}>
+        <option value="">全部授权员工</option>{employeeGroups.map(group => <option value={group.group_id!} key={group.group_id}>{group.group_name}</option>)}
+      </select></label>
+      {routeParams.hotelId && <button className="text-action" onClick={() => change({ hotelId: undefined, departmentId: undefined, assignmentId: undefined })}>返回全部授权门店</button>}
+    </div>
+    <article className="wb-panel"><WorkStatusCards metric={resource.data.period} loading={resource.loading || Boolean(resource.error)}
+      selected={resource.query.status} onSelect={status => change({ status, queue: undefined })} />
+      {!resource.loading && !resource.error && <CompletionRates metric={resource.data.period} />}</article>
+    {!resource.loading && !resource.error && <WorkQueueAlerts data={resource.data} onOpen={change} />}
+    {detailError && <p className="inline-error" role="alert">{detailError}</p>}
+    <WorkBoardList data={resource.data} loading={resource.loading} error={resource.error} params={routeParams} onChange={change}
+      onOpen={item => go('team-work', { ...routeParams, expectationId: item.id })} onRetry={resource.reload} />
+    {selected && <TeamWorkDrawer key={`${identity.key}:${selected.id}`} initial={selected} identity={identity} permissions={permissions} go={go}
+      onClose={() => go('team-work', { ...routeParams, expectationId: undefined })} onChanged={resource.reload} />}
   </section>
 }
 
@@ -353,7 +296,8 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
   onChanged: () => void
 }) {
   const fallback: TeamWorkCase = useMemo(() => ({ expectation: initial }), [initial])
-  const resource = useResource(`${identity.key}:team-case:${initial.id}`, () => loadTeamWorkCase(identity, initial), fallback)
+  const [selectedRecordId, setSelectedRecordId] = useState<string>()
+  const resource = useResource(`${identity.key}:team-case:${initial.id}:${selectedRecordId ?? 'default'}`, () => loadTeamWorkCase(identity, initial, selectedRecordId), fallback)
   const { expectation, record } = resource.data
   const [reviewReason, setReviewReason] = useState('')
   const [taskTitle, setTaskTitle] = useState(`整改：${initial.title}`)
@@ -516,6 +460,7 @@ export function TeamWorkDrawer({ initial, identity, permissions, go, onClose, on
       {!resource.loading && !resource.error && <>
         <div className="task-summary"><span><small>工作状态</small><Status value={expectation.status} /></span><span><small>评价结果</small>{expectation.evaluationOutcome ? <Status value={expectation.evaluationOutcome} /> : '—'}</span><span><small>截止时间</small><strong>{formatDate(expectation.dueAt)}</strong></span></div>
         {message && <div role="status" className={`team-action-feedback ${message.tone}`}><span><strong>{message.tone === 'ok' ? '操作成功' : '操作未完成'}</strong><small>{message.text}</small></span>{message.next ? <button type="button" className="secondary" onClick={() => runNext(message.next!)}>{message.next.label} →</button> : null}</div>}
+        {(expectation.records?.length ?? 0) > 1 && <section className="detail-section"><label>选择提交记录（共 {expectation.records!.length} 条）<select aria-label="选择提交记录" value={record?.id ?? ''} disabled={!!busy} onChange={(event) => { setSelectedRecordId(event.target.value); setReviewReason(''); setMessage(undefined); setAttachmentPreview(undefined) }}>{expectation.records!.map((entry, index) => <option key={entry.id} value={entry.id}>{entry.status === 'SUBMITTED' ? '待审核' : label(entry.status)} · {formatDate(entry.submittedAt)} · 记录 {expectation.records!.length - index}</option>)}</select></label><p className="muted">每条提交保留独立的内容、照片和审核结果；可切换查看，重复提交工作优先展示待审核记录。</p></section>}
         {!record ? <div className="inline-warning">该工作期望尚未形成可复核的工作记录。</div> : <>
           <section className="detail-section"><h3>记录事实</h3><dl><div><dt>提交员工</dt><dd>{record.employeeName}</dd></div><div><dt>执行岗位</dt><dd>{record.positionName}</dd></div><div><dt>记录状态</dt><dd>{label(record.status)}</dd></div><div><dt>提交时间</dt><dd>{formatDate(record.submittedAt)}</dd></div></dl>{payloadFields.length ? <div className="payload-grid">{payloadFields.map((field) => <span key={field.key}><small>{field.label}</small><strong>{field.value}</strong></span>)}</div> : <p className="muted">本次提交没有额外的表单记录。</p>}{record.reviewReason && <div className="inline-warning">上次复核意见：{record.reviewReason}</div>}</section>
 

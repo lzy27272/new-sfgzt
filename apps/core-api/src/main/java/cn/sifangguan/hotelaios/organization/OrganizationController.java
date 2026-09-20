@@ -43,8 +43,8 @@ public class OrganizationController {
     }
 
     @GetMapping("/employees")
-    public List<Map<String, Object>> employees() {
-        return service.listEmployees();
+    public List<Map<String, Object>> employees(@RequestParam(defaultValue = "false") boolean includeHistory) {
+        return service.listEmployees(includeHistory);
     }
 
     @GetMapping("/position-options")

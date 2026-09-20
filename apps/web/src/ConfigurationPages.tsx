@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { apiRequest, asList } from './api/client'
 import type { RoleContext, RouteParams } from './domain'
 import { PositionAdministration } from './features/organization/PositionAdministration'
+import { PersonnelDirectory, initialPersonnelDirectory } from './features/organization/PersonnelDirectory'
 import { isEmployeePermanentDeleteConfirmation } from './features/organization/employeeDeleteConfirmation'
 import { WorkPackageItemEditor } from './features/workPackages/WorkPackageItemEditor'
 import { mapWorkPackageItem, serializeWorkPackageItems, validateWorkPackageItems, type WorkPackageItemDraft } from './features/workPackages/configuration'
@@ -9,7 +10,7 @@ import { mapWorkPackageItem, serializeWorkPackageItems, validateWorkPackageItems
 type Row = Record<string, unknown>
 type OrgUnit = { id: string; parentId?: string; code: string; name: string; unitType: string; status: string; sortOrder: number; propertyCode?: string; city?: string; roomCount?: number; openingDate?: string; breakfastServiceEnabled?: boolean; guestRoomFloorCount?: number; assistantWorkTemplateMode?: string; kitchenEnabled?: boolean; afternoonTeaEnabled?: boolean; barEnabled?: boolean; projectionEnabled?: boolean; gymEnabled?: boolean; terraceEnabled?: boolean; trendyPlayAreaEnabled?: boolean; facilityEvidenceInstances: Record<string, string[]>; assetEvidenceInstances: Record<string, string[]> }
 type Position = { id: string; name: string; status: string; authorizationScopeType?: string; appliesToAllHotels?: boolean; applicableHotelIds: string[] }
-type Employee = { id: string; accountId?: string; loginName?: string; employeeNo: string; name: string; mobile?: string; hiredOn?: string; employmentStatus: string; accountStatus?: string; assignmentId?: string; orgUnitId?: string; orgUnitName?: string; positionId?: string; positionName?: string; managerAssignmentId?: string; primary?: boolean; assignmentType?: string; validFrom?: string; validTo?: string; authorizationScopeType?: string; responsibleHotelIds: string[]; responsibleHotelNames?: string; deletedAt?: string; deletedByName?: string }
+type Employee = { id: string; accountId?: string; loginName?: string; employeeNo: string; name: string; mobile?: string; hiredOn?: string; employmentStatus: string; accountStatus?: string; assignmentId?: string; orgUnitId?: string; orgUnitName?: string; positionId?: string; positionName?: string; managerAssignmentId?: string; primary?: boolean; assignmentType?: string; assignmentStatus?: string; validFrom?: string; validTo?: string; authorizationScopeType?: string; responsibleHotelIds: string[]; responsibleHotelNames?: string; deletedAt?: string; deletedByName?: string }
 type PackageRow = { id: string; code: string; name: string; positionName: string; lifecycleStatus: string; versionNo: number; latestVersionId?: string; ownerOrgName?: string }
 type SelectRow = { id: string; code: string; name: string; status?: string; versionId?: string; positionId?: string }
 type AllocationRow = { id: string; assignmentId: string; targetOrgName: string; assigneeName: string; status: string; validFrom: string }
@@ -49,6 +50,7 @@ const mapEmployee = (row: Row): Employee => ({
   managerAssignmentId: text(row, 'manager_assignment_id', 'managerAssignmentId') || undefined,
   primary: bool(row, 'is_primary', 'primary'),
   assignmentType: text(row, 'assignment_type', 'assignmentType') || undefined,
+  assignmentStatus: text(row, 'assignment_status', 'assignmentStatus') || undefined,
   validFrom: text(row, 'valid_from', 'validFrom') || undefined,
   validTo: text(row, 'valid_to', 'validTo') || undefined,
   authorizationScopeType: text(row, 'authorization_scope_type', 'authorizationScopeType') || undefined,
@@ -61,7 +63,7 @@ async function loadSetup(identity: RoleContext, includeDeleted = false, includeM
   const [orgRaw, positionRaw, employeeRaw, deletedEmployeeRaw] = await Promise.all([
     includeOrgUnits ? apiRequest<unknown>('/org/units', identity) : Promise.resolve([]),
     includeMaintenance ? apiRequest<unknown>('/org/position-options', identity) : Promise.resolve([]),
-    includeMaintenance ? apiRequest<unknown>('/org/employees', identity) : Promise.resolve([]),
+    includeMaintenance ? apiRequest<unknown>('/org/employees?includeHistory=true', identity) : Promise.resolve([]),
     includeDeleted ? apiRequest<unknown>('/org/employees/deleted', identity) : Promise.resolve([]),
   ])
   const orgUnits = asList<Row>(orgRaw).map((row): OrgUnit => {
@@ -93,9 +95,10 @@ async function loadSetup(identity: RoleContext, includeDeleted = false, includeM
     appliesToAllHotels: bool(row, 'applies_to_all_hotels', 'appliesToAllHotels'),
     applicableHotelIds: text(row, 'applicable_hotel_ids', 'applicableHotelIds').split(',').filter(Boolean),
   }))
-  const employees = asList<Row>(employeeRaw).map(mapEmployee)
+  const employeeHistory = asList<Row>(employeeRaw).map(mapEmployee)
+  const employees = employeeHistory.filter(item => !item.assignmentId || !item.assignmentStatus || item.assignmentStatus === 'ACTIVE')
   const deletedEmployees = asList<Row>(deletedEmployeeRaw).map(mapEmployee)
-  return { orgUnits, positions, employees, deletedEmployees }
+  return { orgUnits, positions, employees, employeeHistory, deletedEmployees }
 }
 
 function Modal({ title, children, onClose, onSave, saving, saveLabel = '保存', saveDisabled = false, wide = false, className = '' }: { title: string; children: React.ReactNode; onClose: () => void; onSave: () => void; saving: boolean; saveLabel?: string; saveDisabled?: boolean; wide?: boolean; className?: string }) {
@@ -112,7 +115,7 @@ export function OrganizationCenter({ identity, permissions, routeParams = {} }: 
   const canReadPosition = permissions.includes('position-profile.read') || permissions.includes('*')
   const canManagePosition = permissions.includes('position-profile.manage') || permissions.includes('*')
   const canPublishPosition = permissions.includes('position-profile.publish') || permissions.includes('*')
-  const [data, setData] = useState<{ orgUnits: OrgUnit[]; positions: Position[]; employees: Employee[]; deletedEmployees: Employee[] }>({ orgUnits: [], positions: [], employees: [], deletedEmployees: [] })
+  const [data, setData] = useState<{ orgUnits: OrgUnit[]; positions: Position[]; employees: Employee[]; employeeHistory: Employee[]; deletedEmployees: Employee[] }>({ orgUnits: [], positions: [], employees: [], employeeHistory: [], deletedEmployees: [] })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
   const [notice, setNotice] = useState<string>()
@@ -122,6 +125,8 @@ export function OrganizationCenter({ identity, permissions, routeParams = {} }: 
   const [saving, setSaving] = useState(false)
   const [tab, setTab] = useState<'org' | 'position' | 'employee'>(canReadPosition && (!canManage || routeParams.tab === 'position') ? 'position' : routeParams.tab === 'employee' ? 'employee' : 'org')
   const [employeeView, setEmployeeView] = useState<'current' | 'deleted'>('current')
+  const [personnelView, setPersonnelView] = useState(initialPersonnelDirectory)
+  useEffect(() => setPersonnelView(initialPersonnelDirectory), [identity.key])
   const [orgForm, setOrgForm] = useState({ unitType: 'HOTEL', parentId: '', code: '', name: '', propertyCode: '', city: '', roomCount: '', openingDate: '', breakfastServiceEnabled: false, guestRoomFloorCount: '1', assistantWorkTemplateMode: 'WITH_FRONT_OFFICE_SUPERVISOR', kitchenEnabled: false, afternoonTeaEnabled: false, barEnabled: false, projectionEnabled: false, gymEnabled: false, terraceEnabled: false, trendyPlayAreaEnabled: false, serviceFacilityIds: '百宝箱\n水吧台\n行李房', publicAreaFacilityIds: '大堂\n百宝箱\n水吧台\n行李房\n洗衣房', eveningPublicAreaFacilityIds: '门头灯光\n前厅大堂\n洗衣房\n楼层过道及电梯间', warmingEquipmentIds: '保温设备', equipmentAssetIds: '空气能机组', sortOrder: '0', status: 'ACTIVE' })
   const [employeeForm, setEmployeeForm] = useState({ employeeNo: '', name: '', mobile: '', hiredOn: new Date().toISOString().slice(0, 10), loginName: '', temporaryPassword: '', employmentStatus: 'ACTIVE' })
   const [assignmentForm, setAssignmentForm] = useState({ assignmentId: '', employeeId: '', employeeName: '', orgUnitId: '', positionId: '', managerAssignmentId: '', primary: true, assignmentType: 'PERMANENT', validFrom: new Date().toISOString().slice(0, 10), validTo: '', responsibleHotelIds: [] as string[] })
@@ -144,9 +149,9 @@ export function OrganizationCenter({ identity, permissions, routeParams = {} }: 
   }, [data.orgUnits])
   const primaryEmployees = useMemo(() => {
     const grouped = new Map<string, Employee[]>()
-    for (const employee of data.employees) grouped.set(employee.id, [...(grouped.get(employee.id) ?? []), employee])
+    for (const employee of data.employeeHistory) grouped.set(employee.id, [...(grouped.get(employee.id) ?? []), employee])
     return [...grouped.values()].map((rows) => rows.find((row) => row.primary) ?? rows[0])
-  }, [data.employees])
+  }, [data.employeeHistory])
   const inactiveEmployeeCount = useMemo(() => primaryEmployees.filter((item) => item.employmentStatus === 'INACTIVE').length, [primaryEmployees])
   const employeeAssignments = editingId ? data.employees.filter((item) => item.id === editingId && item.assignmentId) : []
   const selectedAssignmentPosition = data.positions.find((item) => item.id === assignmentForm.positionId)
@@ -282,13 +287,10 @@ export function OrganizationCenter({ identity, permissions, routeParams = {} }: 
           </div>
           {employeeView === 'current' && inactiveEmployeeCount > 0 && <button className="secondary danger-action" disabled={saving} onClick={() => void deleteAllInactiveEmployees()}>删除全部已停用（{inactiveEmployeeCount}）</button>}
         </div>}
-        {employeeView === 'current' && <div className="simple-table employees-table maintenance-table">
-          <div className="simple-head"><span>员工</span><span>登录账号</span><span>组织</span><span>岗位</span><span>任职</span><span>状态与操作</span></div>
-          {data.employees.map((item) => <div className={item.employmentStatus === 'INACTIVE' ? 'inactive-row' : ''} key={`${item.id}:${item.assignmentId ?? 'none'}`}>
-            <span><strong>{item.name}</strong><small>{item.employeeNo}</small></span><span>{item.loginName || '未开通'}</span><span>{item.orgUnitName || '待分配'}</span><span>{item.positionName || '待分配'}{item.authorizationScopeType === 'ASSIGNED_HOTELS' && <small>{item.responsibleHotelNames || '尚未配置负责门店'}</small>}</span><span>{item.primary ? '主岗' : item.assignmentId ? '兼岗' : '—'}</span>
-            <span className="table-maintenance"><b className={`status-pill ${item.employmentStatus.toLowerCase()}`}>{item.employmentStatus === 'ACTIVE' ? '启用' : '已停用'}</b>{canManage && <span className="maintenance-actions">{item.assignmentId && item.authorizationScopeType === 'ASSIGNED_HOTELS' && <button className="text-action" onClick={() => { setAssignmentForm({ assignmentId: item.assignmentId!, employeeId: item.id, employeeName: item.name, orgUnitId: item.orgUnitId ?? '', positionId: item.positionId ?? '', managerAssignmentId: item.managerAssignmentId ?? '', primary: Boolean(item.primary), assignmentType: item.assignmentType ?? 'PERMANENT', validFrom: item.validFrom ?? new Date().toISOString().slice(0, 10), validTo: item.validTo ?? '', responsibleHotelIds: item.responsibleHotelIds }); setModal('assignment-scope') }}>负责门店</button>}<button className="text-action" onClick={() => openEmployeeEdit(item)}>编辑</button><button className="text-action" disabled={saving} onClick={() => void toggleEmployee(item)}>{item.employmentStatus === 'ACTIVE' ? '停用' : '启用'}</button><button className="text-action danger" disabled={saving || item.employmentStatus === 'ACTIVE'} title={item.employmentStatus === 'ACTIVE' ? '请先停用后再删除' : '移入“已删除”，保留历史并可恢复'} onClick={() => void deleteEmployee(item)}>删除</button></span>}</span>
-          </div>)}
-        </div>}
+        {employeeView === 'current' && <PersonnelDirectory orgs={data.orgUnits} employees={data.employeeHistory} state={personnelView} setState={setPersonnelView}
+          saving={saving} onEdit={openEmployeeEdit} onEditAssignment={item => { openEmployeeEdit(item); openAssignmentEdit(item) }}
+          onEnd={item => void endCurrentAssignment(item)} onToggle={item => void toggleEmployee(item)}
+          onDelete={item => void deleteEmployee(item)} />}
         {canManage && employeeView === 'deleted' && <>
           <div className="recycle-bin-note"><strong>恢复后仍保持停用。</strong><span>请核对身份后再手动启用并重新分配任职；“永久删除”会清除身份信息，无法找回。</span></div>
           <div className="simple-table deleted-employees-table maintenance-table">

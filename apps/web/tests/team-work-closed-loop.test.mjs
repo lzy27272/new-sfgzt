@@ -7,26 +7,27 @@ const apiSource = readFileSync(new URL('../src/api/resources.ts', import.meta.ur
 const serviceSource = readFileSync(new URL('../../core-api/src/main/java/cn/sifangguan/hotelaios/workpackage/WorkPackageService.java', import.meta.url), 'utf8')
 const evaluationSource = readFileSync(new URL('../../core-api/src/main/java/cn/sifangguan/hotelaios/evaluations/EvaluationService.java', import.meta.url), 'utf8')
 
+const boardService = readFileSync(new URL('../../core-api/src/main/java/cn/sifangguan/hotelaios/workpackage/WorkBoardService.java', import.meta.url), 'utf8')
+const workbench = readFileSync(new URL('../src/features/workbench/RoleWorkbench.tsx', import.meta.url), 'utf8')
+
 test('historical daily misses do not inflate the current exception metric', () => {
-  assert.match(pageSource, /!isDailyChecklist\(item\) \|\| item\.businessDate === today/)
-  assert.match(pageSource, /const historicalDailyItems =/)
-  assert.match(pageSource, /statusFilter === 'HISTORY'/)
-  assert.match(pageSource, /isCurrentException\(item, today\)/)
+assert.match(boardService, /business_date between :fromDate and :toDate/)
+  assert.match(boardService, /period_type <> 'DAY' and not optional_record/)
+  assert.match(pageSource, /WorkDateToolbar/)
+  assert.match(pageSource, /WorkQueueAlerts/)
 })
 
 test('multi-hotel managers receive hotel-level exception drill-down', () => {
-  assert.match(pageSource, /const hotelSummaries =/)
-  assert.match(pageSource, /按门店查看异常/)
-  assert.match(pageSource, /go\('team-work', \{ hotelId: hotel\.id, status: 'EXCEPTION' \}\)/)
-  assert.match(serviceSource, /hotel_context\.id as hotel_org_unit_id, hotel_context\.name as hotel_name/)
-  assert.match(serviceSource, /requested_scope\.ancestor_id = :targetOrgUnitId/)
+assert.match(workbench, /负责门店/)
+  assert.match(workbench, /hotelId: hotel.id, status: 'OVERDUE'/)
+  assert.match(serviceSource, /hotel_context.id as hotel_org_unit_id, hotel_context.name as hotel_name/)
+  assert.match(serviceSource, /requested_scope.ancestor_id = :targetOrgUnitId/)
 })
 
 test('new submissions are surfaced before older expectations', () => {
-  assert.match(pageSource, /if \(item\.status === 'SUBMITTED'\) return 0/)
-  assert.match(pageSource, /新提交记录已置顶/)
-  assert.match(serviceSource, /x\.business_date = current_date and x\.status = 'SUBMITTED' then 0/)
-  assert.match(serviceSource, /latest_record\.submitted_at desc nulls last/)
+assert.match(boardService, /case board_status when 'REVIEW' then 0/)
+  assert.match(boardService, /latest_submitted_at desc nulls last/)
+  assert.match(pageSource, /WorkBoardList/)
 })
 
 test('record payload is unwrapped and rendered with Chinese business labels', () => {

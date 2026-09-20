@@ -60,6 +60,8 @@ import type {
   WorkRecordDetail,
 } from './domain'
 import { useResource } from './useResource'
+import { useWorkBoard, WorkDateToolbar, WorkStatusCards, CompletionRates, WorkQueueAlerts, WorkBoardList } from './features/workbench/WorkBoard'
+import { withBoardParams } from './features/workbench/workBoardModel'
 import { permissions as permissionCodes } from './app/permissions'
 import {
   isDailyFeatureRoute,
@@ -1153,43 +1155,38 @@ function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated }: {
 const workFilters = ['ALL', 'PENDING_WORK', 'AVAILABLE', 'PLANNED', 'IN_PROGRESS', 'SUBMITTED', 'SATISFIED', 'FAILED', 'MISSED'] as const
 
 function MyWork({ identity, routeParams, go }: { identity: RoleContext; routeParams: RouteParams; go: Navigate }) {
-  const resource = useResource(`${identity.key}:my-work`, () => loadMyWork(identity), [])
-  const requestedFilter = workFilters.includes(routeParams.status as typeof workFilters[number]) ? routeParams.status : 'ALL'
-  const [filter, setFilter] = useState(requestedFilter)
+  const resource = useWorkBoard(identity, 'my', routeParams)
   const [editing, setEditing] = useState<WorkExpectation>()
-  const [opening, setOpening] = useState<string>()
-  const [deepLinkHandled, setDeepLinkHandled] = useState<string>()
+  const [opening, setOpening] = useState(false)
   const [openError, setOpenError] = useState<string>()
   const [delegationNotice, setDelegationNotice] = useState<string>()
-  useEffect(() => setFilter(requestedFilter), [requestedFilter])
-  const items = filter === 'ALL'
-    ? resource.data
-    : filter === 'PENDING_WORK'
-      ? resource.data.filter((item) => !['SUBMITTED', 'SATISFIED', 'WAIVED', 'CANCELLED'].includes(item.status))
-      : resource.data.filter((item) => item.status === filter)
-  const openRecord = async (item: WorkExpectation) => {
-    setDeepLinkHandled(item.id)
-    if (routeParams.expectationId !== item.id) go('my-work', { ...routeParams, expectationId: item.id })
-    setOpening(item.id); setOpenError(undefined)
-    try {
-      const detail = await loadExpectation(identity, item.id, item)
-      setEditing(detail.data)
-    } catch (error) { setOpenError(error instanceof Error ? error.message : '工作详情加载失败') }
-    finally { setOpening(undefined) }
-  }
+  const change = (patch: import('./domain').NavigationParams) => go('my-work', withBoardParams(routeParams, patch))
   useEffect(() => {
-    const expectationId = routeParams.expectationId
-    if (!expectationId || resource.loading || deepLinkHandled === expectationId) return
-    const item = resource.data.find((candidate) => candidate.id === expectationId)
-    setDeepLinkHandled(expectationId)
-    if (item) void openRecord(item)
-  }, [routeParams.expectationId, resource.loading, resource.data, deepLinkHandled])
-  return <section className="page-section"><PageHeader eyebrow="POSITION WORK" title="我的工作" description={`当前任职：${identity.label} · ${identity.orgName}。每条记录绑定精确任职，不因切换岗位而串岗。`} actions={<SourceFlag source={resource.source} />} />
-    <div className="filters">{workFilters.map((item) => <button className={filter === item ? 'active' : ''} onClick={() => { setFilter(item); go('my-work', { ...routeParams, status: item === 'ALL' ? undefined : item }) }} key={item}>{item === 'ALL' ? '全部' : item === 'PENDING_WORK' ? '待完成' : label(item)}</button>)}</div>
-    {openError && <div className="inline-error page-error">{openError}</div>}
+    let active = true
+    setEditing(undefined); setOpenError(undefined); setOpening(false)
+    if (routeParams.expectationId) {
+      setOpening(true)
+      loadExpectation(identity, routeParams.expectationId).then(result => { if (active) setEditing(result.data) })
+        .catch(reason => { if (active) setOpenError(reason instanceof Error ? reason.message : '工作详情加载失败') })
+        .finally(() => { if (active) setOpening(false) })
+    }
+    return () => { active = false }
+  }, [identity.key, routeParams.expectationId])
+  return <section className="wb-page">
+    <header className="wb-page-heading"><div><h1>我的工作</h1><p>当前任职：{identity.label} · {identity.orgName}。切换岗位不会混入其他任职。</p></div>
+      <button className="secondary" onClick={() => go('workbench', withBoardParams(routeParams, { status: undefined, queue: undefined }))}>返回工作台</button></header>
+    <WorkDateToolbar params={routeParams} businessDate={resource.data.businessDate} onChange={change} />
+    <article className="wb-panel"><WorkStatusCards metric={resource.data.period} loading={resource.loading || Boolean(resource.error)}
+      onSelect={status => change({ status, queue: undefined })} selected={resource.query.status} />
+      {!resource.loading && !resource.error && <CompletionRates metric={resource.data.period} />}</article>
+    {!resource.loading && !resource.error && <WorkQueueAlerts data={resource.data} onOpen={change} />}
+    {openError && <div className="inline-error" role="alert">{openError}</div>}
+    {opening && <p role="status">正在打开工作详情…</p>}
     {delegationNotice && <div className="inline-success" role="status">{delegationNotice}</div>}
-    <article className="panel table-panel"><DataState loading={resource.loading || !!opening} error={resource.error} empty={!items.length} onRetry={resource.reload} />{!resource.loading && !opening && !resource.error && !!items.length && <WorkTable items={items} own onFill={openRecord} />}</article>
-    {editing && <WorkRecordDialog key={`${identity.key}:${editing.id}`} item={editing} identity={identity} onClose={() => { setEditing(undefined); if (routeParams.expectationId) go('my-work', { ...routeParams, expectationId: undefined }) }} onSaved={resource.reload} onDelegated={setDelegationNotice} />}
+    <WorkBoardList data={resource.data} loading={resource.loading} error={resource.error} params={routeParams}
+      onChange={change} own onOpen={item => go('my-work', { ...routeParams, expectationId: item.id })} onRetry={resource.reload} />
+    {editing && <WorkRecordDialog key={identity.key + ':' + editing.id} item={editing} identity={identity}
+      onClose={() => go('my-work', { ...routeParams, expectationId: undefined })} onSaved={resource.reload} onDelegated={setDelegationNotice} />}
   </section>
 }
 

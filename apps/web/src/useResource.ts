@@ -17,7 +17,7 @@ export function createLatestRequestGuard() {
   }
 }
 
-export function useResource<T>(key: string, loader: () => Promise<Loaded<T>>, initial: T, refreshMs = 0) {
+export function useResource<T>(key: string, loader: () => Promise<Loaded<T>>, initial: T, refreshMs = 0, showRefreshErrors = false) {
   const [data, setData] = useState<T>(initial)
   const [source, setSource] = useState<ApiSource>('api')
   const [loading, setLoading] = useState(true)
@@ -37,7 +37,7 @@ export function useResource<T>(key: string, loader: () => Promise<Loaded<T>>, in
       setSource(loaded.source)
       setError(undefined)
     } catch (reason) {
-      if (!silent && requestGuard.isCurrent(requestGeneration)) {
+      if ((!silent || showRefreshErrors) && requestGuard.isCurrent(requestGeneration)) {
         setData(initial)
         setSource('api')
         setError(reason instanceof Error ? reason.message : '数据加载失败')

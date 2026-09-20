@@ -1,6 +1,7 @@
 import { apiBlob, apiMutation, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
 import { dashboardApiPaths } from '../app/dashboardContract'
 import { materializeFileForUpload, readableUploadError } from '../app/uploadFiles'
+import { selectTeamRecordId } from '../features/workbench/workBoardModel'
 import type {
   AccessibleHotels,
   ApiSource,
@@ -148,7 +149,7 @@ export async function loadWorkPackages(identity: ApiIdentity) {
   }, () => demoValue<WorkPackage[]>('demoWorkPackages'))
 }
 
-function normalizeExpectation(item: JsonObject): WorkExpectation {
+export function normalizeExpectation(item: JsonObject): WorkExpectation {
   const standards = asList<JsonObject>(item.standards).map((standard): WorkStandardReference => ({
     standardVersionId: text(standard, ['standardVersionId', 'standard_version_id']),
     usageType: text(standard, ['usageType', 'usage_type'], 'EXECUTION'),
@@ -172,6 +173,10 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
     packageName: text(item, ['packageName', 'workPackageName', 'work_package_name'], '工作包'),
     itemName: text(item, ['itemName', 'workItemName', 'item_name', 'work_item_name'], '工作项'),
     status: text(item, ['status'], 'PENDING'),
+    boardStatus: text(item, ['board_status', 'boardStatus'], '') as WorkExpectation['boardStatus'] || undefined,
+    latestRecordStatus: text(item, ['latest_record_status', 'latestRecordStatus'], '') || undefined,
+    reviewMode: text(item, ['review_mode', 'reviewMode'], '') || undefined,
+    departmentOrgUnitId: text(item, ['department_org_unit_id', 'departmentOrgUnitId'], '') || undefined,
     businessDate: text(item, ['businessDate', 'business_date'], ''),
     periodKey: text(item, ['periodKey', 'period_key'], '') || undefined,
     periodType: text(item, ['periodType', 'period_type'], '') || undefined,
@@ -198,6 +203,7 @@ function normalizeExpectation(item: JsonObject): WorkExpectation {
     workPackageItemId: text(item, ['workPackageItemId', 'work_package_item_id'], '') || undefined,
     recordId: text(item, ['recordId', 'workRecordId', 'record_id'], '') || records[0]?.id,
     firstSubmittedAt: text(item, ['firstSubmittedAt', 'first_submitted_at'], '') || records.at(-1)?.submittedAt,
+    boardLate: typeof item.is_late === 'boolean' ? item.is_late : undefined,
     latestSubmittedAt: text(item, ['latestSubmittedAt', 'latest_submitted_at'], '') || records[0]?.submittedAt,
     rowVersion: value(item, 'rowVersion', 'row_version') === undefined ? undefined : number(item, ['rowVersion', 'row_version']),
     evaluationOutcome: text(item, ['evaluationOutcome', 'evaluation_outcome'], '') || undefined,
@@ -298,8 +304,9 @@ export async function revokeExpectationDelegation(identity: ApiIdentity, expecta
   return apiRequest(`/work-expectations/${expectationId}/delegation?expectedVersion=${expectedVersion}`, identity, { method: 'DELETE' })
 }
 
-export async function loadExpectation(identity: ApiIdentity, id: string, fallback: WorkExpectation) {
-  return withFallback(async () => normalizeExpectation(object(await apiRequest<unknown>(`/work-expectations/${id}`, identity))), fallback)
+export async function loadExpectation(identity: ApiIdentity, id: string, fallback?: WorkExpectation) {
+  const load = async () => normalizeExpectation(object(await apiRequest<unknown>(`/work-expectations/${id}`, identity)))
+  return fallback ? withFallback(load, fallback) : { data: await load(), source: 'api' as const }
 }
 
 type WorkExpectationQuery = {
@@ -548,10 +555,10 @@ export async function loadWorkRecord(identity: ApiIdentity, recordId: string, fa
   }, fallback ?? normalizeWorkRecord({ id: recordId }))
 }
 
-export async function loadTeamWorkCase(identity: ApiIdentity, initial: WorkExpectation) {
+export async function loadTeamWorkCase(identity: ApiIdentity, initial: WorkExpectation, selectedRecordId?: string) {
   return withFallback<TeamWorkCase>(async () => {
     const expectation = normalizeExpectation(object(await apiRequest<unknown>(`/work-expectations/${initial.id}`, identity)))
-    const recordId = expectation.recordId ?? expectation.records?.[0]?.id
+    const recordId = selectTeamRecordId(expectation, selectedRecordId)
     const record = recordId ? normalizeWorkRecord(object(await apiRequest<unknown>(`/work-data/records/${recordId}`, identity))) : undefined
     if (record) {
       const attachments = await apiRequest<unknown>(`/work-data/records/${record.id}/attachments`, identity).catch(() => record.attachments)

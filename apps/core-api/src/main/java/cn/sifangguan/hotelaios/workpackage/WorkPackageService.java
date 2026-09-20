@@ -737,6 +737,35 @@ public class WorkPackageService {
             int page,
             int size
     ) {
+        ExpectationQuery query = expectationQuery(status, positionAssignmentId, targetOrgUnitId,
+                businessDate, fromBusinessDate, toBusinessDate, mineOnly, page, size, false);
+        return jdbc.queryForList("select legacy.* from (" + query.sql() + ") legacy order by case "
+                + "when business_date = current_date and status = 'SUBMITTED' then 0 "
+                + "when business_date = current_date then 1 "
+                + "when period_type <> 'DAY' and status in ('OVERDUE', 'MISSED', 'FAILED') then 2 "
+                + "when status = 'SUBMITTED' then 3 else 4 end, "
+                + "latest_submitted_at desc nulls last, business_date desc, due_at desc, id desc "
+                + "limit :pageSize offset :pageOffset", query.params());
+    }
+
+    record ExpectationQuery(String sql, MapSqlParameterSource params) {}
+
+    // The board and legacy lists share tenant, organization, delegation and ownership checks.
+    ExpectationQuery expectationQuery(
+            String status, UUID positionAssignmentId, UUID targetOrgUnitId,
+            LocalDate businessDate, LocalDate fromBusinessDate, LocalDate toBusinessDate,
+            boolean mineOnly, int page, int size, boolean currentAssignmentOnly
+    ) {
+        return expectationQuery(status, positionAssignmentId, targetOrgUnitId, businessDate,
+                fromBusinessDate, toBusinessDate, mineOnly, page, size, currentAssignmentOnly, null, null);
+    }
+
+    ExpectationQuery expectationQuery(
+            String status, UUID positionAssignmentId, UUID targetOrgUnitId,
+            LocalDate businessDate, LocalDate fromBusinessDate, LocalDate toBusinessDate,
+            boolean mineOnly, int page, int size, boolean currentAssignmentOnly,
+            LocalDate boardScanFrom, LocalDate boardScanTo
+    ) {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission(
                 "work-package.read", "work-record.read", "work-record.review", "work-record.team-read");
@@ -754,6 +783,18 @@ public class WorkPackageService {
                 .addValue("pageSize", size)
                 .addValue("pageOffset", (long) page * size);
         List<String> predicates = new ArrayList<>();
+        if (boardScanFrom != null && boardScanTo != null) {
+            params.addValue("boardScanFrom", boardScanFrom).addValue("boardScanTo", boardScanTo)
+                    .addValue("boardRecentSince", OffsetDateTime.now().minusDays(7));
+            // Keep cross-period review and continuing work, but avoid reading years of closed daily work.
+            predicates.add("""
+                    (x.business_date between :boardScanFrom and :boardScanTo
+                     or x.status = 'SUBMITTED'
+                     or (i.review_mode <> 'NONE' and first_record.pending_review_count > 0)
+                     or latest_record.submitted_at >= :boardRecentSince
+                     or (i.period_type <> 'DAY' and x.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')))
+                    """);
+        }
         if (status != null && !status.isBlank()) {
             predicates.add("x.status = :status");
             params.addValue("status", status.trim().toUpperCase(Locale.ROOT));
@@ -838,17 +879,54 @@ public class WorkPackageService {
                       )
                     )
                     """);
+            if (currentAssignmentOnly) {
+                params.addValue("businessAssignmentId", principal.businessActorAssignmentId());
+                if (principal.businessActorAssignmentId() == null) {
+                    predicates.add("false");
+                } else {
+                    // An account can hold several jobs. Only the selected assignment owns this board.
+                    predicates.add("""
+                            (
+                              (x.position_assignment_id = :businessAssignmentId and not exists (
+                                select 1 from work_expectation_delegation ad
+                                where ad.tenant_id = x.tenant_id and ad.work_expectation_id = x.id
+                                  and ad.status = 'ACTIVE'))
+                              or exists (
+                                select 1 from work_expectation_delegation ad
+                                where ad.tenant_id = x.tenant_id and ad.work_expectation_id = x.id
+                                  and ad.status = 'ACTIVE' and ad.delegate_assignment_id = :businessAssignmentId)
+                              or (not exists (
+                                select 1 from work_expectation_delegation ad
+                                where ad.tenant_id = x.tenant_id and ad.work_expectation_id = x.id
+                                  and ad.status = 'ACTIVE')
+                                and exists (
+                                  select 1 from employee_position_assignment sa
+                                  join position_definition sp on sp.tenant_id = sa.tenant_id and sp.id = sa.position_id
+                                  join org_unit_closure sc on sc.tenant_id = sa.tenant_id and sc.descendant_id = sa.org_unit_id
+                                  where sa.tenant_id = x.tenant_id and sa.id = :businessAssignmentId
+                                    and sc.ancestor_id = x.target_org_unit_id and sa.status = 'ACTIVE'
+                                    and sa.valid_from <= x.business_date
+                                    and (sa.valid_to is null or sa.valid_to >= x.business_date)
+                                    and jsonb_exists(coalesce(i.execution_policy -> 'allowedPositionCodes', '[]'::jsonb), sp.code)))
+                            )
+                            """);
+                }
+            }
         }
         String filters = predicates.isEmpty() ? "" : " and " + String.join(" and ", predicates);
         String visibility = mineOnly ? "" : orgVisibility(principal, params, "x.target_org_unit_id");
-        return jdbc.queryForList("""
+        return new ExpectationQuery("""
                 select x.id, x.business_date, x.period_key, x.available_at, x.due_at, x.status,
                        x.row_version, x.waiver_allowed,
                        x.position_assignment_id, e.id as employee_id, e.name as employee_name,
                        p.name as position_name, p.job_family as position_job_family,
                        x.target_org_unit_id, o.name as target_org_unit_name,
                        i.id as work_package_item_id, i.item_code, i.name as item_name, i.item_type,
-                       i.period_type,
+                       i.period_type, i.review_mode, i.required as item_required,
+                       latest_record.status as latest_record_status,
+                       first_record.pending_review_count, first_record.submitted_record_count,
+                       first_record.valid_submitted_at,
+                       department_context.id as department_org_unit_id,
                        i.form_version_id, i.submission_policy, i.reminder_policy, i.report_policy,
                        i.applicability_policy, i.execution_policy,
                        hotel_context.id as hotel_org_unit_id, hotel_context.name as hotel_name,
@@ -893,7 +971,7 @@ public class WorkPackageService {
                     limit 1
                 ) hotel_context on true
                 left join lateral (
-                    select department.name
+                    select department.id, department.name
                     from org_unit_closure department_link
                     join org_unit department
                       on department.tenant_id = department_link.tenant_id
@@ -917,7 +995,7 @@ public class WorkPackageService {
                   on delegated_employee.tenant_id = delegated_assignment.tenant_id
                  and delegated_employee.id = delegated_assignment.employee_id
                 left join lateral (
-                    select w.id, w.attempt_no, w.submitted_at, w.position_assignment_id,
+                    select w.id, w.status, w.attempt_no, w.submitted_at, w.position_assignment_id,
                            actual_employee.id as employee_id,
                            actual_employee.name as employee_name,
                            actual_position.name as position_name
@@ -937,21 +1015,17 @@ public class WorkPackageService {
                     limit 1
                 ) latest_record on true
                 left join lateral (
-                    select min(w.submitted_at) as submitted_at
+                    select min(w.submitted_at) as submitted_at,
+                           min(w.submitted_at) filter (where w.status in ('SUBMITTED','APPROVED')) as valid_submitted_at,
+                           count(*) filter (where w.status = 'SUBMITTED') as pending_review_count,
+                           count(*) as submitted_record_count
                     from work_record w
                     where w.tenant_id = x.tenant_id
                       and w.work_expectation_id = x.id
                       and w.submitted_at is not null
                 ) first_record on true
                 where x.tenant_id = :tenantId
-                """ + visibility + filters + " order by case "
-                + "when x.business_date = current_date and x.status = 'SUBMITTED' then 0 "
-                + "when x.business_date = current_date then 1 "
-                + "when i.period_type <> 'DAY' and x.status in ('OVERDUE', 'MISSED', 'FAILED') then 2 "
-                + "when x.status = 'SUBMITTED' then 3 else 4 end, "
-                + "latest_record.submitted_at desc nulls last, x.business_date desc, "
-                + "x.due_at desc, x.created_at desc, x.id desc "
-                + "limit :pageSize offset :pageOffset", params);
+                """ + visibility + filters, params);
     }
 
     @Transactional(readOnly = true)

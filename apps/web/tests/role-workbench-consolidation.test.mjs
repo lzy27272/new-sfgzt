@@ -14,6 +14,13 @@ const workDataService = readFileSync(new URL('../../core-api/src/main/java/cn/si
 const attachmentService = readFileSync(new URL('../../core-api/src/main/java/cn/sifangguan/hotelaios/workdata/AttachmentService.java', import.meta.url), 'utf8')
 const vicePresidentDispatchMigration = readFileSync(new URL('../../../database/migrations/V53__group_vice_president_task_dispatch.sql', import.meta.url), 'utf8')
 
+
+const boardUi = readFileSync(new URL('../src/features/workbench/WorkBoard.tsx', import.meta.url), 'utf8')
+const boardApi = readFileSync(new URL('../src/features/workbench/workBoardApi.ts', import.meta.url), 'utf8')
+const boardService = readFileSync(new URL('../../core-api/src/main/java/cn/sifangguan/hotelaios/workpackage/WorkBoardService.java', import.meta.url), 'utf8')
+const boardModel = readFileSync(new URL('../src/features/workbench/workBoardModel.ts', import.meta.url), 'utf8')
+const boardStyles = readFileSync(new URL('../src/features/workbench/workBoard.css', import.meta.url), 'utf8')
+
 test('cockpit, task and notification entries are consolidated into the role workbench', () => {
   assert.match(navigation, /\['hotel-dashboard', 'operations-dashboard'\]\.includes\(item\.id\)/)
   assert.match(app, /buildNavigationCenters\(visibleNavigation, activeIdentity\.label\)/)
@@ -44,70 +51,55 @@ test('rules and work package routes are platform-administrator only', () => {
   assert.match(app, /administratorRouteAllowed/)
 })
 
-test('multi-hotel workbench supports overdue to late-submitted drill-down', () => {
-  assert.match(workbench, /已逾期/)
-  assert.match(workbench, /仍未提交/)
-  assert.match(workbench, /已补交/)
-  assert.match(workbench, /submitted > due/)
-  assert.match(workbench, /TeamWorkDrawer/)
-  assert.match(workbench, /部门员工统计/)
-  assert.match(workbench, /本月完成率/)
-  assert.match(workbench, /summaryHotel\.departments/)
-  assert.match(workPackageService, /"departments"/)
-  assert.match(workPackageService, /"employees"/)
-})
-
-test('workbench headline metrics open status details with matching data scope', () => {
-  assert.match(workbench, /const openMetricStatus = \(status:/)
-  assert.match(workbench, /!executive && selectedHotel/)
-  assert.match(workbench, /scope: 'all', status, focus: 'work-status'/)
-  assert.match(workbench, /allScopeDrilldown \? undefined/)
-  assert.match(workbench, /id="workbench-status-detail" tabIndex=\{-1\}/)
-  assert.match(workbench, /scrollIntoView\(\{ behavior: 'smooth', block: 'start' \}\)/)
-  assert.match(workbench, /aria-label=\{`查看待提交工作明细/)
-  assert.match(workbench, /点击查看 ›/)
-})
-
-test('executive workbench keeps the hotel portfolio and opens the first hotel detail by default', () => {
-  assert.match(workbench, /\{executive && <section className="workbench-portfolio panel">/)
-  assert.match(workbench, /\(executive \|\| hotelManagementKeys\.has\(presentationKey\)\) \? hotels\[0\]/)
+test('multi-hotel workbench preserves overdue and late-submitted detail routes', () => {
+assert.match(workbench, /hotelId: hotel.id, status: 'OVERDUE'/)
+  assert.match(boardUi, /已补交/)
+  assert.match(boardUi, /status: 'ALL', lateOnly: 'true'/)
   assert.match(workbench, /部门工作统计/)
-  assert.match(workbench, /部门员工工作统计/)
-  assert.match(workbench, /<h3>工作任务<\/h3>/)
-  assert.match(workbench, /今日个人工作/)
+  assert.match(workbench, /员工工作统计/)
+  assert.match(boardModel, /Date.parse\(first\) > Date.parse\(item.dueAt\)/)
+})
+
+test('team and personal cards open distinct scoped detail pages and retain dates', () => {
+assert.match(workbench, /go\('team-work', \{ ...selectedParams, ...patch/)
+  assert.match(workbench, /go\('my-work', \{ ...dateParams, status/)
+  assert.match(workbench, /title="团队工作看板"/)
+  assert.match(workbench, /title="个人工作看板"/)
+  assert.match(boardUi, /aria-label=\{boardLabels\[status\]/)
+})
+
+test('executive workbench begins at its authorized portfolio and drills into chosen hotel', () => {
+assert.match(workbench, /executive && canReadTeam/)
+  assert.match(workbench, /!executive && hotels.length === 1/)
+  assert.match(workbench, /进入门店/)
+  assert.match(workbench, /返回门店列表/)
   assert.match(workbench, /管理提醒/)
 })
 
-test('daily and month-to-date completion rates use the KPI on-time formula', () => {
-  assert.match(workbench, /当日完成率/)
+test('closure, submission and on-time rates stay distinct from settled KPI snapshots', () => {
+assert.match(workbench, /当日闭环完成率/)
   assert.match(workbench, /截至当日月工作完成率/)
-  assert.match(workbench, /当日按时完成项 ÷ 当日应完成项/)
-  assert.match(workbench, /本月截至今日按时完成项 ÷ 同期应完成项/)
-  assert.match(workbench, /loadWorkbenchSummary/)
-  assert.match(workPackageService, /teamWorkbenchSummary/)
+  assert.match(boardUi, /提交率/)
+  assert.match(boardUi, /按时提交率/)
+  assert.match(boardUi, /不受审核等待影响/)
+  assert.match(boardService, /completed_rate|field \+ "_rate"/)
+  assert.doesNotMatch(boardService, /captureWorkbench\(/)
   assert.match(workPackageService, /onTimeCompleted \* 100\.0 \/ expected/)
-  assert.match(workPackageService, /first_record\.submitted_at/)
 })
 
-test('workbench pins month-to-date requests to the reactive Shanghai business date', () => {
-  const currentScope = workbench.slice(workbench.indexOf('function currentScopeWork'), workbench.indexOf('function hotelIdFor'))
-  assert.match(workbench, /timeZone: 'Asia\/Shanghai'/)
-  assert.match(workbench, /role-workbench-work:\$\{canReadTeam\}:\$\{canReadOwn\}:\$\{currentBusinessDate\}/)
-  assert.match(workbench, /const workQuery = \{ fromBusinessDate: monthStart, toBusinessDate: currentBusinessDate \}/)
-  assert.match(workbench, /loadTeamWork\(identity, workQuery\)/)
-  assert.match(workbench, /loadMyWork\(identity, workQuery\)/)
-  assert.match(workbench, /loadWorkbenchSummary\(identity, currentBusinessDate\)/)
-  assert.match(workbench, /visibilitychange/)
-  assert.match(resources, /query\.set\('fromBusinessDate', options\.fromBusinessDate\)/)
-  assert.match(resources, /query\.set\('toBusinessDate', options\.toBusinessDate\)/)
-  assert.match(currentScope, /item\.businessDate\.startsWith\(month\)/)
-  assert.match(currentScope, /item\.businessDate === today \|\| isLateSubmitted\(item\)/)
+test('workbench uses server business day and shared date query across both boards', () => {
+assert.match(boardUi, /setServerDate\(resource.data.businessDate\)/)
+  assert.match(boardModel, /timeZone: 'Asia\/Shanghai'/)
+  assert.match(boardApi, /boardQuery\(params, today\)/)
+  assert.match(workbench, /useWorkBoard\(identity, 'my', dateParams/)
+  assert.match(boardService, /hotel_business_day_config/)
 })
 
-test('wide hotel details expose a keyboard-accessible horizontal scroll region', () => {
-  assert.match(workbench, /className="workbench-detail-scroll" role="region" tabIndex=\{0\}/)
-  assert.match(styles, /\.workbench-hotel-table,\.workbench-detail-scroll \{ overflow-x: auto;/)
-  assert.match(styles, /\.workbench-detail-grid \{ min-width: 1080px;/)
+test('desktop tables scroll accessibly and mobile work lists become cards', () => {
+assert.match(workbench, /role="region" tabIndex=\{0\}/)
+  assert.match(boardStyles, /\.wb-table-scroll \{ overflow-x: auto/)
+  assert.match(boardStyles, /\.wb-work-table thead \{ display: none;/)
+  assert.match(boardStyles, /\.wb-work-table tr \{ display: grid;/)
 })
 
 test('mobile main tabs no longer expose task and notification centers', () => {

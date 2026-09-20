@@ -35,6 +35,6 @@ test('chairman workbench selects the dedicated loader and gates it by server cap
 
 test('chairman quick dispatch uses the dedicated executive task route and permission', () => {
   assert.match(workbenchSource, /resolveTaskDispatchMode\(presentationKey, executiveTasksEnabled, permissions\)/)
-  assert.match(workbenchSource, /canExecutiveDispatch\s*\? go\('tasks', \{ create: 'true' \}\)/)
-  assert.match(workbenchSource, /creatingTask && canManageDispatch && <TaskCreateDialog/)
+  assert.match(workbenchSource, /dispatchMode === 'EXECUTIVE'[\s\S]*?go\('tasks', \{ create: 'true' \}\)/)
+  assert.match(workbenchSource, /creatingTask && dispatchMode === 'MANAGEMENT' && <TaskCreateDialog/)
 })

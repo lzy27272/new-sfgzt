@@ -82,6 +82,10 @@ export type WorkPackage = {
 }
 
 export type WorkExpectation = {
+  boardStatus?: 'PENDING' | 'OVERDUE' | 'REVIEW' | 'COMPLETED'
+  latestRecordStatus?: string
+  reviewMode?: string
+  departmentOrgUnitId?: string
   id: string
   title: string
   packageName: string
@@ -125,6 +129,7 @@ export type WorkExpectation = {
   workPackageItemId?: string
   recordId?: string
   firstSubmittedAt?: string
+  boardLate?: boolean
   latestSubmittedAt?: string
   rowVersion?: number
   evaluationOutcome?: string
