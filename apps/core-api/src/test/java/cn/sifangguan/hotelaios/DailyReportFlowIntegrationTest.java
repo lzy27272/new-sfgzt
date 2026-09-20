@@ -1,5 +1,8 @@
 package cn.sifangguan.hotelaios;
 
+import cn.sifangguan.hotelaios.dailyreporttemplates.DailyReportTemplateSnapshotReader;
+import cn.sifangguan.hotelaios.shared.context.TenantContext;
+import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -22,6 +25,7 @@ import java.sql.Connection;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.UUID;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -59,6 +63,26 @@ class DailyReportFlowIntegrationTest {
     private ObjectMapper objectMapper;
     @Autowired
     private JdbcTemplate jdbc;
+    @Autowired
+    private DailyReportTemplateSnapshotReader snapshotReader;
+
+    @Test
+    void seededHousekeepingTemplateHydratesExactVersionWithoutChangingPublishedConfiguration() throws Exception {
+        UUID versionId=jdbc.queryForObject("select md5('V62:drtv:HKA')::uuid",UUID.class);
+        String frozen=jdbc.queryForObject("select configuration::text from daily_report_template_version where tenant_id=?::uuid and id=?",String.class,TENANT,versionId);
+        TenantContext.set(new TenantPrincipal(UUID.fromString(TENANT),UUID.fromString(CEO),"CEO",Set.of(),UUID.randomUUID()));
+        try {
+            var result=snapshotReader.complete(versionId,objectMapper.readTree(frozen));
+            assertThat(result.path("sections").size()).isEqualTo(1);
+            assertThat(result.path("sections").get(0).path("items").size()).isEqualTo(11);
+            assertThat(result.toString()).contains("hka_usage_return_fact","manualOtherWork","AI_SUMMARY");
+            assertThat(jdbc.queryForObject("select configuration::text from daily_report_template_version where tenant_id=?::uuid and id=?",String.class,TENANT,versionId)).isEqualTo(frozen);
+            var alreadyFrozen=objectMapper.readTree("{\"title\":\"旧日报\",\"sections\":[{\"title\":\"已冻结内容\",\"items\":[]}]}");
+            assertThat(snapshotReader.complete(versionId,alreadyFrozen)).isEqualTo(alreadyFrozen);
+            TenantContext.set(new TenantPrincipal(UUID.randomUUID(),UUID.fromString(CEO),"CEO",Set.of(),UUID.randomUUID()));
+            assertThat(snapshotReader.complete(versionId,objectMapper.createObjectNode()).path("sections").isEmpty()).isTrue();
+        } finally { TenantContext.clear(); }
+    }
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {

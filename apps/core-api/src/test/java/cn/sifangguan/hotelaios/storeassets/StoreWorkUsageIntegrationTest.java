@@ -70,6 +70,13 @@ class StoreWorkUsageIntegrationTest {
     @Test void draftSubmissionApprovalLinenAndIdempotentRetry() throws Exception {
         String itemId=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
         UUID revision=createUsageDailyReport(version,itemId,LocalDate.now());
+        String reportId=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
+        JsonNode emptyReport=call(get("/api/v1/daily-reports/"+reportId),EMP,null,200);
+        assertThat(emptyReport.path("revisions").get(0).path("payloadSnapshot").path("resolvedTemplate").path("sections").size()).isEqualTo(1);
+        assertThat(emptyReport.path("aiRecommendations").get(0).path("analysis").asText()).contains("暂未取得本营业日、本任职的已提交工作");
+        JsonNode unchanged=call(get("/api/v1/daily-reports/"+reportId),EMP,null,200);
+        assertThat(unchanged.path("rowVersion")).isEqualTo(emptyReport.path("rowVersion"));
+        assertThat(unchanged.path("revisions")).isEqualTo(emptyReport.path("revisions"));
         String brush=item("CONSUMABLE","支","支",1,100,0.5), linen=item("LINEN","条","条",1,20,15);
         String record=submit(List.of(line(brush,"3","支",0),line(linen,"4","条",0)),true,201).path("id").asText();
         assertThat(jdbc.queryForObject("select count(*) from store_work_usage where work_record_id=?::uuid",Integer.class,record)).isZero();
@@ -77,6 +84,8 @@ class StoreWorkUsageIntegrationTest {
         balance(brush,"100","50"); balance(linen,"20","300");
         assertThat(call(get("/api/v1/work-data/records/"+record),EMP,null,200).path("inventoryUsage").path("status").asText()).isEqualTo("PENDING");
         assertThat(reportUsage(revision)).contains("待审核，未扣库", "布草使用，不扣总库存").doesNotContain("inventoryQuantities", "schemaVersion");
+        assertThat(summaryQuantity(revision,"CONSUMABLE","pendingQuantity")).isEqualTo("3");
+        assertThat(summaryQuantity(revision,"CONSUMABLE","approvedQuantity")).isEqualTo("0");
         review(record,GM,"APPROVED",1,200); review(record,GM,"APPROVED",1,200);
         balance(brush,"97","48.5"); balance(linen,"20","300");
         assertThat(movements(record)).isEqualTo(1);
@@ -87,11 +96,36 @@ class StoreWorkUsageIntegrationTest {
         assertThatThrownBy(()->jdbc.update("update store_work_usage_line set input_quantity=9 where work_record_id=?::uuid",record)).isInstanceOf(RuntimeException.class);
         assertThatThrownBy(()->jdbc.update("delete from store_work_usage where work_record_id=?::uuid",record)).isInstanceOf(RuntimeException.class);
         assertThat(reportUsage(revision)).contains("耗用已审核");
+        assertThat(summaryQuantity(revision,"CONSUMABLE","approvedQuantity")).isEqualTo("3");
+        assertThat(summaryQuantity(revision,"LINEN","approvedQuantity")).isEqualTo("4");
+        JsonNode ready=call(get("/api/v1/daily-reports/"+reportId),EMP,null,200);
+        assertThat(ready.path("aiRecommendations").get(0).path("analysis").asText()).contains("耗用审核", "已核对实际耗用");
+        String templateItemId=ready.path("itemResults").get(0).path("templateItemId").asText();
+        call(put("/api/v1/daily-reports/"+reportId+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",ready.path("rowVersion").asLong(),
+                "items",List.of(Map.of("templateItemId",templateItemId,"value","冒充自动汇总","exception",false))),400);
+        call(put("/api/v1/daily-reports/"+reportId+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",ready.path("rowVersion").asLong(),
+                "items",List.of(Map.of("templateItemId",templateItemId,"value","","exception",false))),200);
+        assertThat(reportUsage(revision)).contains("耗用已审核");
+        call(post("/api/v1/store-resources/hotels/"+H+"/work-usage/"+record+"/correct"),ADMIN,
+                Map.of("quantities",Map.of("schemaVersion",1,"noUsage",false,"lines",List.of(line(brush,"5","支",0),line(linen,"6","条",0))),
+                        "expectedVersion",0,"reason","日报汇总更正验证"),200);
+        assertThat(summaryQuantity(revision,"CONSUMABLE","approvedQuantity")).isEqualTo("5");
+        assertThat(summaryQuantity(revision,"LINEN","approvedQuantity")).isEqualTo("6");
+        balance(brush,"95","47.5");
         call(post("/api/v1/store-resources/hotels/"+H+"/work-usage/"+record+"/reverse"),ADMIN,Map.of("reason","日报冲销验证"),200);
         assertThat(reportUsage(revision)).contains("已冲销，原库存及成本已退回", "日报冲销验证");
         balance(brush,"100","50");
         assertThat(jdbc.queryForObject("select sum(amount) from store_cost_entry where source_parent_id=?::uuid",BigDecimal.class,record)).isZero();
-        assertThat(jdbc.queryForObject("select count(*) from store_cost_entry where source_parent_id=?::uuid",Integer.class,record)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from store_cost_entry where source_parent_id=?::uuid",Integer.class,record)).isEqualTo(4);
+        JsonNode reversed=call(get("/api/v1/daily-reports/"+reportId),EMP,null,200);
+        JsonNode summary=reversed.path("revisions").get(0).path("payloadSnapshot").path("dailySummary");
+        assertThat(summary.path("usageItems").isEmpty()).isTrue();
+        assertThat(summary.path("excludedUsageRecordCount").asInt()).isEqualTo(1);
+        call(post("/api/v1/daily-reports/"+reportId+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",reversed.path("rowVersion").asLong()),200);
+        String frozen=jdbc.queryForObject("select payload_snapshot::text from daily_report_revision where id=?",String.class,revision);
+        call(get("/api/v1/daily-reports/"+reportId),EMP,null,200);
+        assertThat(jdbc.queryForObject("select payload_snapshot::text from daily_report_revision where id=?",String.class,revision)).isEqualTo(frozen);
     }
 
     @Test void insufficientStockRollsBackEntireReviewThenConcurrentApprovalPostsOnce() throws Exception {
@@ -277,6 +311,11 @@ class StoreWorkUsageIntegrationTest {
 
     private String reportUsage(UUID revision) {
         return jdbc.queryForObject("select value::text from daily_report_item_result where revision_id=?",String.class,revision);
+    }
+    private String summaryQuantity(UUID revision,String category,String field) throws Exception {
+        JsonNode summary=mapper.readTree(jdbc.queryForObject("select payload_snapshot->'dailySummary' from daily_report_revision where id=?",String.class,revision));
+        for(JsonNode item:summary.path("usageItems")) if(category.equals(item.path("category").asText())) return item.path(field).asText();
+        throw new AssertionError("Missing usage category: "+category);
     }
     private UUID createUsageDailyReport(
             String workPackageVersionId,

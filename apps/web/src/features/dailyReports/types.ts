@@ -78,10 +78,19 @@ export type DailyReportAiRecommendation = {
   createdAt: string
 }
 
+export type DailyReportAutoSummary = {
+  mode: string
+  workItems: Array<{ label: string; status: string; completion: string; details: string; exception?: string; nextAction?: string }>
+  usageItems: Array<{ itemName: string; category: string; unit: string; approvedQuantity: string; pendingQuantity: string }>
+  usageRecordCount: number
+  excludedUsageRecordCount: number
+}
+
 export type DailyReportDetail = DailyReportSummary & {
   currentRevision: DailyReportRevision
   revisions: Array<Pick<DailyReportRevision, 'id' | 'revisionNo' | 'status' | 'submittedAt' | 'correctionReason'>>
   aiRecommendations: DailyReportAiRecommendation[]
+  autoSummary?: DailyReportAutoSummary
   allowedActions: string[]
   blockedActionReasons: Record<string, string>
 }

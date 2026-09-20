@@ -61,6 +61,7 @@ public class DailyReportService {
     private final BusinessDayService businessDayService;
     private final DailyReportTemplateService templateService;
     private final ObjectMapper objectMapper;
+    private final DailyReportRoutineProjectionService routineProjection;
 
     public DailyReportService(
             NamedParameterJdbcTemplate jdbc,
@@ -71,7 +72,8 @@ public class DailyReportService {
             BusinessEventPublisher eventPublisher,
             BusinessDayService businessDayService,
             DailyReportTemplateService templateService,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            DailyReportRoutineProjectionService routineProjection
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -82,6 +84,7 @@ public class DailyReportService {
         this.businessDayService = businessDayService;
         this.templateService = templateService;
         this.objectMapper = objectMapper;
+        this.routineProjection = routineProjection;
     }
 
     @Transactional(readOnly = true)
@@ -269,11 +272,15 @@ public class DailyReportService {
         return response;
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public Map<String, Object> detail(UUID reportId) {
         accessPolicy.requirePermission("daily-report.read");
         TenantPrincipal principal = prepare();
         requireVisible(principal, reportId);
+        UUID revisionId = jdbc.queryForObject("select current_revision_id from daily_report where tenant_id = :tenantId and id = :reportId",
+                base(principal).addValue("reportId", reportId), UUID.class);
+        // Materialize only editable drafts. Submitted revisions remain immutable snapshots.
+        routineProjection.projectReport(reportId, revisionId);
         return detailInternal(principal, reportId);
     }
 
@@ -304,6 +311,13 @@ public class DailyReportService {
             }
             if (!allowedItems.containsKey(item.templateItemId())) {
                 throw new IllegalArgumentException("日报字段不属于创建时冻结的模板");
+            }
+            if (allowedItems.get(item.templateItemId()).systemManaged()) {
+                if ((item.value() != null && !item.value().isNull() && !item.value().asText().isBlank())
+                        || Boolean.TRUE.equals(item.exception())) {
+                    throw new IllegalArgumentException("自动汇总字段不能手工覆盖，请在原工作记录中修正");
+                }
+                continue;
             }
             boolean exception = Boolean.TRUE.equals(item.exception());
             String resultStatus = exception ? "EXCEPTION"
@@ -368,6 +382,7 @@ public class DailyReportService {
         if (!"DRAFT".equals(report.reportStatus()) || !request.revisionId().equals(report.currentRevisionId())) {
             conflict("只有当前日报草稿可以提交");
         }
+        routineProjection.projectReport(reportId, request.revisionId());
         RevisionLock revision = lockRevision(principal, reportId, request.revisionId());
         if (!"DRAFT".equals(revision.status())) conflict("日报修订已经提交或审核");
         CommandIdempotencyService.Reservation reservation = idempotency.reserve(
@@ -814,9 +829,11 @@ public class DailyReportService {
                   and recommendation.status = 'AVAILABLE'
                   and request.request_type = 'DAILY_REPORT_ANALYSIS'
                   and request.input_snapshot ->> 'reportId' = :reportIdText
+                  and request.input_snapshot ->> 'revisionId' = :revisionIdText
                 order by recommendation.generated_at desc, recommendation.id
                 """, base(principal)
-                .addValue("reportIdText", reportId.toString()));
+                .addValue("reportIdText", reportId.toString())
+                .addValue("revisionIdText", String.valueOf(result.get("currentRevisionId"))));
         recommendations.forEach(recommendation -> recommendation.put(
                 "sourceLabels", parseJson(String.valueOf(recommendation.remove("sourceLabelsJson")))));
         result.put("aiRecommendations", recommendations);
@@ -901,7 +918,8 @@ public class DailyReportService {
             boolean evidenceRequired = item.path("evidencePolicy").path("required").asBoolean(false);
             boolean sourceRequired = item.path("dataSourceConfig").path("required").asBoolean(false);
             result.put(id, new ItemPolicy(
-                    id, item.path("required").asBoolean(true), evidenceRequired, sourceRequired));
+                    id, item.path("required").asBoolean(true), evidenceRequired, sourceRequired,
+                    Set.of("SYSTEM", "WORK_RECORD", "AI_SUMMARY").contains(item.path("dataSourceType").asText())));
         }));
         if (result.isEmpty()) throw new IllegalStateException("日报冻结模板没有可填写字段");
         return result;
@@ -1384,7 +1402,8 @@ public class DailyReportService {
     ) {
     }
 
-    private record ItemPolicy(UUID id, boolean required, boolean evidenceRequired, boolean sourceRequired) {
+    private record ItemPolicy(UUID id, boolean required, boolean evidenceRequired, boolean sourceRequired,
+                              boolean systemManaged) {
     }
 
     private record ResultValidation(UUID id, String status, boolean exception, String exceptionStatement) {

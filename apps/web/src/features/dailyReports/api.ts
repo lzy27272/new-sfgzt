@@ -75,7 +75,7 @@ function inputType(value: unknown): DailyReportItemResult['inputType'] {
 function dataSource(value: unknown): DailyReportItemResult['dataSource'] {
   const normalized = text(value, 'MANUAL').toUpperCase()
   if (['MANUAL', 'EMPLOYEE'].includes(normalized)) return 'EMPLOYEE'
-  if (normalized === 'SYSTEM') return 'SYSTEM'
+  if (['SYSTEM', 'WORK_RECORD', 'AI_SUMMARY'].includes(normalized)) return 'SYSTEM'
   return 'MIXED'
 }
 
@@ -85,6 +85,20 @@ const workRecordFieldLabels: Record<string, string> = {
   location: '房号',
   complaintContent: '客诉内容',
   initialHandling: '初步处理情况',
+  workSummary: '工作结果',
+  issueFound: '是否有异常',
+  issueSummary: '异常说明',
+  checkoutRooms: '退房打扫数',
+  stayoverRooms: '续住房打扫数',
+  lostPropertyOccurred: '是否发现遗留物',
+  inspectionResult: '检查结果',
+}
+
+function displayWorkForm(value: unknown): string {
+  return Object.entries(jsonRow(value))
+    .filter(([key, field]) => workRecordFieldLabels[key] && field !== null && field !== undefined && typeof field !== 'object')
+    .map(([key, field]) => `${workRecordFieldLabels[key]}：${typeof field === 'boolean' ? (field ? '是' : '否') : text(field)}`)
+    .join('；')
 }
 
 const workRecordStatusLabels: Record<string, string> = {
@@ -117,6 +131,8 @@ function displayValue(value: unknown): string | undefined {
       if (usage) return usage
       const repeatableRecords = displayRepeatableWorkRecords(row(parsed))
       if (repeatableRecords) return repeatableRecords
+      const work = displayRoutineWorkRecord(row(parsed))
+      if (work) return work
     } catch {
       // Plain employee text is expected here and should remain unchanged.
     }
@@ -127,7 +143,16 @@ function displayValue(value: unknown): string | undefined {
   if (usage) return usage
   const repeatableRecords = displayRepeatableWorkRecords(row(value))
   if (repeatableRecords) return repeatableRecords
+  const work = displayRoutineWorkRecord(row(value))
+  if (work) return work
   try { return JSON.stringify(value) } catch { return String(value) }
+}
+
+function displayRoutineWorkRecord(value: Row): string | undefined {
+  if (!value.workRecordId || !value.completion) return undefined
+  return [text(value.completion), displayWorkForm(value.formData),
+    value.exception ? `异常：${text(value.exception)}` : '',
+    value.nextAction ? `后续：${text(value.nextAction)}` : ''].filter(Boolean).join('；')
 }
 
 function displayUsageWorkRecord(value: Row): string | undefined {
@@ -171,7 +196,9 @@ function sourceLabelsFor(itemResultId: string, sourceRows: Row[], sourceSummary:
     .map((source) => text(source.sourceExternalKey || source.sourceType))
     .filter(Boolean)
   const summary = jsonRow(sourceSummary)
-  labels.push(...Object.keys(summary))
+  if (['WORK_RECORD', 'WORK_RECORD_COLLECTION'].includes(text(summary.sourceType))) {
+    return ['当日工作记录', ...(number(summary.evidenceCount) > 0 ? [`${number(summary.evidenceCount)} 份证据`] : [])]
+  }
   return [...new Set(labels)]
 }
 
@@ -304,7 +331,7 @@ function derivedActions(identity: ApiIdentity, summary: DailyReportSummary, curr
   return actions
 }
 
-function normalizeDetail(value: unknown, identity: ApiIdentity): DailyReportDetail {
+export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyReportDetail {
   const source = row(value)
   const rawRevisions = rows(source.revisions)
   const revisions = rawRevisions.map(normalizeRevision)
@@ -319,6 +346,7 @@ function normalizeDetail(value: unknown, identity: ApiIdentity): DailyReportDeta
   })
   const snapshot = jsonRow(rawCurrent.payloadSnapshot)
   const configuration = jsonRow(snapshot.resolvedTemplate)
+  const autoSummary = jsonRow(snapshot.dailySummary)
   const resolution = jsonRow(snapshot.templateResolution)
   const baseTemplate = jsonRow(resolution.baseTemplate)
   const currentItemRows = rows(source.itemResults).filter((item) => text(item.revisionId) === currentRevision.id)
@@ -339,9 +367,11 @@ function normalizeDetail(value: unknown, identity: ApiIdentity): DailyReportDeta
     ...source,
     templateName: source.templateName || configuration.title || baseTemplate.name,
     templateVersionNo: source.templateVersionNo ?? baseTemplate.versionNo,
-    completionRate: allItems.length ? Math.round((completedItems.length / allItems.length) * 100) : 0,
+    completionRate: autoSummary.expectedCount !== undefined
+      ? (number(autoSummary.expectedCount) > 0 ? Math.min(100, Math.round(number(autoSummary.completedCount) / number(autoSummary.expectedCount) * 100)) : 0)
+      : (allItems.length ? Math.round((completedItems.length / allItems.length) * 100) : 0),
     missingRequiredCount,
-    exceptionCount: allItems.filter((item) => item.exception).length,
+    exceptionCount: autoSummary.exceptionCount === undefined ? allItems.filter((item) => item.exception).length : number(autoSummary.exceptionCount),
     evidenceCount: currentEvidenceRows.length,
   })
   const allowedActions = Array.isArray(source.allowedActions)
@@ -355,12 +385,26 @@ function normalizeDetail(value: unknown, identity: ApiIdentity): DailyReportDeta
     ...summary,
     currentRevision,
     revisions,
+    autoSummary: Object.keys(autoSummary).length ? {
+      mode: text(autoSummary.mode),
+      workItems: rows(autoSummary.workItems).map((item) => ({
+        label: text(item.label), status: text(item.status), completion: text(item.completion),
+        details: displayWorkForm(item.formData), exception: text(item.exception), nextAction: text(item.nextAction),
+      })),
+      usageItems: rows(autoSummary.usageItems).map((item) => ({
+        itemName: text(item.itemName), category: text(item.category), unit: text(item.unit),
+        approvedQuantity: text(item.approvedQuantity, '0'), pendingQuantity: text(item.pendingQuantity, '0'),
+      })),
+      usageRecordCount: number(autoSummary.usageRecordCount),
+      excludedUsageRecordCount: number(autoSummary.excludedUsageRecordCount),
+    } : undefined,
     aiRecommendations: rows(source.aiRecommendations).map((recommendation, index) => ({
       id: text(recommendation.id, `ai:${index}`),
       facts: displayFactSummary(recommendation.facts),
       analysis: text(recommendation.analysis, '暂无补充分析'),
       recommendation: text(recommendation.recommendation, '暂无建议内容'),
-      sourceLabels: Array.isArray(recommendation.sourceLabels) ? recommendation.sourceLabels.map(String) : [],
+      sourceLabels: Array.isArray(recommendation.sourceLabels)
+        ? [...new Set(recommendation.sourceLabels.map((label) => text(label).startsWith('DAILY_REPORT:') ? '本日报当日工作与耗用记录' : text(label)))] : [],
       createdAt: text(recommendation.createdAt),
     })),
     allowedActions,

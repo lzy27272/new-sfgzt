@@ -1,5 +1,7 @@
 package cn.sifangguan.hotelaios.dailyreports;
 
+import cn.sifangguan.hotelaios.dailyreporttemplates.DailyReportTemplateSnapshotReader;
+import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
@@ -13,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.math.BigDecimal;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -42,15 +45,21 @@ public class DailyReportRoutineProjectionService {
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final ObjectMapper objectMapper;
+    private final DailyReportTemplateSnapshotReader snapshotReader;
+    private final AuditWriter auditWriter;
 
     public DailyReportRoutineProjectionService(
             NamedParameterJdbcTemplate jdbc,
             TenantDatabaseContext databaseContext,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            DailyReportTemplateSnapshotReader snapshotReader,
+            AuditWriter auditWriter
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
         this.objectMapper = objectMapper;
+        this.snapshotReader = snapshotReader;
+        this.auditWriter = auditWriter;
     }
 
     public void projectApprovedWorkRecord(UUID workRecordId) {
@@ -73,6 +82,12 @@ public class DailyReportRoutineProjectionService {
                 where record.tenant_id = :tenantId and record.id = :recordId
                   and record.status in ('SUBMITTED', 'APPROVED', 'REJECTED')
                   and report.current_revision_id is not null
+                  and exists (
+                      select 1 from org_unit_closure hotel_scope
+                      where hotel_scope.tenant_id = report.tenant_id
+                        and hotel_scope.ancestor_id = report.hotel_org_unit_id
+                        and hotel_scope.descendant_id = record.target_org_unit_id
+                  )
                   and exists (
                       select 1
                       from daily_report_template_section relation
@@ -106,6 +121,7 @@ public class DailyReportRoutineProjectionService {
     public void projectReport(UUID reportId, UUID revisionId) {
         TenantPrincipal principal = prepare();
         if (!lockDraftReport(principal, reportId, revisionId)) return;
+        repairEmptyTemplateSnapshot(principal, reportId, revisionId);
         List<ProjectableRecord> records = jdbc.query("""
                 select matched_item.template_item_id, record.id as work_record_id,
                        record.position_assignment_id, record.submitted_by_account_id,
@@ -174,6 +190,12 @@ public class DailyReportRoutineProjectionService {
                  and expectation.id = record.work_expectation_id
                 where report.tenant_id = :tenantId and report.id = :reportId
                   and report.report_status = 'DRAFT'
+                  and exists (
+                      select 1 from org_unit_closure hotel_scope
+                      where hotel_scope.tenant_id = report.tenant_id
+                        and hotel_scope.ancestor_id = report.hotel_org_unit_id
+                        and hotel_scope.descendant_id = record.target_org_unit_id
+                  )
                 order by matched_item.template_item_id, record.series_entry_no desc,
                          record.attempt_no desc, record.id desc
                 """, base(principal).addValue("reportId", reportId).addValue("revisionId", revisionId),
@@ -205,6 +227,38 @@ public class DailyReportRoutineProjectionService {
             }
         }
         refreshRuleAnalysis(principal, reportId, revisionId);
+    }
+
+    private void repairEmptyTemplateSnapshot(TenantPrincipal principal, UUID reportId, UUID revisionId) {
+        var params = base(principal).addValue("reportId", reportId).addValue("revisionId", revisionId);
+        Map<String, Object> row = jdbc.queryForMap("""
+                select report.template_version_id, revision.payload_snapshot::text as snapshot
+                from daily_report report join daily_report_revision revision
+                  on revision.tenant_id = report.tenant_id and revision.report_id = report.id
+                where report.tenant_id = :tenantId and report.id = :reportId and revision.id = :revisionId
+                """, params);
+        ObjectNode snapshot = readObject(String.valueOf(row.get("snapshot")));
+        JsonNode frozen = snapshot.path("resolvedTemplate");
+        if (frozen.path("sections").isArray() && !frozen.path("sections").isEmpty()) return;
+        // Use only the originally selected versions; never resolve today's/latest template here.
+        ObjectNode repaired = snapshotReader.complete((UUID) row.get("template_version_id"), frozen);
+        ArrayNode sections = (ArrayNode) repaired.path("sections");
+        for (JsonNode supplement : snapshot.path("templateResolution").path("supplementTemplates")) {
+            UUID versionId = UUID.fromString(supplement.path("templateVersionId").asText());
+            snapshotReader.complete(versionId, supplement.path("configuration")).path("sections")
+                    .forEach(sections::add);
+        }
+        if (sections.isEmpty()) return;
+        snapshot.set("resolvedTemplate", repaired);
+        jdbc.update("""
+                update daily_report_revision set payload_snapshot = cast(:snapshot as jsonb),
+                       row_version = row_version + 1
+                where tenant_id = :tenantId and id = :revisionId and revision_status = 'DRAFT'
+                """, params.addValue("snapshot", snapshot.toString()));
+        jdbc.update("update daily_report set row_version = row_version + 1 where tenant_id = :tenantId and id = :reportId", params);
+        auditWriter.record("DAILY_REPORT_TEMPLATE_SNAPSHOT_REPAIRED", "DAILY_REPORT", reportId,
+                objectMapper.createObjectNode().put("revisionId", revisionId.toString())
+                        .put("templateVersionId", row.get("template_version_id").toString()).toString());
     }
 
     private boolean lockDraftReport(TenantPrincipal principal, UUID reportId, UUID revisionId) {
@@ -263,6 +317,12 @@ public class DailyReportRoutineProjectionService {
                               and record.business_date = report.business_date
                               and record.status in ('SUBMITTED', 'APPROVED')
                               and record.position_assignment_id = report.position_assignment_id
+                              and exists (
+                                  select 1 from org_unit_closure hotel_scope
+                                  where hotel_scope.tenant_id = report.tenant_id
+                                    and hotel_scope.ancestor_id = report.hotel_org_unit_id
+                                    and hotel_scope.descendant_id = record.target_org_unit_id
+                              )
                         )
                   )
                 """;
@@ -304,6 +364,12 @@ public class DailyReportRoutineProjectionService {
                               and record.business_date = report.business_date
                               and record.position_assignment_id = report.position_assignment_id
                               and record.status in ('SUBMITTED', 'APPROVED')
+                              and exists (
+                                  select 1 from org_unit_closure hotel_scope
+                                  where hotel_scope.tenant_id = report.tenant_id
+                                    and hotel_scope.ancestor_id = report.hotel_org_unit_id
+                                    and hotel_scope.descendant_id = record.target_org_unit_id
+                              )
                               and record.id::text in (
                                   select jsonb_array_elements_text(
                                       coalesce(result.source_summary -> 'workRecordIds', '[]'::jsonb)
@@ -734,6 +800,12 @@ public class DailyReportRoutineProjectionService {
                       and coalesce(actual_record.position_assignment_id,
                                    expectation.position_assignment_id)
                             = report.position_assignment_id
+                      and exists (
+                          select 1 from org_unit_closure hotel_scope
+                          where hotel_scope.tenant_id = report.tenant_id
+                            and hotel_scope.ancestor_id = report.hotel_org_unit_id
+                            and hotel_scope.descendant_id = expectation.target_org_unit_id
+                      )
                 )
                 select report.hotel_org_unit_id, report.org_unit_id, report.business_date,
                        report.position_assignment_id, report.trace_id,
@@ -779,10 +851,21 @@ public class DailyReportRoutineProjectionService {
         int missed = ((Number) facts.get("missed_count")).intValue();
         int evidence = ((Number) facts.get("evidence_count")).intValue();
         RuleContentFacts contentFacts = collectRuleContentFacts(principal, revisionId);
+        ObjectNode dailySummary = collectDailySummary(principal, revisionId);
+        dailySummary.put("expectedCount", expected);
+        dailySummary.put("completedCount", completed);
+        dailySummary.put("pendingReviewCount", pendingReview);
+        dailySummary.put("exceptionCount", exceptions);
+        dailySummary.put("missedCount", missed);
         String analysis = "规则分析：今日标准日常工作已审核完成 " + completed + "/" + expected
                 + " 项，待主管审核 " + pendingReview + " 项，关联证据 " + evidence
                 + " 份；异常 " + exceptions + " 项，逾期 " + missed + " 项。"
-                + renderContentAnalysis(contentFacts);
+                + renderContentAnalysis(contentFacts)
+                + (dailySummary.path("workItems").isEmpty()
+                    ? " 暂未取得本营业日、本任职的已提交工作，不能据此判断已完成。"
+                    : " 工作记录：" + renderWorkSummary(dailySummary) + "。")
+                + (dailySummary.path("usageItems").isEmpty() ? ""
+                    : " 物品数量已按台账去重汇总；待审核数量尚未计入库存及成本，布草使用不等于洗涤结算。");
         String recommendation = buildRuleRecommendation(
                 pendingReview, exceptions, missed, completed, expected, contentFacts);
         jdbc.update("""
@@ -805,6 +888,14 @@ public class DailyReportRoutineProjectionService {
         input.put("analysisMode", "FACT_ONLY_INTERNAL_RULES");
         input.set("issueFacts", toFactArray(contentFacts.issueFacts()));
         input.set("declaredNextActions", toFactArray(contentFacts.declaredActions()));
+        input.set("dailySummary", dailySummary);
+        jdbc.update("""
+                update daily_report_revision
+                set payload_snapshot = jsonb_set(payload_snapshot, '{dailySummary}', cast(:summary as jsonb)),
+                    row_version = row_version + 1
+                where tenant_id = :tenantId and id = :revisionId and revision_status = 'DRAFT'
+                  and payload_snapshot -> 'dailySummary' is distinct from cast(:summary as jsonb)
+                """, base(principal).addValue("revisionId", revisionId).addValue("summary", dailySummary.toString()));
         String inputHash = sha256(input.toString());
         UUID existingRecommendationId = jdbc.query("""
                 select recommendation.id
@@ -841,8 +932,9 @@ public class DailyReportRoutineProjectionService {
                   and request.request_type = 'DAILY_REPORT_ANALYSIS'
                   and request.provider_code = :provider
                   and request.input_snapshot ->> 'reportId' = :reportIdText
+                  and request.input_snapshot ->> 'revisionId' = :revisionIdText
                 """, base(principal).addValue("provider", RULE_PROVIDER)
-                .addValue("reportIdText", reportId.toString()));
+                .addValue("reportIdText", reportId.toString()).addValue("revisionIdText", revisionId.toString()));
 
         UUID requestId = UUID.randomUUID();
         jdbc.update("""
@@ -1046,11 +1138,21 @@ public class DailyReportRoutineProjectionService {
         if (usage.isEmpty()) return;
         Map<String, Object> row = usage.getFirst();
         List<Map<String, Object>> lines = jdbc.queryForList("""
-                select item_name,category,input_quantity,input_unit,base_quantity,base_unit
+                select item_id,item_name,category,input_quantity,input_unit,base_quantity,base_unit
                 from store_work_usage_current_line where tenant_id=:tenantId and work_record_id=:recordId order by item_id
                 """, base(principal).addValue("recordId", recordId));
         String status = String.valueOf(row.get("status"));
         ObjectNode fact = value.putObject("inventoryUsage");
+        fact.put("usageRecordId", recordId.toString());
+        fact.put("noUsage", Boolean.TRUE.equals(row.get("no_usage")));
+        ArrayNode quantities = fact.putArray("lines");
+        for (Map<String, Object> line : lines) {
+            quantities.addObject().put("itemId", line.get("item_id").toString())
+                    .put("itemName", String.valueOf(line.get("item_name")))
+                    .put("category", String.valueOf(line.get("category")))
+                    .put("quantity", ((BigDecimal) line.get("base_quantity")).stripTrailingZeros().toPlainString())
+                    .put("unit", String.valueOf(line.get("base_unit")));
+        }
         fact.put("status", status);
         if (row.get("revision_no")!=null) {
             fact.put("correctionVersion", ((Number)row.get("revision_no")).intValue());
@@ -1071,6 +1173,82 @@ public class DailyReportRoutineProjectionService {
         if (row.get("reversal_reason") != null) fact.put("reversalReason", String.valueOf(row.get("reversal_reason")));
         // Keep raw ids/unit versions in the immutable work record, not in human-readable report facts.
         ((ObjectNode) value.path("formData")).remove("inventoryQuantities");
+    }
+
+    private ObjectNode collectDailySummary(TenantPrincipal principal, UUID revisionId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                select result.value::text as value, result.source_summary::text as source,
+                       item.label
+                from daily_report_item_result result
+                join daily_report_template_item item
+                  on item.tenant_id = result.tenant_id and item.id = result.template_item_id
+                where result.tenant_id = :tenantId and result.revision_id = :revisionId
+                  and result.system_prefilled
+                  and result.source_summary ->> 'sourceType' in ('WORK_RECORD','WORK_RECORD_COLLECTION')
+                order by item.sort_order, item.id
+                """, base(principal).addValue("revisionId", revisionId));
+        return summarizeWorkResults(rows);
+    }
+
+    ObjectNode summarizeWorkResults(List<Map<String, Object>> rows) {
+        ObjectNode summary = objectMapper.createObjectNode();
+        summary.put("mode", "FACT_ONLY_INTERNAL_RULES");
+        ArrayNode workItems = summary.putArray("workItems");
+        Set<String> recordIds = new LinkedHashSet<>();
+        Set<String> usageIds = new LinkedHashSet<>();
+        Map<String, ObjectNode> quantities = new LinkedHashMap<>();
+        int excluded = 0;
+        for (Map<String, Object> row : rows) {
+            ObjectNode value = readObject(String.valueOf(row.get("value")));
+            ObjectNode source = readObject(String.valueOf(row.get("source")));
+            Iterable<JsonNode> entries = value.path("entries").isArray() ? value.path("entries") : List.of(value);
+            for (JsonNode entry : entries) {
+                if (!recordIds.add(entry.path("workRecordId").asText())) continue;
+                ObjectNode work = workItems.addObject();
+                work.put("label", String.valueOf(row.get("label")));
+                work.put("status", entry.path("status").asText());
+                work.put("completion", entry.path("completion").asText());
+                work.put("exception", entry.path("exception").asText());
+                work.put("nextAction", entry.path("nextAction").asText());
+                work.put("evidenceCount", source.path("evidenceCount").asInt());
+                work.set("formData", entry.path("formData").deepCopy());
+                JsonNode usage = entry.path("inventoryUsage");
+                String usageId = usage.path("usageRecordId").asText();
+                if (usageId.isBlank() || !usageIds.add(usageId)) continue;
+                String status = usage.path("status").asText();
+                if (!Set.of("PENDING", "APPROVED").contains(status)) { excluded++; continue; }
+                for (JsonNode line : usage.path("lines")) {
+                    String key = line.path("itemId").asText() + "|" + line.path("unit").asText();
+                    ObjectNode total = quantities.computeIfAbsent(key, ignored -> {
+                        ObjectNode item = objectMapper.createObjectNode();
+                        item.put("itemName", line.path("itemName").asText());
+                        item.put("category", line.path("category").asText());
+                        item.put("unit", line.path("unit").asText());
+                        item.put("approvedQuantity", "0");
+                        item.put("pendingQuantity", "0");
+                        return item;
+                    });
+                    String quantityKey = "APPROVED".equals(status) ? "approvedQuantity" : "pendingQuantity";
+                    BigDecimal quantity = new BigDecimal(total.path(quantityKey).asText())
+                            .add(new BigDecimal(line.path("quantity").asText()));
+                    total.put(quantityKey, quantity.stripTrailingZeros().toPlainString());
+                }
+            }
+        }
+        ArrayNode usageItems = summary.putArray("usageItems");
+        quantities.values().forEach(usageItems::add);
+        summary.put("usageRecordCount", usageIds.size());
+        summary.put("excludedUsageRecordCount", excluded);
+        return summary;
+    }
+
+    private static String renderWorkSummary(ObjectNode summary) {
+        List<String> entries = new ArrayList<>();
+        for (JsonNode work : summary.path("workItems")) {
+            String state = "APPROVED".equals(work.path("status").asText()) ? "已审核" : "已提交待审核";
+            entries.add(work.path("label").asText() + "（" + state + "）：" + work.path("completion").asText());
+        }
+        return String.join("；", entries);
     }
 
     private ArrayNode toFactArray(List<RuleFact> facts) {
@@ -1123,6 +1301,8 @@ public class DailyReportRoutineProjectionService {
             clauses.add("请优先核对异常和逾期事项，确认整改责任人与时限。");
         } else if (completed < expected) {
             clauses.add("尚有标准事项未完成，请按截止时间跟进。");
+        } else if (expected == 0 && completed == 0 && pendingReview == 0) {
+            clauses.add("暂无可汇总工作，请核对当日排班、日清任务及提交情况；暂无记录不代表已经完成。");
         } else if (facts.issueFacts().isEmpty()) {
             clauses.add("标准事项闭环正常，请补充其他工作后提交日报。");
         }
@@ -1133,9 +1313,7 @@ public class DailyReportRoutineProjectionService {
         List<String> rendered = new ArrayList<>();
         for (int index = 0; index < Math.min(limit, facts.size()); index++) {
             RuleFact fact = facts.get(index);
-            String id = fact.workRecordId();
-            String shortId = id == null || id.length() <= 8 ? id : id.substring(0, 8);
-            rendered.add("[工作记录" + shortId + "·" + displayField(fact.sourceField()) + "] " + fact.value());
+            rendered.add("[工作记录·" + displayField(fact.sourceField()) + "] " + fact.value());
         }
         return String.join("；", rendered);
     }
@@ -1145,7 +1323,12 @@ public class DailyReportRoutineProjectionService {
             case "exception" -> "异常说明";
             case "nextAction" -> "后续动作";
             case "completion" -> "完成说明";
-            default -> field.startsWith("formData.") ? "表单." + field.substring("formData.".length()) : field;
+            case "formData.issueSummary" -> "异常说明";
+            case "formData.issueFound" -> "发现异常";
+            case "formData.workSummary" -> "工作结果";
+            case "formData.complaintContent" -> "客诉内容";
+            case "formData.initialHandling" -> "初步处理";
+            default -> "填报内容";
         };
     }
 

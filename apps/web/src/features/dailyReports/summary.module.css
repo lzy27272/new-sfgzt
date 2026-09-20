@@ -1,0 +1,13 @@
+.note { color: #667f91; font-size: 12px; line-height: 1.7; margin: 8px 0; }
+.text { color: #35576e; font-size: 13px; line-height: 1.7; margin: 6px 0; overflow-wrap: anywhere; }
+.tableWrap { width: 100%; overflow-x: auto; }
+.tableWrap table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+.tableWrap th, .tableWrap td { padding: 10px 8px; border-bottom: 1px solid #e2e9ee; white-space: nowrap; }
+.tableWrap th { color: #587386; background: #f6f9fb; }
+.analysis { display: grid; gap: 8px; margin: 0; }
+.analysis dt { color: #6755ad; font-size: 13px; font-weight: 700; }
+.analysis dd { color: #35576e; font-size: 13px; line-height: 1.7; margin: 0 0 8px; overflow-wrap: anywhere; white-space: pre-line; }
+.details { margin-top: 14px; padding: 12px; background: #f6f9fb; border-radius: 10px; font-size: 13px; }
+.details summary { cursor: pointer; color: #256ba3; }
+.details article { padding-top: 12px; }
+@media (max-width: 560px) { .tableWrap th, .tableWrap td { padding: 8px 6px; } }

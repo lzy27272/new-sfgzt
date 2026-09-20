@@ -50,6 +50,7 @@ public class DailyReportTemplateService {
     private final BusinessEventPublisher eventPublisher;
     private final BusinessDayService businessDayService;
     private final ObjectMapper objectMapper;
+    private final DailyReportTemplateSnapshotReader snapshotReader;
 
     public DailyReportTemplateService(
             NamedParameterJdbcTemplate jdbc,
@@ -59,7 +60,8 @@ public class DailyReportTemplateService {
             AuditWriter auditWriter,
             BusinessEventPublisher eventPublisher,
             BusinessDayService businessDayService,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            DailyReportTemplateSnapshotReader snapshotReader
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -69,6 +71,7 @@ public class DailyReportTemplateService {
         this.eventPublisher = eventPublisher;
         this.businessDayService = businessDayService;
         this.objectMapper = objectMapper;
+        this.snapshotReader = snapshotReader;
     }
 
     @Transactional(readOnly = true)
@@ -556,9 +559,11 @@ public class DailyReportTemplateService {
                 .filter(item -> baseTemplateId.equals(item.get("baseTemplateDefinitionId")))
                 .toList();
         ArrayNode resolvedSections = objectMapper.createArrayNode();
-        appendSections(resolvedSections, baseTemplate.get("configuration"));
+        appendSections(resolvedSections, snapshotReader.complete((UUID) baseTemplate.get("templateVersionId"),
+                (JsonNode) baseTemplate.get("configuration")));
         for (Map<String, Object> supplement : supplements) {
-            appendSections(resolvedSections, supplement.get("configuration"));
+            appendSections(resolvedSections, snapshotReader.complete((UUID) supplement.get("templateVersionId"),
+                    (JsonNode) supplement.get("configuration")));
         }
         ObjectNode resolvedConfiguration = objectMapper.createObjectNode();
         resolvedConfiguration.put("title", String.valueOf(baseTemplate.get("name")));
