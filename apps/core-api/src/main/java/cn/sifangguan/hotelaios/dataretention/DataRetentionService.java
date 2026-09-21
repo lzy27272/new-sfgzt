@@ -81,6 +81,15 @@ public class DataRetentionService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "数据留存策略版本已变化，请刷新后重试");
         }
 
+        jdbc.update("""
+                update attachment a set retention_basis_at=o.uploaded_at,
+                    retention_until=o.uploaded_at + :days * interval '24 hours'
+                from image_retention_object o
+                where a.tenant_id=:tenantId and o.tenant_id=a.tenant_id and o.object_key=a.object_key
+                  and a.media_type like 'image/%' and a.deleted_at is null
+                  and a.retention_until is distinct from o.uploaded_at + :days * interval '24 hours'
+                """,base(principal).addValue("days",request.imageRetentionDays()));
+
         DataRetentionModels.Policy result = loadPolicy(principal);
         auditWriter.record(
                 "DATA_RETENTION_POLICY_UPDATED",
@@ -109,20 +118,14 @@ public class DataRetentionService {
         return jdbc.queryForObject("""
                 select count(*) as candidate_count,
                        coalesce(sum(attachment_item.size_bytes), 0) as total_size_bytes,
-                       min(attachment_item.retention_until) as oldest_retention_until,
-                       max(attachment_item.retention_until) as newest_retention_until
-                from attachment attachment_item
-                join work_record record
-                  on record.tenant_id = attachment_item.tenant_id
-                 and record.id = attachment_item.work_record_id
+                       min(attachment_item.uploaded_at + policy.image_retention_days * interval '24 hours') as oldest_retention_until,
+                       max(attachment_item.uploaded_at + policy.image_retention_days * interval '24 hours') as newest_retention_until
+                from image_retention_object attachment_item
+                join data_retention_policy policy using (tenant_id)
                 where attachment_item.tenant_id = :tenantId
-                  and record.status = 'APPROVED'
-                  and attachment_item.media_type like 'image/%'
-                  and attachment_item.storage_status = 'AVAILABLE'
-                  and attachment_item.deleted_at is null
+                  and attachment_item.state <> 'DELETED'
                   and attachment_item.legal_hold = false
-                  and attachment_item.retention_until is not null
-                  and attachment_item.retention_until <= now()
+                  and attachment_item.uploaded_at <= now() - policy.image_retention_days * interval '24 hours'
                 """, base(principal), (rs, rowNum) -> new DataRetentionModels.CleanupPreview(
                 rs.getLong("candidate_count"),
                 rs.getLong("total_size_bytes"),

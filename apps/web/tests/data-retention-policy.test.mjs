@@ -114,9 +114,9 @@ test('administrator navigation and direct-link boundary are explicit', () => {
   assert.match(appSource, /<DataRetentionAdministration identity=\{activeIdentity\}/)
 })
 
-test('page states the release gate and exposes no delete action', () => {
-  assert.match(pageSource, /当前版本清理执行器关闭，不会删除任何图片/)
+test('page states both execution gates and exposes no immediate delete action', () => {
+  assert.match(pageSource, /双重开关控制，仅清理到期普通图片/)
   assert.match(pageSource, /预览不会删除文件/)
-  assert.match(pageSource, /仅记录意图；当前版本仍不会删除/)
+  assert.match(pageSource, /从上传成功起计算；重要证据标记后暂停清理/)
   assert.doesNotMatch(pageSource, /<button[^>]*>[^<]*(?:立即删除|执行删除|开始清理)[^<]*<\/button>/)
 })

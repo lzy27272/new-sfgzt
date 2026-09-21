@@ -15,6 +15,7 @@ import {
   type RetentionNumericField,
 } from './policy'
 import styles from './dataRetention.module.css'
+import { ImageRetentionPanel } from './ImageRetentionPanel'
 
 type RetentionField = Readonly<{
   key: RetentionNumericField
@@ -24,7 +25,7 @@ type RetentionField = Readonly<{
 }>
 
 const shortTermFields: readonly RetentionField[] = Object.freeze([
-  Object.freeze({ key: 'imageRetentionDays', label: '工作验收图片', description: '从工作最终验收通过后开始计算。', unit: '天' }),
+  Object.freeze({ key: 'imageRetentionDays', label: '工作与任务图片', description: '从上传成功起计算；重要证据标记后暂停清理。', unit: '天' }),
   Object.freeze({ key: 'documentRetentionDays', label: 'PDF、Word、Excel 文档', description: '用于短期复核和业务排错。', unit: '天' }),
 ])
 
@@ -94,17 +95,17 @@ function PreviewPanel({ preview, loading, onRefresh }: {
 }) {
   return <article className={styles.previewPanel}>
     <header>
-      <div><span>DELETION PREVIEW</span><h2>到期图片候选预览</h2><p>仅统计已最终验收、已到期、非暂停清理且尚未删除的图片。</p></div>
+      <div><span>DELETION PREVIEW</span><h2>到期图片候选预览</h2><p>统计上传后已到期、未标记重要证据且尚未删除的图片，包括未审核图片。</p></div>
       <button className="secondary" disabled={loading} onClick={onRefresh}>{loading ? '刷新中…' : '刷新预览'}</button>
     </header>
-    <div className={styles.previewNotice}><strong>预览不会删除文件</strong><span>本页没有文件删除操作；当前版本的清理执行器固定关闭。</span></div>
+    <div className={styles.previewNotice}><strong>预览不会删除文件</strong><span>自动清理由后台执行；文件位置或指纹异常时停止删除并记录失败。</span></div>
     <div className={styles.metrics} aria-live="polite">
       <div><span>候选图片</span><strong>{preview ? preview.candidateCount.toLocaleString('zh-CN') : '—'}</strong><small>张</small></div>
       <div><span>预计释放空间</span><strong>{preview ? formatRetentionBytes(preview.totalSizeBytes) : '—'}</strong><small>只读估算</small></div>
       <div><span>最早到期时间</span><strong>{preview ? formatRetentionTimestamp(preview.oldestRetentionUntil) : '—'}</strong><small>候选范围</small></div>
       <div><span>最晚到期时间</span><strong>{preview ? formatRetentionTimestamp(preview.newestRetentionUntil) : '—'}</strong><small>候选范围</small></div>
     </div>
-    <footer>预览生成于 {preview ? formatRetentionTimestamp(preview.generatedAt) : '—'} · 租户清理意图：{preview?.cleanupEnabled ? '已预配置开启' : '关闭'}</footer>
+    <footer>预览生成于 {preview ? formatRetentionTimestamp(preview.generatedAt) : '—'} · 租户清理开关：{preview?.cleanupEnabled ? '开启' : '关闭'}</footer>
   </article>
 }
 
@@ -171,6 +172,8 @@ export function DataRetentionAdministration({ identity }: { identity: RoleContex
 
   const save = async () => {
     if (!draft || !policy || invalid) return
+    if (draft.imageCleanupEnabled && (!policy.imageCleanupEnabled || Number(draft.imageRetentionDays) < policy.imageRetentionDays)
+      && !window.confirm('保存后，超过图片保存期限且未标记为重要证据的图片将自动清理，无法恢复。确认继续？')) return
     setSaving(true)
     setError(undefined)
     setNotice(undefined)
@@ -178,7 +181,7 @@ export function DataRetentionAdministration({ identity }: { identity: RoleContex
       const saved = await updateDataRetentionPolicy(identity, buildDataRetentionUpdateRequest(draft, policy.version))
       setPolicy(saved)
       setDraft(dataRetentionDraftFrom(saved))
-      setNotice('数据留存策略已保存。图片候选仅供预览，当前版本不会执行自动删除。')
+      setNotice('数据留存策略已保存。自动清理需同时满足部署开关和租户开关；重要证据不参与清理。')
       await refreshPreview()
     } catch (reason) {
       setError(errorMessage(reason, '数据留存策略保存失败'))
@@ -202,7 +205,7 @@ export function DataRetentionAdministration({ identity }: { identity: RoleContex
 
     <div className={styles.executionGate} role="status">
       <span>安全门禁</span>
-      <div><strong>当前版本清理执行器关闭，不会删除任何图片</strong><p>“自动清理”开关仅预配置租户意图；未来启用执行器前仍需完成 COS 对账、清理预览与单独发布审批。</p></div>
+      <div><strong>双重开关控制，仅清理到期普通图片</strong><p>部署执行器与租户开关均开启才会删除。图片按上传成功时间计时；重要证据须在清理前标记保留。工作记录、数据和报告不随图片删除。</p></div>
     </div>
 
     {notice && <div className="inline-success page-error" role="status">{notice}</div>}
@@ -212,7 +215,7 @@ export function DataRetentionAdministration({ identity }: { identity: RoleContex
       <div className={styles.layout}>
         <div className={styles.formStack}>
           <article className={styles.policyPanel}>
-            <header><div><span>SHORT-TERM EVIDENCE</span><h2>短期原始证据</h2><p>图片按最终验收时间滚动保留，文档用于短期业务复核。</p></div></header>
+            <header><div><span>SHORT-TERM EVIDENCE</span><h2>短期原始证据</h2><p>图片从上传成功起滚动保留，未审核图片同样计时；文档不参与本次自动清理。</p></div></header>
             <RetentionFields fields={shortTermFields} draft={draft} errors={validationErrors} disabled={saving} onChange={changeNumber} />
           </article>
 
@@ -222,7 +225,7 @@ export function DataRetentionAdministration({ identity }: { identity: RoleContex
           </article>
 
           <article className={styles.cleanupPanel}>
-            <div><span>FUTURE RELEASE GATE</span><h2>图片自动清理意图</h2><p>此项只保存未来发布所需的策略状态，不会启动任务，也不会删除文件。</p></div>
+            <div><span>IMAGE CLEANUP</span><h2>图片自动清理开关</h2><p>执行器已部署时，开启并保存后将自动清理到期普通图片。删除不可恢复。</p></div>
             <label className={styles.cleanupToggle}>
               <input
                 type="checkbox"
@@ -233,7 +236,7 @@ export function DataRetentionAdministration({ identity }: { identity: RoleContex
                   setDraft({ ...draft, imageCleanupEnabled: event.target.checked })
                 }}
               />
-              <span><strong>{draft.imageCleanupEnabled ? '预配置开启' : '当前关闭'}</strong><small>{draft.imageCleanupEnabled ? '仅记录意图；当前版本仍不会删除' : '不会删除，保持只读预览'}</small></span>
+              <span><strong>{draft.imageCleanupEnabled ? '开启' : '当前关闭'}</strong><small>{draft.imageCleanupEnabled ? '保存后允许执行器清理；重要证据除外' : '不会删除，保持只读预览'}</small></span>
             </label>
           </article>
 
@@ -246,6 +249,7 @@ export function DataRetentionAdministration({ identity }: { identity: RoleContex
 
         <PreviewPanel preview={preview} loading={previewLoading} onRefresh={() => void refreshPreview()} />
       </div>
+      <ImageRetentionPanel identity={identity} revision={policy.version} />
     </> : <div className="state-card error-state"><b>!</b><strong>留存策略暂不可用</strong><span>请检查服务端状态后重试。</span><button className="secondary" onClick={() => void reload()}>重新加载</button></div>}
   </section>
 }
