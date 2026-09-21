@@ -252,9 +252,9 @@ public class WorkDataService {
         WorkContext workContext = resolveWorkContext(principal, request, targetOrgUnitId);
         boolean saveAsDraft = Boolean.TRUE.equals(request.saveAsDraft());
         if (saveAsDraft) {
-            validateDraftPayload(principal, request.formVersionId(), request.payload());
+            validateWorkPayload(principal, request.formVersionId(), workContext.itemId(), request.payload(), true);
         } else {
-            validatePayload(principal, request.formVersionId(), request.payload());
+            validateWorkPayload(principal, request.formVersionId(), workContext.itemId(), request.payload(), false);
         }
         RecordSequence sequence = nextRecordSequence(principal, request, workContext);
         int attemptNo = sequence.attemptNo();
@@ -340,7 +340,7 @@ public class WorkDataService {
         if (!"DRAFT".equals(record.status())) {
             throw new IllegalArgumentException("只有草稿工作记录可以更新");
         }
-        validateDraftPayload(principal, record.formVersionId(), request.payload());
+        validateWorkPayload(principal, record.formVersionId(), record.workPackageItemId(), request.payload(), true);
         OffsetDateTime occurredAt = request.occurredAt() == null ? record.occurredAt() : request.occurredAt();
         int changed = jdbc.update("""
                 update work_record
@@ -375,7 +375,7 @@ public class WorkDataService {
         if (!"DRAFT".equals(record.status())) {
             throw new IllegalArgumentException("只有草稿工作记录可以提交");
         }
-        validatePayload(principal, record.formVersionId(), readJson(record.payloadJson()));
+        validateWorkPayload(principal, record.formVersionId(), record.workPackageItemId(), readJson(record.payloadJson()), false);
         usageService.lockAssignmentDay(record.targetOrgUnitId(), record.assignmentId(), record.businessDate());
         if (!record.repeatableEntry()) {
             requireFirstSharedSubmission(principal, record.expectationId(), recordId);
@@ -622,17 +622,33 @@ public class WorkDataService {
         Map<String, Object> policyRow = jdbc.queryForMap("""
                 select submission_policy::text as submission_policy,
                        applicability_policy::text as applicability_policy,
-                       execution_policy::text as execution_policy
+                       execution_policy::text as execution_policy, item_code
                 from work_package_item
                 where tenant_id = :tenantId and id = :itemId
                 """, base(principal).addValue("itemId", workPackageItemId));
         JsonNode submissionPolicy = readJson(String.valueOf(policyRow.get("submission_policy")));
         JsonNode applicabilityPolicy = readJson(String.valueOf(policyRow.get("applicability_policy")));
         JsonNode executionPolicy = readJson(String.valueOf(policyRow.get("execution_policy")));
-        if (submissionPolicy.path("completionStatementRequired").asBoolean(true)
-                && (completionStatement == null || completionStatement.isBlank())) {
-            throw new IllegalArgumentException("提交工作记录必须填写完成情况");
+        if ("HKA_LOST_PROPERTY".equals(policyRow.get("item_code"))) {
+            UUID recipient;
+            try { recipient = UUID.fromString(payload.path("handoverRecipientAssignmentId").asText()); }
+            catch (RuntimeException invalid) { throw new IllegalArgumentException("请选择有效的遗留物接收人"); }
+            Boolean validRecipient = jdbc.queryForObject("""
+                    select exists(select 1 from employee_position_assignment a
+                      join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                      join user_account account on account.tenant_id=e.tenant_id and account.id=e.account_id
+                      join org_unit_closure scope on scope.tenant_id=a.tenant_id and scope.descendant_id=a.org_unit_id
+                      where a.tenant_id=:tenantId and a.id=:recipient and scope.ancestor_id=:targetOrgUnitId
+                        and a.status='ACTIVE' and a.valid_from<=current_date
+                        and (a.valid_to is null or a.valid_to>=current_date)
+                        and e.employment_status='ACTIVE' and e.deleted_at is null and account.status='ACTIVE'
+                        and account.id<>:actorId)
+                    """, base(principal).addValue("recipient", recipient).addValue("targetOrgUnitId", targetOrgUnitId)
+                    .addValue("actorId", principal.actorId()), Boolean.class);
+            if (!Boolean.TRUE.equals(validRecipient)) throw new IllegalArgumentException("遗留物接收人必须是本店有效员工，且不能选择本人");
         }
+        // Generic work-result prose is no longer a submission requirement. Business-specific
+        // facts and evidence are still validated by the item form and evidence policy.
         if (submissionPolicy.path("exceptionStatementRequired").asBoolean(false)
                 && (exceptionStatement == null || exceptionStatement.isBlank())) {
             throw new IllegalArgumentException("提交工作记录必须填写异常与协同事项");
@@ -669,7 +685,7 @@ public class WorkDataService {
                 if (field.isBlank() || expected == null) {
                     throw evidenceConfigurationError("requiredWhen必须同时配置field和equals");
                 }
-                JsonNode actual = payload == null ? null : payload.get(field);
+                JsonNode actual = WorkEntryPolicy.policyValue(payload, field);
                 if (actual == null || !actual.equals(expected)) {
                     continue;
                 }
@@ -1254,7 +1270,7 @@ public class WorkDataService {
     private void validateConditionalFields(String itemCode, JsonNode payload) {
         if (itemCode == null || !Set.of("GM_PUBLIC_AREA_INSPECTION", "GM_PUBLIC_AREA_INSPECTION_AM",
                 "GM_PUBLIC_AREA_INSPECTION_PM", "GM_ROOM_INSPECTION")
-                .contains(itemCode) || !payload.path("issueFound").asBoolean(false)) {
+                .contains(itemCode) || !WorkEntryPolicy.policyValue(payload,"issueFound").asBoolean(false)) {
             return;
         }
         if (payload.path("issueSummary").asText("").isBlank()
@@ -1440,20 +1456,18 @@ public class WorkDataService {
         return new RecordSequence(1, 1);
     }
 
-    private void validatePayload(TenantPrincipal principal, UUID formVersionId, JsonNode payload) {
-        String schemaJson = jdbc.queryForObject("""
-                select json_schema::text from form_version
-                where tenant_id = :tenantId and id = :formVersionId and lifecycle_status = 'PUBLISHED'
-                """, base(principal).addValue("formVersionId", formVersionId), String.class);
-        payloadValidator.requireValid(readJson(schemaJson), payload);
-    }
-
-    private void validateDraftPayload(TenantPrincipal principal, UUID formVersionId, JsonNode payload) {
-        String schemaJson = jdbc.queryForObject("""
-                select json_schema::text from form_version
-                where tenant_id = :tenantId and id = :formVersionId and lifecycle_status = 'PUBLISHED'
-                """, base(principal).addValue("formVersionId", formVersionId), String.class);
-        payloadValidator.requireValidDraft(readJson(schemaJson), payload);
+    private void validateWorkPayload(TenantPrincipal principal, UUID formVersionId, UUID itemId, JsonNode payload, boolean draft) {
+        Map<String, Object> row = jdbc.queryForMap("""
+                select f.json_schema::text as schema, i.item_code
+                from form_version f
+                left join work_package_item i on i.tenant_id=f.tenant_id and i.id=:itemId
+                where f.tenant_id=:tenantId and f.id=:formId and f.lifecycle_status='PUBLISHED'
+                """, base(principal).addValue("formId", formVersionId).addValue("itemId", itemId));
+        JsonNode original = readJson((String) row.get("schema"));
+        JsonNode effective = WorkEntryPolicy.schema(original, (String) row.get("item_code"));
+        JsonNode validated = WorkEntryPolicy.validationPayload(payload, effective, original, (String) row.get("item_code"));
+        if (draft) payloadValidator.requireValidDraft(effective, validated);
+        else payloadValidator.requireValid(effective, validated);
     }
 
     private void authorizeAssignmentSubmission(TenantPrincipal principal, UUID assignmentId, UUID assignmentOrgUnitId) {

@@ -7,6 +7,8 @@ import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -379,9 +381,10 @@ class WorkPackageFlowIntegrationTest {
                 """, Integer.class, businessDate)).isZero();
     }
 
-    @Test
-    void repeatableDailyEventCreatesIndependentRecordsForOneExpectation() throws Exception {
-        LocalDate businessDate = LocalDate.now().plusYears(4);
+    @ParameterizedTest
+    @ValueSource(booleans = {false,true})
+    void repeatableDailyEventCreatesIndependentRecordsForOneExpectation(boolean upgradeWorkVersion) throws Exception {
+        LocalDate businessDate = LocalDate.now().plusYears(4).plusDays(upgradeWorkVersion ? 1 : 0);
         OffsetDateTime effectiveFrom = OffsetDateTime.now().minusMinutes(1).withNano(0);
         String packageCode = "WP-REPEATABLE-EVENT-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
 
@@ -457,6 +460,25 @@ class WorkPackageFlowIntegrationTest {
                 where tenant_id = ?::uuid and id = ?::uuid
                 """, String.class, TENANT, expectationId);
         UUID reportRevisionId = createRepeatableDailyReport(versionId, itemId, businessDate);
+
+        if (upgradeWorkVersion) {
+            // V71 keeps the report template/history on V1 while current work moves to V2.
+            UUID nextVersion=UUID.randomUUID(),nextItem=UUID.randomUUID();
+            jdbc.update("""
+                    insert into work_package_version
+                    select (jsonb_populate_record(null::work_package_version,to_jsonb(v)||jsonb_build_object(
+                      'id',?::uuid,'version_no',2,'lifecycle_status','DRAFT','published_at',null,'row_version',0))).*
+                    from work_package_version v where id=?::uuid
+                    """,nextVersion,versionId);
+            jdbc.update("""
+                    insert into work_package_item
+                    select (jsonb_populate_record(null::work_package_item,to_jsonb(i)||jsonb_build_object(
+                      'id',?::uuid,'work_package_version_id',?::uuid))).*
+                    from work_package_item i where id=?::uuid
+                    """,nextItem,nextVersion,itemId);
+            jdbc.update("update work_package_version set lifecycle_status='PUBLISHED',published_at=now() where id=?",nextVersion);
+            jdbc.update("update work_expectation set work_package_item_id=? where id=?::uuid",nextItem,expectationId);
+        }
 
         String completePayload = "{\"checkins\":1,\"complaints\":0}";
         JsonNode first = response(identity(post("/api/v1/work-data/records"), FRONT_ACCOUNT)

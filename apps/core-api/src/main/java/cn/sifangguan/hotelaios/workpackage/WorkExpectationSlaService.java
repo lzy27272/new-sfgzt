@@ -127,6 +127,9 @@ public class WorkExpectationSlaService {
                       on i.tenant_id = x.tenant_id and i.id = x.work_package_item_id
                     where x.tenant_id = :tenantId
                       and x.status in ('PLANNED', 'AVAILABLE', 'IN_PROGRESS')
+                      and i.required
+                      and coalesce(i.execution_policy ->> 'registrationMode', '') <> 'WHEN_OCCURRED'
+                      and coalesce(i.execution_policy ->> 'repeatableDailyRecords', 'false') <> 'true'
                       and x.due_at + make_interval(mins => i.grace_minutes) < now()
                     order by x.due_at, x.id
                     for update skip locked
@@ -212,9 +215,14 @@ public class WorkExpectationSlaService {
                 where x.tenant_id = :tenantId
                   and x.status in ('PLANNED', 'AVAILABLE', 'IN_PROGRESS', 'MISSED')
                   and i.reminder_policy <> '{}'::jsonb
+                  and i.required
+                  and coalesce(i.execution_policy ->> 'registrationMode', '') <> 'WHEN_OCCURRED'
+                  and coalesce(i.execution_policy ->> 'repeatableDailyRecords', 'false') <> 'true'
+                  and (i.period_type <> 'DAY' or x.business_date = (cast(:processingTime as timestamptz) at time zone tenant.timezone)::date)
                   and employee.account_id is not null
                 order by x.available_at, x.id
-                """, new MapSqlParameterSource("tenantId", principal.tenantId()),
+                """, new MapSqlParameterSource("tenantId", principal.tenantId())
+                        .addValue("processingTime", processingTime),
                 (rs, rowNum) -> new ReminderSource(
                         rs.getObject("id", UUID.class), rs.getString("status"),
                         rs.getObject("business_date", LocalDate.class),

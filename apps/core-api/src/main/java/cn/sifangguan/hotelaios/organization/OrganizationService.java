@@ -466,8 +466,6 @@ public class OrganizationService {
                 ) selected_version on true
                 where employee_assignment.tenant_id = :tenantId
                   and position.code in ('ASSISTANT_GENERAL_MANAGER','FRONT_OFFICE_SUPERVISOR')
-                  and (position.code <> 'FRONT_OFFICE_SUPERVISOR'
-                       or :assistantMode = 'WITH_FRONT_OFFICE_SUPERVISOR')
                   and employee_assignment.status = 'ACTIVE'
                   and employee_assignment.valid_from <= :effectiveDate
                   and (employee_assignment.valid_to is null or employee_assignment.valid_to >= :effectiveDate)
@@ -526,8 +524,7 @@ public class OrganizationService {
                     definition.code = case :assistantMode
                       when 'WITH_FRONT_OFFICE_SUPERVISOR' then 'DRT-PILOT-AGM-WITH-SUPERVISOR'
                       else 'DRT-PILOT-AGM-WITHOUT-SUPERVISOR' end
-                    or (definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY'
-                        and :assistantMode = 'WITH_FRONT_OFFICE_SUPERVISOR')
+                    or definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY'
                   )
                 """, params);
 
@@ -548,8 +545,7 @@ public class OrganizationService {
                     definition.code = case :assistantMode
                       when 'WITH_FRONT_OFFICE_SUPERVISOR' then 'DRT-PILOT-AGM-WITH-SUPERVISOR'
                       else 'DRT-PILOT-AGM-WITHOUT-SUPERVISOR' end
-                    or (definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY'
-                        and :assistantMode = 'WITH_FRONT_OFFICE_SUPERVISOR')
+                    or definition.code = 'DRT-PILOT-FO-SUPERVISOR-DAILY'
                   )
                   and not exists (
                     select 1 from daily_report_template_assignment existing

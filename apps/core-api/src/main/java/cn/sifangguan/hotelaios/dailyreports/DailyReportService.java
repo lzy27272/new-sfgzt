@@ -1,5 +1,6 @@
 package cn.sifangguan.hotelaios.dailyreports;
 
+import cn.sifangguan.hotelaios.workdata.WorkEntryPolicy;
 import cn.sifangguan.hotelaios.dailyreporttemplates.DailyReportTemplateService;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
@@ -932,10 +933,12 @@ public class DailyReportService {
             } catch (RuntimeException exception) {
                 throw new IllegalStateException("日报冻结模板包含无效字段标识", exception);
             }
-            boolean evidenceRequired = item.path("evidencePolicy").path("required").asBoolean(false);
-            boolean sourceRequired = item.path("dataSourceConfig").path("required").asBoolean(false);
+            boolean optionalEntry = WorkEntryPolicy.occursOnDemand(item.path("itemCode").asText());
+            boolean removedQuestion = WorkEntryPolicy.genericQuestion(item.path("itemCode").asText(), item.path("label").asText());
+            boolean evidenceRequired = !optionalEntry && !removedQuestion && item.path("evidencePolicy").path("required").asBoolean(false);
+            boolean sourceRequired = !optionalEntry && !removedQuestion && item.path("dataSourceConfig").path("required").asBoolean(false);
             result.put(id, new ItemPolicy(
-                    id, item.path("required").asBoolean(true), evidenceRequired, sourceRequired,
+                    id, !optionalEntry && !removedQuestion && item.path("required").asBoolean(true), evidenceRequired, sourceRequired,
                     Set.of("SYSTEM", "WORK_RECORD", "AI_SUMMARY").contains(item.path("dataSourceType").asText())));
         }));
         if (result.isEmpty()) throw new IllegalStateException("日报冻结模板没有可填写字段");

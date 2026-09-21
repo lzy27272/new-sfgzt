@@ -40,11 +40,21 @@ public class OperationalDailyAllocationService {
                       and definition.id = version.work_package_definition_id
                     where allocation.tenant_id = a.tenant_id and allocation.position_assignment_id = a.id
                       and definition.code like 'WP-PILOT-%-DAILY'
-                      and (allocation.valid_from <= :businessDate or allocation.status = 'REVOKED')
+                      and (allocation.valid_from <= :businessDate or allocation.status = 'REVOKED'
+                           or definition.code = 'WP-PILOT-FO-SUPERVISOR-DAILY')
                   )
                 order by a.id
                 """, base(principal).addValue("businessDate", businessDate), UUID.class);
-        for (UUID assignmentId : missing) reconcile(principal, assignmentId, businessDate);
+        // Missing historical provisioning is a system gap, not an employee's missed work.
+        for (UUID assignmentId : missing) {
+            Boolean recoverSupervisor = jdbc.queryForObject("""
+                    select p.code='FRONT_OFFICE_SUPERVISOR' and a.valid_from<:businessDate
+                    from employee_position_assignment a
+                    join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id
+                    where a.tenant_id=:tenantId and a.id=:assignmentId
+                    """, base(principal).addValue("assignmentId", assignmentId).addValue("businessDate", businessDate), Boolean.class);
+            reconcile(principal, assignmentId, Boolean.TRUE.equals(recoverSupervisor) ? businessDate.plusDays(1) : businessDate);
+        }
     }
 
     public void reconcile(TenantPrincipal principal, UUID assignmentId, LocalDate effectiveDate) {
@@ -166,14 +176,88 @@ public class OperationalDailyAllocationService {
                   and account.status = 'ACTIVE'
                   and (assignment.valid_to is null
                        or assignment.valid_to >= selected_version.starts_on)
-                  and (position.code <> 'FRONT_OFFICE_SUPERVISOR'
-                       or hotel_config.assistant_work_template_mode = 'WITH_FRONT_OFFICE_SUPERVISOR')
                   and (position.code <> 'BREAKFAST_AREA_LEAD'
                        or hotel_config.breakfast_area_enabled)
                 on conflict (tenant_id,work_package_version_id,position_assignment_id,
                              target_org_unit_id,valid_from)
                 do update set status = 'ACTIVE', valid_to = excluded.valid_to,
                               allocated_by = excluded.allocated_by, updated_at = now()
+                """, params);
+        ensureSupervisorReport(principal, assignmentId, effectiveDate);
+    }
+
+    /** An explicit supervisor assignment owns its work, independent of the assistant's coverage mode. */
+    private void ensureSupervisorReport(TenantPrincipal principal, UUID assignmentId, LocalDate effectiveDate) {
+        MapSqlParameterSource params = base(principal).addValue("assignmentId", assignmentId)
+                .addValue("effectiveDate", effectiveDate).addValue("actorId", principal.actorId());
+        // Multiple supervisors in one hotel must not create duplicate base report assignments.
+        var eligible = jdbc.query("""
+                select pg_advisory_xact_lock(hashtextextended(a.tenant_id::text||':fo-report:'||scope.ancestor_id::text,71))
+                from employee_position_assignment a
+                join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id
+                join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                join user_account account on account.tenant_id=e.tenant_id and account.id=e.account_id
+                join org_unit_closure scope on scope.tenant_id=a.tenant_id and scope.descendant_id=a.org_unit_id
+                join org_unit hotel on hotel.tenant_id=scope.tenant_id and hotel.id=scope.ancestor_id and hotel.unit_type='HOTEL'
+                where a.tenant_id=:tenantId and a.id=:assignmentId and a.status='ACTIVE'
+                  and (a.valid_to is null or a.valid_to>=greatest(a.valid_from,:effectiveDate))
+                  and p.code='FRONT_OFFICE_SUPERVISOR' and p.status='ACTIVE'
+                  and p.deleted_at is null and p.permanently_deleted_at is null
+                  and e.employment_status='ACTIVE' and e.deleted_at is null and account.status='ACTIVE'
+                order by scope.ancestor_id
+                """,params,(rs,row) -> true);
+        if (eligible.isEmpty()) return;
+        jdbc.update("""
+                insert into daily_report_template_assignment
+                  (tenant_id,template_version_id,assignment_kind,scope_type,org_unit_id,priority,valid_from,status,assigned_by)
+                select a.tenant_id,selected.id,'BASE','ORG_TREE',hotel.id,900,
+                       greatest(a.valid_from,:effectiveDate),'ACTIVE',:actorId
+                from employee_position_assignment a
+                join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id
+                join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                join user_account account on account.tenant_id=e.tenant_id and account.id=e.account_id
+                join org_unit_closure scope on scope.tenant_id=a.tenant_id and scope.descendant_id=a.org_unit_id
+                join org_unit hotel on hotel.tenant_id=scope.tenant_id and hotel.id=scope.ancestor_id and hotel.unit_type='HOTEL'
+                join lateral (
+                  select v.id,v.template_id from daily_report_template_version v
+                  join daily_report_template_definition d on d.tenant_id=v.tenant_id and d.id=v.template_id
+                  where v.tenant_id=a.tenant_id and d.code='DRT-PILOT-FO-SUPERVISOR-DAILY'
+                    and v.lifecycle_status='PUBLISHED' and v.effective_from::date<=greatest(a.valid_from,:effectiveDate)
+                    and (v.effective_to is null or v.effective_to::date>=greatest(a.valid_from,:effectiveDate))
+                  order by v.version_no desc limit 1
+                ) selected on true
+                where a.tenant_id=:tenantId and a.id=:assignmentId and a.status='ACTIVE'
+                  and p.code='FRONT_OFFICE_SUPERVISOR'
+                  and (a.valid_to is null or a.valid_to>=greatest(a.valid_from,:effectiveDate))
+                  and p.status='ACTIVE' and p.deleted_at is null and p.permanently_deleted_at is null
+                  and e.employment_status='ACTIVE' and e.deleted_at is null and account.status='ACTIVE'
+                  and not exists (
+                    select 1 from daily_report_template_assignment existing
+                    join daily_report_template_version v on v.tenant_id=existing.tenant_id and v.id=existing.template_version_id
+                    where existing.tenant_id=a.tenant_id and existing.org_unit_id=hotel.id
+                      and v.template_id=selected.template_id and existing.assignment_kind='BASE'
+                      and existing.status='ACTIVE' and existing.valid_from<=greatest(a.valid_from,:effectiveDate)
+                      and (existing.valid_to is null or existing.valid_to>=greatest(a.valid_from,:effectiveDate)))
+                """, params);
+        jdbc.update("""
+                insert into daily_report_delivery_policy
+                  (tenant_id,template_assignment_id,enabled,open_local_time,due_local_time,
+                   grace_minutes,pre_due_reminder_minutes,overdue_reminder_minutes,backfill_days,created_by,updated_by)
+                select report_assignment.tenant_id,report_assignment.id,true,time '18:00',time '20:00',
+                       0,array[15]::integer[],array[5,20]::integer[],1,:actorId,:actorId
+                from daily_report_template_assignment report_assignment
+                join daily_report_template_version v on v.tenant_id=report_assignment.tenant_id and v.id=report_assignment.template_version_id
+                join daily_report_template_definition d on d.tenant_id=v.tenant_id and d.id=v.template_id
+                where report_assignment.tenant_id=:tenantId and report_assignment.status='ACTIVE'
+                  and d.code='DRT-PILOT-FO-SUPERVISOR-DAILY'
+                  and exists(select 1 from employee_position_assignment a
+                    join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id
+                    join org_unit_closure scope on scope.tenant_id=a.tenant_id and scope.descendant_id=a.org_unit_id
+                    where a.tenant_id=report_assignment.tenant_id and a.id=:assignmentId
+                      and a.status='ACTIVE' and p.code='FRONT_OFFICE_SUPERVISOR'
+                      and scope.ancestor_id=report_assignment.org_unit_id)
+                  and not exists(select 1 from daily_report_delivery_policy policy
+                    where policy.tenant_id=report_assignment.tenant_id and policy.template_assignment_id=report_assignment.id)
                 """, params);
     }
 

@@ -50,7 +50,12 @@ public class DailyReportWorkEntryService {
                   and x.business_date=d.business_date
                 join work_package_item i on i.tenant_id=x.tenant_id and i.id=x.work_package_item_id
                 where d.tenant_id=:tenantId and d.id=:reportId and i.item_code='HKA_DAILY_REPORT'
-                  and i.work_package_version_id=d.work_package_version_id
+                  and exists (select 1 from work_package_version current_version
+                    join work_package_version report_version
+                      on report_version.tenant_id=current_version.tenant_id
+                     and report_version.work_package_definition_id=current_version.work_package_definition_id
+                    where current_version.tenant_id=d.tenant_id and current_version.id=i.work_package_version_id
+                      and report_version.id=d.work_package_version_id)
                   and x.status not in ('CANCELLED','WAIVED')
                 order by x.created_at desc limit 2
                 """,params(reportId));
@@ -98,8 +103,6 @@ public class DailyReportWorkEntryService {
             return;
         }
         ObjectNode payload=mapper.createObjectNode();
-        payload.put("workSummary","岗位日报提交，详见关联日报及当日工作证据");
-        payload.put("issueFound",false);
         payload.put("dailyReportId",reportId.toString());
         if(snapshot.hasNonNull("inventoryQuantities")) payload.set("inventoryQuantities",snapshot.get("inventoryQuantities"));
         JsonNode counts=snapshot.path("roomCounts");

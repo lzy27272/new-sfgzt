@@ -35,6 +35,7 @@ class WorkBoardIntegrationTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
     @Autowired JdbcTemplate jdbc;
+    @Autowired WorkExpectationSlaService sla;
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry r) {
@@ -100,10 +101,11 @@ class WorkBoardIntegrationTest {
                 insert into work_package_item
                 select (jsonb_populate_record(null::work_package_item, to_jsonb(i) ||
                   jsonb_build_object('id',cast(? as text),'work_package_version_id',cast(? as text),
-                    'period_type',cast(? as text),'execution_policy',
-                    (i.execution_policy - 'allowedPositionCodes') || jsonb_build_object('repeatableDailyRecords',cast(? as boolean))))).*
+                    'period_type',cast(? as text),'required',not cast(? as boolean),'execution_policy',
+                    (i.execution_policy - 'allowedPositionCodes') || jsonb_build_object('repeatableDailyRecords',cast(? as boolean),
+                      'registrationMode',case when cast(? as boolean) then 'WHEN_OCCURRED' else 'SCHEDULED' end)))).*
                 from work_package_item i where i.id=?::uuid
-                """, item.toString(), version.toString(), period, repeatable, ITEM);
+                """, item.toString(), version.toString(), period, repeatable, repeatable, repeatable, ITEM);
         jdbc.update("update work_package_version set lifecycle_status='PUBLISHED',published_at=now() where id=?", version);
         jdbc.update("""
                 insert into work_package_allocation
@@ -214,6 +216,18 @@ class WorkBoardIntegrationTest {
         assertThat(m.path("completed").asInt()).isZero();
         assertThat(m.path("on_time_submitted_rate").asInt()).isEqualTo(100);
         assertThat(m.path("on_time_completed_rate").asInt()).isZero();
+    }
+
+    @Test void unrecordedOccurrenceIsNeverMissedOverdueOrInTheRateDenominator() throws Exception {
+        LocalDate day=LocalDate.of(2024,2,6);
+        UUID optional=variantExpectation(day,"AVAILABLE","DAY",true);
+        sla.processTenantAsSystem(UUID.fromString(TENANT),100,UUID.randomUUID());
+        assertThat(jdbc.queryForObject("select status from work_expectation where id=?",String.class,optional)).isEqualTo("AVAILABLE");
+        JsonNode board=getBoard("?from="+day+"&to="+day);
+        assertThat(board.path("period").path("expected").asInt()).isZero();
+        assertThat(board.path("period").path("overdue").asInt()).isZero();
+        assertThat(board.path("period").path("completed_rate").isMissingNode()).isTrue(); // NON_NULL API serialization.
+        assertThat(board.path("items").get(0).path("board_status").asText()).isEqualTo("PENDING");
     }
 
     @Test void personalBoardUsesSelectedAssignmentInsteadOfAllJobsOnTheAccount() throws Exception {

@@ -304,12 +304,14 @@ test('daily report drafts stop on row-version conflict until the user chooses a 
   assert.match(reports, /恢复本机未提交内容/)
 })
 
-test('daily report required-field count excludes rows explicitly marked as exceptions', () => {
+test('removed exception toggles cannot bypass required fields through a stale local draft', () => {
   const countStart = reports.indexOf('const currentMissingRequiredCount =')
   const countEnd = reports.indexOf('const reviewingHistoricalRevision', countStart)
   assert.notEqual(countStart, -1)
   assert.notEqual(countEnd, -1)
   const countExpression = reports.slice(countStart, countEnd)
   assert.match(countExpression, /item\.required/)
-  assert.match(countExpression, /!exceptions\.has\(item\.id\)/)
+  assert.doesNotMatch(countExpression, /exceptions\.has\(item\.id\)/)
+  assert.doesNotMatch(reports, /type="checkbox"[^\n]*标记异常/)
+  assert.match(reports, /exception: false/)
 })
