@@ -11,8 +11,12 @@ public final class FinanceModels {
     private FinanceModels() { }
     public record StoreConfig(@NotBlank @Size(max=160) String companyName,
             @NotBlank @Pattern(regexp="[A-Za-z0-9]{15,20}") String taxNumber,
-            @NotNull UUID managerAccountId, @NotNull UUID financeAccountId, @NotNull UUID leaderAccountId,
-            @NotNull @Size(max=120) String payableAccount, boolean enabled, @Min(-1) int expectedVersion) { }
+            UUID managerAccountId, UUID financeAccountId, UUID directorAccountId, UUID leaderAccountId, UUID cashierAccountId,
+            @Size(max=120) String leaderName, @NotNull @Size(max=120) String payableAccount,
+            boolean skipSelfReview, boolean enabled, @Min(-1) int expectedVersion) { }
+    public record ConfigTarget(@NotNull UUID hotelId, @Min(-1) int expectedVersion) { }
+    public record ConfigureBatch(@NotNull @Size(min=1,max=100) List<@NotNull @Valid ConfigTarget> targets,
+            @NotNull @Valid StoreConfig configuration) { }
     public record Category(@NotBlank @Size(max=80) String name,
             @Pattern(regexp="EXPENSE|INVENTORY|ASSET|PREPAID|ALREADY_RECORDED") @NotNull String treatment,
             @NotNull @Size(max=500) String keywords, @NotNull @Size(max=120) String debitAccount,

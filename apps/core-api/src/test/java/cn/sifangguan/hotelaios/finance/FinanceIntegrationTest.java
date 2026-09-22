@@ -29,7 +29,7 @@ class FinanceIntegrationTest {
     static final UUID T=UUID.fromString("10000000-0000-0000-0000-000000000001");
     static final EmbeddedPostgres PG=start();static final String URL=url();static final Path FILES=temp();
     @Autowired FinanceService service;@Autowired FinanceEvidenceService evidence;@Autowired JdbcTemplate jdbc;@Autowired MockMvc mvc;
-    UUID owner,other,manager,finance,leader,hotel,assignment,category;String invoiceNumber;
+    UUID owner,other,manager,finance,director,leader,cashier,hotel,assignment,category;String invoiceNumber;
     LocalDate today=LocalDate.now(ZoneId.of("Asia/Shanghai"));
     @DynamicPropertySource static void properties(DynamicPropertyRegistry r) {
         r.add("spring.datasource.url",()->URL);r.add("spring.datasource.username",()->"postgres");r.add("spring.datasource.password",()->"postgres");
@@ -38,7 +38,7 @@ class FinanceIntegrationTest {
     @AfterAll static void close() throws Exception { PG.close(); }
     @AfterEach void clear() {TenantContext.clear();}
     @BeforeEach void setup() {
-        owner=account();other=account();manager=account();finance=account();leader=account();hotel=UUID.randomUUID();assignment=UUID.randomUUID();category=UUID.randomUUID();
+        owner=account();other=account();manager=account();finance=account();director=account();leader=account();cashier=account();hotel=UUID.randomUUID();assignment=UUID.randomUUID();category=UUID.randomUUID();
         invoiceNumber="%020d".formatted(Math.abs(UUID.randomUUID().getMostSignificantBits()));
         jdbc.update("insert into org_unit(id,tenant_id,code,name,unit_type) values(?,?,?,'财务测试门店','HOTEL')",hotel,T,hotel.toString());
         jdbc.update("insert into org_unit_closure(tenant_id,ancestor_id,descendant_id,depth) values(?,?,?,0)",T,hotel,hotel);
@@ -47,22 +47,26 @@ class FinanceIntegrationTest {
         as(owner,true,"finance.configure");service.configure(hotel,config(-1,manager,finance,leader));
         service.category(hotel,category,new FinanceModels.Category("客房费用","EXPENSE","客房,补贴","管理费用",true,-1));
     }
-    @Test void completeThreeStageChainWarnsDifferenceAndSeparatesPayment() {
+    @Test void completeFourStageChainWarnsDifferenceAndSeparatesPayment() {
         UUID id=draft(true);as(owner,false,"finance.submit");var pending=service.submit(id,1);assertThat(pending.get("status")).isEqualTo("MANAGER_REVIEW");
         assertThat(service.submit(id,1).get("version")).isEqualTo(2);
         as(leader,false,"finance.review");assertThatThrownBy(()->service.review(id,review(2,"APPROVE",false))).isInstanceOf(ResponseStatusException.class);
         as(manager,false,"finance.review");var command=review(2,"APPROVE",false);assertThat(service.review(id,command).get("status")).isEqualTo("FINANCE_REVIEW");service.review(id,command);
         as(finance,false,"finance.review");assertThatThrownBy(()->service.review(id,review(3,"APPROVE",false))).hasMessageContaining("核实差额");
-        assertThat(service.review(id,review(3,"APPROVE",true)).get("status")).isEqualTo("LEADER_REVIEW");
+        assertThat(service.review(id,review(3,"APPROVE",true)).get("status")).isEqualTo("DIRECTOR_REVIEW");
+        as(leader,false,"finance.review");assertThatThrownBy(()->service.review(id,review(4,"APPROVE",false))).isInstanceOf(ResponseStatusException.class);
+        as(director,false,"finance.review");assertThat(service.review(id,review(4,"APPROVE",false)).get("status")).isEqualTo("LEADER_REVIEW");
         assertThat(jdbc.queryForObject("select count(*) from finance_expense_entry where claim_id=?",Integer.class,id)).isZero();
-        as(leader,false,"finance.review");assertThat(service.review(id,review(4,"APPROVE",false)).get("status")).isEqualTo("APPROVED");
+        as(leader,false,"finance.review");assertThat(service.review(id,review(5,"APPROVE",false)).get("status")).isEqualTo("APPROVED");
         as(finance,false,"finance.read","finance.pay");var totals=(Map<?,?>)service.ledger(YearMonth.from(today).toString(),hotel).get("totals");assertThat(totals.get("total")).isEqualTo("90.00");assertThat(totals.get("paid")).isEqualTo("0");
-        var payment=new FinanceModels.Payment(UUID.randomUUID(),5,new BigDecimal("90"),"测试流水",today);service.payment(id,payment);service.payment(id,payment);
+        var payment=new FinanceModels.Payment(UUID.randomUUID(),6,new BigDecimal("90"),"测试流水",today);
+        assertThatThrownBy(()->service.payment(id,payment)).isInstanceOf(ResponseStatusException.class);
+        as(cashier,false,"finance.pay");service.payment(id,payment);service.payment(id,payment);
         assertThat(jdbc.queryForObject("select count(*) from finance_payment where claim_id=?",Integer.class,id)).isEqualTo(1);
         assertThat(service.voucher(id)).containsEntry("status","DRAFT").containsKey("evidence");
         assertThat(service.voucher(id).get("amount")).isEqualTo("90.00");
         assertThatThrownBy(()->jdbc.update("update finance_expense_entry set amount=1 where claim_id=?",id)).isInstanceOf(RuntimeException.class);
-        as(owner,false,"finance.submit");assertThatThrownBy(()->service.save(id,input(6,List.of(),true))).hasMessageContaining("不能覆盖");
+        as(owner,false,"finance.submit");assertThatThrownBy(()->service.save(id,input(7,List.of(),true))).hasMessageContaining("不能覆盖");
     }
     @Test void duplicateInvoiceIsBlockedIncludingConcurrentAndHistoricalSubmissions() throws Exception {
         UUID first=draft(false),second=draft(false);
@@ -86,7 +90,7 @@ class FinanceIntegrationTest {
         UUID id=draft(false);as(other,false,"finance.submit");assertThatThrownBy(()->service.detail(id)).isInstanceOf(ResponseStatusException.class);
         as(finance,false,"finance.read");TenantContext.set(principal(finance,T,Set.of("finance.read"),Set.of(),false));assertThatThrownBy(()->service.detail(id)).isInstanceOf(ResponseStatusException.class);
         as(owner,false,"finance.submit");assertThatThrownBy(()->service.save(id,input(0,List.of(),false))).hasMessageContaining("其他页面更新");
-        as(owner,true,"finance.configure");service.configure(hotel,config(0,owner,finance,leader));
+        as(owner,true,"finance.configure");service.configure(hotel,config(0,manager,finance,owner));
         as(owner,false,"finance.submit");assertThatThrownBy(()->service.submit(id,1)).hasMessageContaining("本人");
         as(owner,true,"finance.configure");assertThatThrownBy(()->service.configure(hotel,config(1,manager,manager,leader))).hasMessageContaining("不同账号");
         TenantContext.set(principal(owner,UUID.randomUUID(),Set.of("finance.read"),Set.of(hotel),true));assertThatThrownBy(()->service.detail(id)).hasMessageContaining("不存在");
@@ -96,7 +100,8 @@ class FinanceIntegrationTest {
         as(manager,false,"finance.review");service.review(id,review(2,"APPROVE",false));
         as(owner,true,"finance.configure");service.category(hotel,category,new FinanceModels.Category("采购入库","INVENTORY","采购","库存商品",true,0));
         as(finance,false,"finance.review");service.review(id,review(3,"APPROVE",true));
-        as(leader,false,"finance.review");service.review(id,review(4,"APPROVE",false));
+        as(director,false,"finance.review");service.review(id,review(4,"APPROVE",false));
+        as(leader,false,"finance.review");service.review(id,review(5,"APPROVE",false));
         jdbc.update("update org_unit set name='改名' where id=?",hotel);jdbc.update("update employee set name='新姓名' where account_id=?",owner);
         as(finance,false,"finance.read");assertThat(service.detail(id).get("hotel_name")).isEqualTo("财务测试门店");
         var ledger=service.ledger(YearMonth.from(today).toString(),hotel);assertThat(((Map<?,?>)ledger.get("totals")).get("total")).isEqualTo("0");assertThat((List<?>)ledger.get("otherTreatments")).hasSize(1);
@@ -150,14 +155,90 @@ class FinanceIntegrationTest {
     }
     @Test void missingProofAndDisabledConfigurationBlockSubmissionAndPaymentCannotPrecedeApproval() {
         UUID id=draft(false);
-        as(finance,false,"finance.pay");assertThatThrownBy(()->service.payment(id,new FinanceModels.Payment(UUID.randomUUID(),1,new BigDecimal("90"),"test",today))).hasMessageContaining("三段审批");
+        as(finance,false,"finance.pay");assertThatThrownBy(()->service.payment(id,new FinanceModels.Payment(UUID.randomUUID(),1,new BigDecimal("90"),"test",today))).hasMessageContaining("全部审批");
         as(owner,false,"finance.submit");UUID paymentId=jdbc.queryForObject("select id from finance_attachment where claim_id=? and kind='PAYMENT'",UUID.class,id);
         service.removeAttachment(id,paymentId,1);assertThatThrownBy(()->service.submit(id,2)).hasMessageContaining("补齐发票");
-        as(owner,true,"finance.configure");service.configure(hotel,new FinanceModels.StoreConfig("测试酒店有限责任公司","91520100123456789X",manager,finance,leader,"其他应付款",false,0));
+        // A saved draft must NOT disable a live config. Explicitly simulate a paused legacy config here.
+        jdbc.update("update finance_store_config set enabled=false where tenant_id=? and hotel_id=?",T,hotel);
         as(owner,false,"finance.submit");assertThatThrownBy(()->service.create(new FinanceModels.Create(UUID.randomUUID(),assignment))).hasMessageContaining("报销尚未启用");
     }
+    @Test void initialSelfReviewSkipsOnlyOnceAndKeepsEvidenceAudit() {
+        UUID id=draft(false);as(owner,true,"finance.configure");service.configure(hotel,config(0,owner,finance,leader));
+        as(owner,false,"finance.submit","finance.review");var submitted=service.submit(id,1);
+        assertThat(submitted).containsEntry("status","FINANCE_REVIEW").containsEntry("canReview",false);
+        service.submit(id,1);
+        assertThat(jdbc.queryForObject("select count(*) from finance_review where claim_id=? and decision='SKIP_SELF'",Integer.class,id)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select review_snapshot::text from finance_review where claim_id=?",String.class,id)).contains(invoiceNumber,"approval_route");
+        assertThatThrownBy(()->service.review(id,review(2,"APPROVE",true))).isInstanceOf(ResponseStatusException.class);
+        as(finance,false,"finance.review");assertThat((List<?>)service.list("review",0).get("items")).hasSize(1);
+        as(manager,false,"finance.review");assertThat((List<?>)service.list("review",0).get("items")).isEmpty();
+        as(leader,false,"finance.review");assertThat((List<?>)service.list("review",0).get("items")).isEmpty();
+        assertThatThrownBy(()->jdbc.update("update finance_review set decision='APPROVE' where claim_id=?",id)).isInstanceOf(RuntimeException.class);
+    }
+    @Test void partialDraftDoesNotDisableLiveConfigOrChangeSubmittedChain() {
+        UUID id=draft(false);as(owner,false,"finance.submit");service.submit(id,1);
+        as(owner,true,"finance.configure");service.configure(hotel,partialConfig(0,false));
+        assertThat(jdbc.queryForObject("select enabled from finance_store_config where hotel_id=?",Boolean.class,hotel)).isTrue();
+        assertThat(jdbc.queryForObject("select manager_account_id from finance_store_config where hotel_id=?",UUID.class,hotel)).isEqualTo(manager);
+        assertThat(jdbc.queryForObject("select draft_configuration->>'leaderName' from finance_store_config where hotel_id=?",String.class,hotel)).isEqualTo("刘照阳");
+        assertThatThrownBy(()->service.configure(hotel,partialConfig(1,true))).hasMessageContaining("暂不可启用");
+        UUID newManager=account();service.configure(hotel,config(1,newManager,finance,leader));
+        as(newManager,false,"finance.review");assertThatThrownBy(()->service.detail(id)).isInstanceOf(ResponseStatusException.class);
+        as(manager,false,"finance.review");assertThat(service.review(id,review(2,"APPROVE",false)).get("status")).isEqualTo("FINANCE_REVIEW");
+        assertThat(jdbc.queryForObject("select manager_account_id from finance_claim where id=?",UUID.class,id)).isEqualTo(manager);
+        assertThat(jdbc.queryForObject("select draft_configuration from finance_store_config where hotel_id=?",Object.class,hotel)).isNull();
+    }
+    @Test void bothHeadquartersCanShareOneCompanyDraftWithoutMatchingCode015() {
+        UUID group=organization("四方馆酒店集团","SFG-FIN-"+UUID.randomUUID(),"GROUP");
+        UUID headquarters=organization("集团总部",UUID.randomUUID().toString(),"HOTEL");
+        UUID unrelated=organization("贵州宴",UUID.randomUUID().toString(),"HOTEL");
+        as(owner,true,"finance.configure");
+        service.configureBatch(new FinanceModels.ConfigureBatch(List.of(new FinanceModels.ConfigTarget(group,-1),new FinanceModels.ConfigTarget(headquarters,-1)),partialConfig(-1,false)));
+        assertThat(jdbc.queryForObject("select count(distinct company_id) from finance_store_config where hotel_id in (?,?)",Integer.class,group,headquarters)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from finance_store_config where hotel_id in (?,?) and not enabled and leader_account_id is null",Integer.class,group,headquarters)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from finance_store_config where hotel_id=?",Integer.class,unrelated)).isZero();
+        assertThatThrownBy(()->service.configure(group,partialConfig(0,true))).hasMessageContaining("暂不可启用");
+    }
+    @Test void multiOrganizationSaveRollsBackOnStaleVersionOrMissingScope() {
+        UUID second=organization("第二测试公司",UUID.randomUUID().toString(),"GROUP");as(owner,true,"finance.configure");
+        assertThatThrownBy(()->service.configureBatch(new FinanceModels.ConfigureBatch(List.of(new FinanceModels.ConfigTarget(hotel,-1),new FinanceModels.ConfigTarget(second,-1)),partialConfig(-1,false)))).hasMessageContaining("全部未生效");
+        assertThat(jdbc.queryForObject("select count(*) from finance_store_config where hotel_id=?",Integer.class,second)).isZero();
+        as(owner,false,"finance.configure");
+        assertThatThrownBy(()->service.configureBatch(new FinanceModels.ConfigureBatch(List.of(new FinanceModels.ConfigTarget(hotel,0),new FinanceModels.ConfigTarget(second,-1)),partialConfig(-1,false)))).isInstanceOf(RuntimeException.class);
+        assertThat(jdbc.queryForObject("select version from finance_store_config where hotel_id=?",Integer.class,hotel)).isZero();
+    }
+    @Test void cannotSkipUnconfiguredInactiveOrLaterSelfReviewer() {
+        UUID id=draft(false);as(owner,true,"finance.configure");
+        assertThatThrownBy(()->service.configure(hotel,new FinanceModels.StoreConfig("测试酒店有限责任公司","91520100123456789X",owner,null,director,leader,cashier,"刘照阳","",true,true,0))).hasMessageContaining("暂不可启用");
+        service.configure(hotel,config(0,owner,finance,leader));
+        jdbc.update("update user_account set status='DISABLED' where id=?",finance);
+        as(owner,false,"finance.submit");assertThatThrownBy(()->service.submit(id,1)).hasMessageContaining("已停用");
+        assertThat(jdbc.queryForObject("select count(*) from finance_review where claim_id=?",Integer.class,id)).isZero();
+        jdbc.update("update user_account set status='ACTIVE' where id=?",finance);
+        as(owner,true,"finance.configure");service.configure(hotel,config(1,manager,owner,leader));
+        as(owner,false,"finance.submit");assertThatThrownBy(()->service.submit(id,1)).hasMessageContaining("独立审核人");
+    }
+    @Test void applicantCanWithdrawBeforeDirectorReviewWithoutLeavingInvoiceReserved() {
+        UUID id=draft(false);as(owner,false,"finance.submit");service.submit(id,1);
+        as(manager,false,"finance.review");service.review(id,review(2,"APPROVE",false));
+        as(finance,false,"finance.review");service.review(id,review(3,"APPROVE",true));
+        as(owner,false,"finance.submit");assertThat(service.withdraw(id,4).get("status")).isEqualTo("WITHDRAWN");
+        assertThat(jdbc.queryForObject("select count(*) from finance_invoice_reservation where claim_id=?",Integer.class,id)).isZero();
+        as(director,false,"finance.review");assertThatThrownBy(()->service.review(id,review(5,"APPROVE",false))).isInstanceOf(ResponseStatusException.class);
+    }
+    @Test void legacyInFlightClaimFinishesItsOriginalThreeStageChain() {
+        UUID id=draft(false);as(owner,false,"finance.submit");service.submit(id,1);
+        // This shape is the pre-V74 stored claim, unchanged by the additive migration.
+        jdbc.update("update finance_claim set workflow_version=1,director_account_id=null,cashier_account_id=null,approval_route='[]'::jsonb where id=?",id);
+        as(manager,false,"finance.review");service.review(id,review(2,"APPROVE",false));
+        as(finance,false,"finance.review");assertThat(service.review(id,review(3,"APPROVE",true)).get("status")).isEqualTo("LEADER_REVIEW");
+        as(leader,false,"finance.review");assertThat(service.review(id,review(4,"APPROVE",false)).get("status")).isEqualTo("APPROVED");
+        as(finance,false,"finance.pay");service.payment(id,new FinanceModels.Payment(UUID.randomUUID(),5,new BigDecimal("90"),"历史流程付款",today));
+    }
+    private UUID organization(String name,String code,String type) {UUID id=UUID.randomUUID();jdbc.update("insert into org_unit(id,tenant_id,code,name,unit_type) values(?,?,?,?,?)",id,T,code,name,type);return id;}
+    private FinanceModels.StoreConfig partialConfig(int version,boolean enabled) {return new FinanceModels.StoreConfig("测试酒店有限责任公司","91520100123456789X",null,null,null,null,null,"刘照阳","其他应付款",true,enabled,version);}
     private String submitAttempt(UUID id) {as(owner,false,"finance.submit");try {service.submit(id,1);return "OK";}catch(ResponseStatusException e){if(e.getStatusCode().value()!=409)throw e;return "CONFLICT";}finally{TenantContext.clear();}}
-    private FinanceModels.StoreConfig config(int version,UUID manager,UUID finance,UUID leader) {return new FinanceModels.StoreConfig("测试酒店有限责任公司","91520100123456789X",manager,finance,leader,"其他应付款",true,version);}
+    private FinanceModels.StoreConfig config(int version,UUID manager,UUID finance,UUID leader) {return new FinanceModels.StoreConfig("测试酒店有限责任公司","91520100123456789X",manager,finance,director,leader,cashier,"刘照阳","其他应付款",true,true,version);}
     private UUID draft(boolean mismatch) {
         as(owner,false,"finance.submit");UUID id=UUID.randomUUID();service.create(new FinanceModels.Create(id,assignment));UUID attachment=UUID.randomUUID();
         for(String kind:List.of("INVOICE","TRANSACTION","PAYMENT")) service.registerAttachment(id,kind.equals("INVOICE")?attachment:UUID.randomUUID(),kind,"test.pdf","application/pdf",20,FinanceService.hash(UUID.randomUUID().toString()),T+"/"+id+"/"+UUID.randomUUID()+".original","BYPASSED_DEV",Map.of("source","MANUAL_REQUIRED"));

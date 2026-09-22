@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { cents, money, differs, invoiceTotal, financeScope, draftValidation } from '../src/features/finance/model.ts'
+import { canWithdrawClaim, cents, money, differs, invoiceTotal, financeScope, draftValidation } from '../src/features/finance/model.ts'
 import { buildNavigationCenters, navigationCenterForSection } from '../src/app/navigationModel.ts'
 import { applyPublishedModuleVisibility } from '../src/app/rolePresentationPolicy.ts'
 const form = { expectedVersion: 0, title: '客房用品', businessDate: '2026-09-21', categoryId: null, transactionAmount: '100', paymentAmount: '90', requestedAmount: '90', differenceNote: '补贴', invoices: [{ id: 'i', attachmentId: 'a', invoiceCode: '', invoiceNumber: '00123456789012345678', buyerTaxNumber: '91520000123456789X', amount: '100', confirmed: true }] }
+
+test('applicant may withdraw at each pending stage including director, never after final approval', () => {
+  for (const status of ['DRAFT', 'RETURNED', 'MANAGER_REVIEW', 'FINANCE_REVIEW', 'DIRECTOR_REVIEW', 'LEADER_REVIEW']) assert.equal(canWithdrawClaim(status), true)
+  for (const status of ['APPROVED', 'REJECTED', 'WITHDRAWN', 'UNKNOWN']) assert.equal(canWithdrawClaim(status), false)
+})
 test('finance keeps money as exact decimal strings including large values', () => {
   assert.equal(cents('99999999999999.99'), 9999999999999999n)
   assert.equal(cents('0.009'), null)
