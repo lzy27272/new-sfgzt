@@ -405,7 +405,7 @@ public class TaskService {
                     .addValue("mediaType", stored.mediaType()).addValue("sizeBytes", stored.sizeBytes())
                     .addValue("sha256", stored.sha256()).addValue("scanStatus", stored.scanStatus()));
         } catch (RuntimeException exception) {
-            attachmentService.removeStoredObject(stored.objectKey());
+            attachmentService.discardUncommittedObject(stored);
             throw exception;
         }
         auditWriter.record("TASK_EVIDENCE_UPLOADED", "TASK_EVIDENCE", evidenceId,
@@ -465,7 +465,7 @@ public class TaskService {
                     .addValue("sha256", stored.sha256()).addValue("structured", structured.toString())
                     .addValue("scanStatus", stored.scanStatus()));
         } catch (RuntimeException exception) {
-            attachmentService.removeStoredObject(stored.objectKey());
+            attachmentService.discardUncommittedObject(stored);
             throw exception;
         }
         auditWriter.record("TASK_DISPATCH_ATTACHMENT_UPLOADED", "TASK_EVIDENCE", evidenceId,

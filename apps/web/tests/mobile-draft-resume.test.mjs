@@ -277,6 +277,13 @@ test('daily report local draft is restored and current values are saved before s
   assert.match(reports, /submitDailyReport\(identity, saved, `\$\{key\}-submit`\)/)
 })
 
+test('saved daily reports are not resurrected by debounce or lifecycle cleanup', () => {
+  assert.equal((reports.match(/if \(wasDraftSaved\(snapshot, savedDraftRef\.current\)\) return/g) ?? []).length, 2)
+  assert.match(reports, /savedDraftRef\.current = submittedDraft[\s\S]*await removeResumableDraft\(localDraftKey\)/)
+  assert.match(reports, /const submittedDraft: DailyReportLocalDraft = .*values: \{ \.\.\.values \}/)
+  assert.match(reports, /setValues\(initialValues\)[\s\S]*setExceptions\(initialExceptions\)[\s\S]*localDraftRef\.current = \{/)
+})
+
 test('daily report drafts stop on row-version conflict until the user chooses a version', () => {
   assert.match(reports, /type DailyReportLocalDraft = \{[\s\S]*baseRowVersion: number[\s\S]*\}/)
   assert.match(reports, /stored\.baseRowVersion !== report\.rowVersion[\s\S]*setConflictingLocalDraft\(stored\)/)
@@ -297,12 +304,14 @@ test('daily report drafts stop on row-version conflict until the user chooses a 
   assert.match(reports, /恢复本机未提交内容/)
 })
 
-test('daily report required-field count excludes rows explicitly marked as exceptions', () => {
+test('removed exception toggles cannot bypass required fields through a stale local draft', () => {
   const countStart = reports.indexOf('const currentMissingRequiredCount =')
   const countEnd = reports.indexOf('const reviewingHistoricalRevision', countStart)
   assert.notEqual(countStart, -1)
   assert.notEqual(countEnd, -1)
   const countExpression = reports.slice(countStart, countEnd)
   assert.match(countExpression, /item\.required/)
-  assert.match(countExpression, /!exceptions\.has\(item\.id\)/)
+  assert.doesNotMatch(countExpression, /exceptions\.has\(item\.id\)/)
+  assert.doesNotMatch(reports, /type="checkbox"[^\n]*标记异常/)
+  assert.match(reports, /exception: false/)
 })

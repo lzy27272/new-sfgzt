@@ -58,6 +58,7 @@ class HeadquartersSupervisionIntegrationTest {
     @Autowired AttachmentService attachments;
     @Autowired PlatformTransactionManager transactions;
     @Autowired ObjectMapper mapper;
+    @Autowired NotificationService notifications;
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
@@ -133,6 +134,7 @@ class HeadquartersSupervisionIntegrationTest {
         assertThat(notificationCount(vp, formalWork, "WORK_EXPECTATION_REMINDER")).isZero();
         assertThat(notificationCount(vp, testWork, "WORK_EXPECTATION_SUPERVISION")).isZero();
         assertThat(notificationCount(vp, headquartersWork, "WORK_EXPECTATION_SUPERVISION")).isZero();
+        verifyWecomBindingAndStaleReminderPolicy(vpIdentity, formalWork);
 
         UUID formalTask = task(MANAGER, HOTEL);
         UUID excludedTask = task(MANAGER, testHotel);
@@ -319,6 +321,57 @@ class HeadquartersSupervisionIntegrationTest {
                 from employee_position_assignment where tenant_id = ? and id = ?
                 """, record, FORM_VERSION, target, VERSION, ITEM, expectation, TENANT, assignment);
         return record;
+    }
+
+    private void verifyWecomBindingAndStaleReminderPolicy(TenantPrincipal vpIdentity, UUID formalWork) {
+        TenantContext.set(vpIdentity);
+        try {
+            assertThat(notifications.list(false)).isNotEmpty()
+                    .allMatch(row -> "UNBOUND".equals(row.get("wecom_delivery_status")));
+        } finally { TenantContext.clear(); }
+        var properties = org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComProperties.class);
+        org.mockito.Mockito.when(properties.tenantId()).thenReturn(TENANT);
+        org.mockito.Mockito.when(properties.corpId()).thenReturn("test-corp");
+        var worker = new cn.sifangguan.hotelaios.integrations.wecom.WeComDeliveryWorker(
+                new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
+                new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc, true),
+                new TransactionTemplate(transactions),
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class), properties, 50);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery where channel='WECHAT'", Integer.class)).isZero();
+        jdbc.update("""
+                insert into wecom_user_binding(tenant_id,corp_id,wecom_user_id,account_id,preferred_assignment_id,user_id_fingerprint)
+                values (?,'test-corp','verified-test-member',?,?,repeat('a',64))
+                """,TENANT,vpIdentity.actorId(),vpIdentity.businessActorAssignmentId());
+        UUID stale = UUID.randomUUID();
+        jdbc.update("""
+                insert into work_expectation
+                select (jsonb_populate_record(null::work_expectation,to_jsonb(x)||jsonb_build_object(
+                  'id',?::uuid,'business_date',current_date-1,'period_key','yesterday-test'))).*
+                from work_expectation x where x.id=?
+                """,stale,formalWork);
+        jdbc.update("""
+                insert into notification(tenant_id,recipient_account_id,recipient_assignment_id,
+                  notification_type,title,content,source_type,source_id,idempotency_key)
+                values (?, ?, ?, 'WORK_EXPECTATION_SUPERVISION','历史测试','历史测试','WORK_EXPECTATION',?,'stale-wecom-policy')
+                """,TENANT,vpIdentity.actorId(),vpIdentity.businessActorAssignmentId(),stale);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
+        assertThat(jdbc.queryForObject("""
+                select count(*) from notification_delivery d join notification n on n.tenant_id=d.tenant_id and n.id=d.notification_id
+                where n.source_id=? and d.channel='WECHAT'
+                """,Integer.class,formalWork)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from notification_delivery d join notification n on n.tenant_id=d.tenant_id and n.id=d.notification_id
+                where n.source_id=? and d.channel='WECHAT'
+                """,Integer.class,stale)).isZero();
+        List<?> claimed = org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"claim");
+        assertThat(claimed).filteredOn("sourceId",formalWork).hasSize(2);
+        assertThat(claimed).extracting("sourceId").doesNotContain(stale); // No external WeCom calls.
+        TenantContext.set(vpIdentity);
+        try {
+            assertThat(notifications.list(false).stream().filter(row -> formalWork.equals(row.get("source_id"))))
+                    .allMatch(row -> "PENDING".equals(row.get("wecom_delivery_status")));
+        } finally { TenantContext.clear(); }
     }
 
     private int notificationCount(UUID account, UUID source, String type) {

@@ -189,6 +189,11 @@ class DataRetentionIntegrationTest {
         assertRetentionDays(jpg, 5);
         assertRetentionDays(heic, 5);
         assertRetentionDays(pdf, 30);
+        // Approval alone no longer expires newly uploaded images.
+        assertThat(jdbc.queryForObject("select count(*) from image_retention_object where tenant_id=?::uuid "
+                + "and uploaded_at < now()-interval '1 day'", Integer.class, TENANT)).isZero();
+        jdbc.update("update image_retention_object set uploaded_at=now()-interval '40 days' where tenant_id=?::uuid",
+                TENANT);
         assertThat(jdbc.queryForObject("""
                 select count(*) from attachment
                 where tenant_id = ?::uuid and id in (?, ?, ?, ?)

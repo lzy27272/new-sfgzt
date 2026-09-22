@@ -40,7 +40,21 @@ public class NotificationService {
         TenantPrincipal principal = prepare();
         return jdbc.queryForList("""
                 select id, notification_type, title, content, source_type, source_id,
-                       recipient_assignment_id, delivered_at, read_at, row_version
+                       recipient_assignment_id, created_at, delivered_at, read_at, row_version,
+                       case when exists (
+                           select 1 from notification_delivery delivery
+                           where delivery.tenant_id=notification.tenant_id and delivery.notification_id=notification.id
+                             and delivery.channel='WECHAT' and delivery.status='SENT') then 'SENT'
+                         when not exists (
+                           select 1 from wecom_user_binding binding
+                           where binding.tenant_id=notification.tenant_id
+                             and binding.account_id=notification.recipient_account_id
+                             and binding.status='ACTIVE') then 'UNBOUND'
+                         else coalesce((select delivery.status from notification_delivery delivery
+                           where delivery.tenant_id=notification.tenant_id and delivery.notification_id=notification.id
+                             and delivery.channel='WECHAT'
+                           order by delivery.created_at desc,delivery.id desc limit 1),'NOT_QUEUED')
+                       end as wecom_delivery_status
                 from notification
                 where tenant_id = :tenantId and recipient_account_id = :actorId
                   and (:unreadOnly = false or read_at is null)

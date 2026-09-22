@@ -28,7 +28,8 @@ public final class StoreResourceModels {
             @Size(max = 32) String purchaseUnit,
             BigDecimal purchaseFactor,
             @Size(max = 32) String issueUnit,
-            BigDecimal issueFactor
+            BigDecimal issueFactor,
+            Boolean employeeUsageEnabled
     ) {
     }
 
@@ -44,7 +45,8 @@ public final class StoreResourceModels {
             @Size(max = 32) String purchaseUnit,
             BigDecimal purchaseFactor,
             @Size(max = 32) String issueUnit,
-            BigDecimal issueFactor
+            BigDecimal issueFactor,
+            Boolean employeeUsageEnabled
     ) {
     }
 

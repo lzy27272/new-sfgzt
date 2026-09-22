@@ -1135,6 +1135,7 @@ export async function loadNotifications(identity: ApiIdentity) {
       sourceType: text(item, ['sourceType', 'source_type'], '') || undefined,
       sourceId: text(item, ['sourceId', 'source_id'], '') || undefined,
       recipientAssignmentId: text(item, ['recipientAssignmentId', 'recipient_assignment_id'], '') || undefined,
+      wecomDeliveryStatus: text(item, ['wecomDeliveryStatus', 'wecom_delivery_status'], '') || undefined,
       createdAt: text(item, ['createdAt', 'created_at', 'delivered_at'], ''), readAt: text(item, ['readAt', 'read_at'], '') || undefined,
       version: number(item, ['version', 'row_version'], 0),
     }))

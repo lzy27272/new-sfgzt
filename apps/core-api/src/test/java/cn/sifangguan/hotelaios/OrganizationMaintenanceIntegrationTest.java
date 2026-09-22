@@ -397,8 +397,9 @@ class OrganizationMaintenanceIntegrationTest {
                   and template_assignment.valid_from=current_date+1
                   and definition.code='DRT-PILOT-FO-SUPERVISOR-DAILY'
                 """, Integer.class, UUID.fromString(HOTEL));
-        assertThat(activeFrontOfficeReports).isEqualTo(
-                "WITH_FRONT_OFFICE_SUPERVISOR".equals(targetMode) ? 1 : 0);
+        // An explicitly assigned supervisor keeps their own report even when the
+        // assistant template is configured to cover front-office duties too.
+        assertThat(activeFrontOfficeReports).isEqualTo(1);
     }
 
     @Test

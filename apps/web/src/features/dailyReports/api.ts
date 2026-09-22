@@ -1,3 +1,4 @@
+import { isGenericWorkQuestion, isOccurrenceEntry } from '../../app/workEntryPolicy'
 import type { ApiIdentity } from '../../api/client'
 import { featureApiMutation, featureApiRequest } from '../shared/featureApi'
 import { queryString, requireItems, type PageEnvelope } from '../shared/apiEnvelope'
@@ -353,6 +354,16 @@ export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyRep
   const currentSourceRows = rows(source.sources).filter((item) => text(item.revisionId) === currentRevision.id)
   const currentEvidenceRows = rows(source.evidence).filter((item) => text(item.revisionId) === currentRevision.id)
   currentRevision.sections = normalizeSections(configuration, currentItemRows, currentSourceRows, currentEvidenceRows)
+  // Historical submitted revisions remain visible exactly as recorded.
+  if (currentRevision.status === 'DRAFT') {
+    currentRevision.sections = currentRevision.sections.map((section) => ({
+      ...section,
+      items: section.items.filter((item) => !isGenericWorkQuestion(item.code, item.label)).map((item) =>
+        isOccurrenceEntry(item.code) ? { ...item, required: false, evidenceRequired: false,
+          description: '发生时登记，未发生无需填报；记录会自动汇总到日报。',
+          systemValue: item.systemValue || '未登记发生记录' } : item),
+    }))
+  }
   const allItems = currentRevision.sections.flatMap((section) => section.items)
   const completedItems = allItems.filter((item) => item.exception
     || item.resultStatus === 'COMPLETED'
@@ -383,6 +394,9 @@ export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyRep
   }
   return {
     ...summary,
+    inventoryContext: source.inventoryContext as DailyReportDetail['inventoryContext'],
+    inventoryQuantities: snapshot.inventoryQuantities,
+    roomCounts: snapshot.roomCounts as DailyReportDetail['roomCounts'],
     currentRevision,
     revisions,
     autoSummary: Object.keys(autoSummary).length ? {
@@ -485,6 +499,8 @@ export async function saveDailyReportDraft(identity: ApiIdentity, report: DailyR
   const body = {
     revisionId: report.currentRevision.id,
     narrative: input.narrative,
+    inventoryQuantities: input.inventoryQuantities,
+    roomCounts: input.roomCounts,
     items: input.itemValues.map((item) => ({
       templateItemId: item.templateItemId,
       value: commandValue(item.value, itemTypes.get(item.templateItemId) || 'TEXT'),

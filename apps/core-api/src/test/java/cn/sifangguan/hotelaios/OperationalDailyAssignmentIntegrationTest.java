@@ -115,6 +115,7 @@ class OperationalDailyAssignmentIntegrationTest {
         "ASSISTANT_GENERAL_MANAGER, WITH_FRONT_OFFICE_SUPERVISOR, WP-PILOT-AGM-DAILY",
         "ASSISTANT_GENERAL_MANAGER, WITHOUT_FRONT_OFFICE_SUPERVISOR, WP-PILOT-AGM-DAILY",
         "FRONT_OFFICE_SUPERVISOR, WITH_FRONT_OFFICE_SUPERVISOR, WP-PILOT-FO-SUPERVISOR-DAILY",
+        "FRONT_OFFICE_SUPERVISOR, WITHOUT_FRONT_OFFICE_SUPERVISOR, WP-PILOT-FO-SUPERVISOR-DAILY",
         "SERVICE_STEWARD, WITH_FRONT_OFFICE_SUPERVISOR, WP-PILOT-SERVICE-STEWARD-DAILY",
         "FRONT_DESK, WITH_FRONT_OFFICE_SUPERVISOR, WP-PILOT-FRONT-DAILY",
         "HOUSEKEEPING_SUPERVISOR, WITH_FRONT_OFFICE_SUPERVISOR, WP-PILOT-HK-SUPERVISOR-DAILY",
@@ -225,6 +226,32 @@ class OperationalDailyAssignmentIntegrationTest {
         sla.processTenantAsSystem(UUID.fromString(TENANT), 100, UUID.randomUUID());
         assertThat(jdbc.queryForObject("select count(*) from work_package_allocation where position_assignment_id=? and status='ACTIVE'",
                 Integer.class, assignment)).isZero();
+    }
+
+    @Test
+    void existingSupervisorProvisioningGapStartsTomorrowWithoutHistoricalMisses() {
+        jdbc.update("update hotel_profile set assistant_work_template_mode='WITHOUT_FRONT_OFFICE_SUPERVISOR' where org_unit_id=?",UUID.fromString(HOTEL));
+        UUID account=UUID.randomUUID(), employee=UUID.randomUUID(), assignment=UUID.randomUUID();
+        jdbc.update("insert into user_account(id,tenant_id,login_name,display_name) values (?,?,?,'前厅主管补齐验证')",account,UUID.fromString(TENANT),"fo-gap-"+account);
+        jdbc.update("insert into employee(id,tenant_id,account_id,employee_no,name,hired_on) values (?,?,?,?,'前厅主管补齐验证',current_date-2)",employee,UUID.fromString(TENANT),account,"fo-gap-"+employee);
+        jdbc.update("""
+                insert into employee_position_assignment(id,tenant_id,employee_id,org_unit_id,position_id,valid_from)
+                select ?,?,?,?,id,current_date-2 from position_definition where tenant_id=? and code='FRONT_OFFICE_SUPERVISOR'
+                """,assignment,UUID.fromString(TENANT),employee,UUID.fromString(FRONT_OFFICE),UUID.fromString(TENANT));
+        // Recreate the missing provisioning shape; revocation of real employee work is not being tested here.
+        sla.processTenantAsSystem(UUID.fromString(TENANT),100,UUID.randomUUID());
+        sla.processTenantAsSystem(UUID.fromString(TENANT),100,UUID.randomUUID());
+        assertThat(jdbc.queryForObject("select count(*) from work_package_allocation where position_assignment_id=? and valid_from=current_date+1 and status='ACTIVE'",Integer.class,assignment)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from work_expectation where position_assignment_id=? and business_date<=current_date",Integer.class,assignment)).isZero();
+        assertThat(jdbc.queryForObject("""
+                select count(*) from daily_report_template_assignment a
+                join daily_report_template_version v on v.tenant_id=a.tenant_id and v.id=a.template_version_id
+                join daily_report_template_definition d on d.tenant_id=v.tenant_id and d.id=v.template_id
+                join daily_report_delivery_policy policy on policy.tenant_id=a.tenant_id and policy.template_assignment_id=a.id
+                where a.org_unit_id=? and a.status='ACTIVE' and a.valid_from<=current_date+1
+                  and (a.valid_to is null or a.valid_to>=current_date+1)
+                  and d.code='DRT-PILOT-FO-SUPERVISOR-DAILY' and policy.enabled
+                """,Integer.class,UUID.fromString(HOTEL))).isEqualTo(1);
     }
 
     private UUID activate(String positionCode, LocalDate validFrom) throws Exception {

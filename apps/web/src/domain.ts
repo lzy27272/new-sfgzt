@@ -150,6 +150,7 @@ export type WorkExpectation = {
     oneClickRestTransfer?: boolean
     requiredRoomCountFormula?: string
     repeatableDailyRecords?: boolean
+    registrationMode?: 'WHEN_OCCURRED'
   }
   guestRoomFloorCount?: number
   operationalFeatureFlags?: Record<string, boolean>
@@ -473,6 +474,7 @@ export type NotificationItem = {
   readAt?: string
   version: number
   recipientAssignmentId?: string
+  wecomDeliveryStatus?: string
 }
 
 export type DashboardMetric = {

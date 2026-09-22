@@ -177,7 +177,7 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
 
         <section className="work-rule-section"><header><h4>完成要求与日报</h4><span>每项完成后自动投影到岗位日报</span></header>
           <div className="form-grid work-rule-grid">
-            <label className="checkbox-label"><input type="checkbox" checked={selected.completionStatementRequired} onChange={(event) => updateSelected({ completionStatementRequired: event.target.checked })} />必须填写完成情况</label>
+            <p className="muted">工作结果从业务字段和证据汇总，不再单独要求填写。</p>
             <label className="checkbox-label"><input type="checkbox" checked={selected.exceptionStatementRequired} onChange={(event) => updateSelected({ exceptionStatementRequired: event.target.checked })} />必须填写异常事项</label>
             <label className="checkbox-label"><input type="checkbox" checked={selected.nextActionRequired} onChange={(event) => updateSelected({ nextActionRequired: event.target.checked })} />必须填写下一步行动</label>
             <label className="checkbox-label"><input type="checkbox" checked={selected.waiverAllowed} onChange={(event) => updateSelected({ waiverAllowed: event.target.checked })} />允许主管豁免</label>

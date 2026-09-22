@@ -102,6 +102,14 @@ public class DailyReportRoutineProjectionService {
                         and relation.template_version_id = report.template_version_id
                         and (
                             item.work_package_item_id = record.work_package_item_id
+                            or (template_package_item.item_code = record_package_item.item_code
+                                and exists (select 1 from work_package_version template_version
+                                  join work_package_version record_version
+                                    on record_version.tenant_id=template_version.tenant_id
+                                   and record_version.work_package_definition_id=template_version.work_package_definition_id
+                                  where template_version.tenant_id=record.tenant_id
+                                    and template_version.id=template_package_item.work_package_version_id
+                                    and record_version.id=record_package_item.work_package_version_id))
                             or (
                                 record_package_item.execution_policy ->> 'sharedReportProjectionMode'
                                     = 'ACTUAL_EXECUTOR_ONLY'
@@ -163,6 +171,14 @@ public class DailyReportRoutineProjectionService {
                       and coalesce((template_package_item.report_policy ->> 'dailyReport')::boolean, true)
                       and (
                           item.work_package_item_id = record.work_package_item_id
+                          or (template_package_item.item_code = record_package_item.item_code
+                              and exists (select 1 from work_package_version template_version
+                                join work_package_version record_version
+                                  on record_version.tenant_id=template_version.tenant_id
+                                 and record_version.work_package_definition_id=template_version.work_package_definition_id
+                                where template_version.tenant_id=record.tenant_id
+                                  and template_version.id=template_package_item.work_package_version_id
+                                  and record_version.id=record_package_item.work_package_version_id))
                           or (
                               record_package_item.execution_policy ->> 'sharedReportProjectionMode'
                                   = 'ACTUAL_EXECUTOR_ONLY'

@@ -21,8 +21,9 @@ test('store resource response parsers accept the backend contract', () => {
   }), {
     id: 'item-1', hotelOrgUnitId: 'hotel-1', sku: 'LINEN-001', name: '浴巾', category: 'LINEN',
     unit: '条', unitCost: 18.5, minimumQuantity: 20, status: 'ACTIVE', rowVersion: 2,
-    specification: '', purchaseUnit: '条', purchaseFactor: 1, issueUnit: '条', issueFactor: 1, baseUnitLocked: false,
+    specification: '', purchaseUnit: '条', purchaseFactor: 1, issueUnit: '条', issueFactor: 1, baseUnitLocked: false, employeeUsageEnabled: true,
   })
+  assert.equal(parseStoreResourceItem({ id: 'hidden', sku: 'HIDDEN', name: '不可填报物品', unit: '件', unitCost: 0, minimumQuantity: 0, rowVersion: 0, employeeUsageEnabled: false }).employeeUsageEnabled, false)
   assert.equal(parseStoreInventoryBalances([{ itemId: 'item-1', sku: 'LINEN-001', itemName: '浴巾', category: 'LINEN', unit: '条', unitCost: 18.5, minimumQuantity: 20, quantity: 12, inventoryValue: 222 }])[0].quantity, 12)
   assert.equal(parseInventoryMovements([{ id: 'movement-1', itemId: 'item-1', itemName: '浴巾', movementType: 'RECEIPT', quantityDelta: 5, quantityBefore: 7, quantityAfter: 12, unit: '条', reason: '采购入库', operatorName: '管理员', occurredAt: '2026-09-17T08:00:00+08:00' }])[0].quantityAfter, 12)
   assert.equal(parseFixedAsset({ id: 'asset-1', hotelOrgUnitId: 'hotel-1', assetCode: 'TV-001', name: '电视', category: '电器', unit: '台', originalValue: 2600, status: 'ACTIVE', rowVersion: 1 }).originalValue, 2600)

@@ -1,5 +1,6 @@
 package cn.sifangguan.hotelaios.dailyreports;
 
+import cn.sifangguan.hotelaios.workdata.WorkEntryPolicy;
 import cn.sifangguan.hotelaios.dailyreporttemplates.DailyReportTemplateService;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
@@ -64,6 +65,7 @@ public class DailyReportService {
     private final DailyReportTemplateService templateService;
     private final ObjectMapper objectMapper;
     private final DailyReportRoutineProjectionService routineProjection;
+    private final DailyReportWorkEntryService workEntry;
 
     public DailyReportService(
             NamedParameterJdbcTemplate jdbc,
@@ -76,7 +78,8 @@ public class DailyReportService {
             BusinessDayService businessDayService,
             DailyReportTemplateService templateService,
             ObjectMapper objectMapper,
-            DailyReportRoutineProjectionService routineProjection
+            DailyReportRoutineProjectionService routineProjection,
+            DailyReportWorkEntryService workEntry
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -89,6 +92,7 @@ public class DailyReportService {
         this.templateService = templateService;
         this.objectMapper = objectMapper;
         this.routineProjection = routineProjection;
+        this.workEntry = workEntry;
     }
 
     @Transactional(readOnly = true)
@@ -361,6 +365,8 @@ public class DailyReportService {
             itemSnapshot.add(itemCanonical);
         }
         snapshot.set("items", itemSnapshot);
+        if (request.inventoryQuantities() != null) snapshot.set("inventoryQuantities", request.inventoryQuantities());
+        if (request.roomCounts() != null) snapshot.set("roomCounts", request.roomCounts());
         int revisionChanged = jdbc.update("""
                 update daily_report_revision
                 set payload_snapshot = cast(:snapshot as jsonb), narrative = :narrative,
@@ -385,6 +391,7 @@ public class DailyReportService {
     ) {
         accessPolicy.requirePermission("daily-report.submit");
         TenantPrincipal principal = prepare();
+        workEntry.lockDay(reportId);
         ReportLock report = lockReport(principal, reportId);
         requireOwner(principal, report);
         requireExpected(report, request.expectedVersion());
@@ -400,6 +407,11 @@ public class DailyReportService {
         if (reservation.replayed()) return replay(reservation);
         ObjectNode snapshot = parseObject(revision.payloadSnapshot(), "payload_snapshot");
         ValidationOutcome validation = validateSubmission(principal, request.revisionId(), itemPolicies(snapshot));
+        workEntry.submit(reportId, snapshot);
+        // Work submission can enrich this draft. Freeze the enriched facts, not the pre-submission copy.
+        routineProjection.projectReport(reportId, request.revisionId());
+        snapshot = revisionSnapshotForUpdate(principal, reportId, request.revisionId());
+        long submissionVersion = lockReport(principal, reportId).rowVersion();
         String contentHash = reportContentHash(principal, request.revisionId(), snapshot);
         int revisionChanged = jdbc.update("""
                 update daily_report_revision
@@ -421,7 +433,7 @@ public class DailyReportService {
                   and row_version = :expectedVersion and current_revision_id = :revisionId
                 """, base(principal).addValue("reportId", reportId).addValue("revisionId", request.revisionId())
                 .addValue("reviewStatus", reviewRequired ? "PENDING" : "NOT_REQUIRED")
-                .addValue("expectedVersion", request.expectedVersion()));
+                .addValue("expectedVersion", submissionVersion));
         if (reportChanged != 1) conflict("日报已变化，提交未生效");
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("reportId", reportId.toString());
@@ -742,6 +754,11 @@ public class DailyReportService {
         revisions.forEach(revision -> revision.put(
                 "payloadSnapshot", parseJson(String.valueOf(revision.get("payloadSnapshot")))));
         result.put("revisions", revisions);
+        if ("DRAFT".equals(result.get("reportStatus"))
+                && java.util.Objects.equals(result.get("positionAssignmentId"), principal.businessActorAssignmentId())
+                && principal.hasPermission("work-record.submit")) {
+            result.put("inventoryContext", workEntry.editableContext(reportId));
+        }
         result.put("itemResults", jdbc.queryForList("""
                 select item_result.id, item_result.revision_id as "revisionId",
                        revision.revision_no as "revisionNo",
@@ -916,10 +933,12 @@ public class DailyReportService {
             } catch (RuntimeException exception) {
                 throw new IllegalStateException("日报冻结模板包含无效字段标识", exception);
             }
-            boolean evidenceRequired = item.path("evidencePolicy").path("required").asBoolean(false);
-            boolean sourceRequired = item.path("dataSourceConfig").path("required").asBoolean(false);
+            boolean optionalEntry = WorkEntryPolicy.occursOnDemand(item.path("itemCode").asText());
+            boolean removedQuestion = WorkEntryPolicy.genericQuestion(item.path("itemCode").asText(), item.path("label").asText());
+            boolean evidenceRequired = !optionalEntry && !removedQuestion && item.path("evidencePolicy").path("required").asBoolean(false);
+            boolean sourceRequired = !optionalEntry && !removedQuestion && item.path("dataSourceConfig").path("required").asBoolean(false);
             result.put(id, new ItemPolicy(
-                    id, item.path("required").asBoolean(true), evidenceRequired, sourceRequired,
+                    id, !optionalEntry && !removedQuestion && item.path("required").asBoolean(true), evidenceRequired, sourceRequired,
                     Set.of("SYSTEM", "WORK_RECORD", "AI_SUMMARY").contains(item.path("dataSourceType").asText())));
         }));
         if (result.isEmpty()) throw new IllegalStateException("日报冻结模板没有可填写字段");

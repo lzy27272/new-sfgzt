@@ -35,6 +35,8 @@ public class WorkBoardService {
             case
               when coalesce(execution_policy ->> 'repeatableDailyRecords', 'false') = 'true'
                 and pending_review_count > 0 and review_mode <> 'NONE' then 'REVIEW'
+              when coalesce(execution_policy ->> 'registrationMode', '') = 'WHEN_OCCURRED'
+                and (coalesce(submitted_record_count, 0) = 0 or latest_record_status in ('REJECTED','RETURNED') or status='FAILED') then 'PENDING'
               when latest_record_status in ('REJECTED', 'RETURNED') then
                 case when due_at <= :now then 'OVERDUE' else 'PENDING' end
               when status = 'FAILED' then
@@ -136,7 +138,7 @@ public class WorkBoardService {
         String classified = "with source as (" + query.sql() + "), classified as (select source.*, "
                 + STATE_SQL + " as board_status, "
                 + "(not item_required or coalesce(execution_policy ->> 'repeatableDailyRecords', 'false') = 'true') as optional_record, "
-                + "coalesce(valid_submitted_at > due_at, false) as is_late "
+                + "(item_required and coalesce(execution_policy ->> 'registrationMode', '') <> 'WHEN_OCCURRED' and coalesce(valid_submitted_at > due_at, false)) as is_late "
                 + "from source where status not in ('WAIVED','CANCELLED')" + scopeFilter + ") ";
         String period = "business_date between :fromDate and :toDate";
         String review = "board_status = 'REVIEW' and business_date <= :today";

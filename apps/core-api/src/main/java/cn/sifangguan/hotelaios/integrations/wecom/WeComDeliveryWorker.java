@@ -139,7 +139,15 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where n.tenant_id = :tenantId
                       and ((n.source_type = 'TASK' and task.id is not null)
-                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null)
+                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
+                               and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
+                               and exists (select 1 from work_package_item item
+                                 join tenant t on t.id=item.tenant_id
+                                 where item.tenant_id=expectation.tenant_id and item.id=expectation.work_package_item_id
+                                   and item.required
+                                   and coalesce(item.execution_policy->>'repeatableDailyRecords','false') <> 'true'
+                                   and coalesce(item.execution_policy->>'registrationMode','') <> 'WHEN_OCCURRED'
+                                   and (item.period_type<>'DAY' or expectation.business_date=(now() at time zone t.timezone)::date)))
                            or (n.source_type = 'DAILY_REPORT' and report.id is not null
                                and (n.notification_type <> 'DAILY_REPORT_REVIEW_PENDING'
                                     or (review_state.pending_count > 0
@@ -234,7 +242,15 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where d.tenant_id = :tenantId and d.channel = 'WECHAT'
                       and ((n.source_type = 'TASK' and task.id is not null)
-                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null)
+                           or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
+                               and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
+                               and exists (select 1 from work_package_item item
+                                 join tenant t on t.id=item.tenant_id
+                                 where item.tenant_id=expectation.tenant_id and item.id=expectation.work_package_item_id
+                                   and item.required
+                                   and coalesce(item.execution_policy->>'repeatableDailyRecords','false') <> 'true'
+                                   and coalesce(item.execution_policy->>'registrationMode','') <> 'WHEN_OCCURRED'
+                                   and (item.period_type<>'DAY' or expectation.business_date=(now() at time zone t.timezone)::date)))
                            or (n.source_type = 'DAILY_REPORT' and report.id is not null
                                and (n.notification_type <> 'DAILY_REPORT_REVIEW_PENDING'
                                     or (review_state.pending_count > 0

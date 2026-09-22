@@ -80,10 +80,10 @@ app:
   database:
     rls-enabled: ${DB_RLS_ENABLED:true}
   data-retention:
-    # Dual control: tenant policy is stored in PostgreSQL, while a future
-    # destructive worker must also be explicitly enabled at deployment time.
-    # No deletion worker is registered in this release.
+    # Both the deployment gate and tenant policy must be enabled.
     cleanup-worker-enabled: ${DATA_RETENTION_CLEANUP_WORKER_ENABLED:false}
+    tenant-ids: ${DATA_RETENTION_TENANT_IDS:}
+    fixed-delay-ms: ${DATA_RETENTION_FIXED_DELAY_MS:300000}
   work-expectation:
     sla:
       scheduler-enabled: ${WORK_EXPECTATION_SLA_SCHEDULER_ENABLED:false}

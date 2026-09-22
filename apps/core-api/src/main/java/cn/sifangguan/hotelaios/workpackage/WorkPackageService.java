@@ -1095,6 +1095,11 @@ public class WorkPackageService {
                 where x.tenant_id = :tenantId and x.id = :expectationId
                 """, params));
         workVisibility.requireExpectation(principal, expectationId);
+        result.put("form_schema", cn.sifangguan.hotelaios.workdata.WorkEntryPolicy.schema(
+                readObjectPolicy(java.util.Objects.toString(result.get("form_schema"), "{}"), "工作表单"), (String) result.get("item_code")));
+        ObjectNode entryPolicy = (ObjectNode) readObjectPolicy(result.get("submission_policy").toString(), "提交规则");
+        entryPolicy.put("completionStatementRequired", false);
+        result.put("submission_policy", entryPolicy);
         result.put("standards", jdbc.queryForList("""
                 select s.standard_version_id, s.usage_type, s.weight, sd.code as standard_code,
                        sv.version_no as standard_version_no, sv.title
@@ -1605,6 +1610,27 @@ public class WorkPackageService {
                         : weekKey(request.businessDate());
             }
             String sharedKey = sharedKey(executionPolicy);
+            if (sharedKey == null) {
+                var generationParams = base(principal).addValue("assignmentId", request.positionAssignmentId())
+                        .addValue("targetOrgUnitId", request.targetOrgUnitId()).addValue("periodKey", periodKey)
+                        .addValue("itemId", candidate.itemId());
+                jdbc.query("select pg_advisory_xact_lock(hashtextextended(:key, 71))",
+                        generationParams.addValue("key", principal.tenantId() + ":" + request.positionAssignmentId()
+                                + ":" + request.targetOrgUnitId() + ":" + periodKey), rs -> null);
+                Boolean existing = jdbc.queryForObject("""
+                        select exists (
+                          select 1 from work_expectation x
+                          join work_package_item old_item on old_item.tenant_id=x.tenant_id and old_item.id=x.work_package_item_id
+                          join work_package_version old_version on old_version.tenant_id=old_item.tenant_id and old_version.id=old_item.work_package_version_id
+                          join work_package_item new_item on new_item.tenant_id=x.tenant_id and new_item.id=:itemId
+                          join work_package_version new_version on new_version.tenant_id=new_item.tenant_id and new_version.id=new_item.work_package_version_id
+                          where x.tenant_id=:tenantId and x.position_assignment_id=:assignmentId
+                            and x.target_org_unit_id=:targetOrgUnitId and x.period_key=:periodKey and x.status<>'CANCELLED'
+                            and old_item.item_code=new_item.item_code
+                            and old_version.work_package_definition_id=new_version.work_package_definition_id)
+                        """, generationParams, Boolean.class);
+                if (Boolean.TRUE.equals(existing)) continue;
+            }
             if (sharedKey != null) {
                 String lockKey = principal.tenantId() + ":" + request.targetOrgUnitId() + ":"
                         + request.businessDate() + ":" + periodKey + ":" + sharedKey;
@@ -1983,7 +2009,7 @@ public class WorkPackageService {
 
     private String normalizeSubmissionPolicy(JsonNode configured) {
         ObjectNode policy = JsonNodeFactory.instance.objectNode();
-        policy.put("completionStatementRequired", true);
+        policy.put("completionStatementRequired", false);
         policy.put("exceptionStatementRequired", false);
         policy.put("nextActionRequired", false);
         policy.put("attachmentRequired", false);
@@ -1997,6 +2023,7 @@ public class WorkPackageService {
             }
             policy.setAll((ObjectNode) configured);
         }
+        policy.put("completionStatementRequired", false);
         int maxAttachments = policy.path("maxAttachments").asInt(10);
         if (maxAttachments < 0 || maxAttachments > 200) {
             throw new IllegalArgumentException("单条工作记录附件数量必须在0到200之间");

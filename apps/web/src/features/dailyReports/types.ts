@@ -87,6 +87,9 @@ export type DailyReportAutoSummary = {
 }
 
 export type DailyReportDetail = DailyReportSummary & {
+  inventoryContext?: { catalogue: import('../storeResources/workUsage').UsageCatalogue; expectationId: string; legacyDraft?: boolean }
+  inventoryQuantities?: unknown
+  roomCounts?: { checkoutRooms?: number; stayoverRooms?: number }
   currentRevision: DailyReportRevision
   revisions: Array<Pick<DailyReportRevision, 'id' | 'revisionNo' | 'status' | 'submittedAt' | 'correctionReason'>>
   aiRecommendations: DailyReportAiRecommendation[]
@@ -96,6 +99,8 @@ export type DailyReportDetail = DailyReportSummary & {
 }
 
 export type DailyReportDraftInput = {
+  inventoryQuantities?: unknown
+  roomCounts?: { checkoutRooms?: number; stayoverRooms?: number }
   itemValues: Array<{ templateItemId: string; value?: string; exception: boolean; comment?: string }>
   narrative?: string
 }

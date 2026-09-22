@@ -363,6 +363,7 @@ public class AttachmentService {
             long sizeBytes,
             String scanStatus
     ) {
+        requireImageReadable(objectKey, mediaType);
         if (!malwareScanner.canDownload(scanStatus)) {
             throw new IllegalArgumentException("附件尚未通过安全扫描，禁止下载");
         }
@@ -374,11 +375,33 @@ public class AttachmentService {
     }
 
     public void removeStoredObject(String objectKey) {
+        // Generated CSV/PDF/XLSX exports have a separate, existing lifecycle.
+        if (objectKey.matches("[0-9a-f-]{36}/operation-exports/[0-9a-f-]{36}/attempt-[0-9]+/[^/]+")) {
+            try { Files.deleteIfExists(resolveObjectKey(objectKey)); }
+            catch (Exception exception) { throw new IllegalArgumentException("导出文件清理失败", exception); }
+            return;
+        }
+        var retention = jdbc.queryForList("""
+                select legal_hold from image_retention_object
+                where tenant_id=:tenantId and object_key=:key for update
+                """, base(accessPolicy.principal()).addValue("key", objectKey));
+        if (retention.stream().anyMatch(row -> Boolean.TRUE.equals(row.get("legal_hold")))) {
+            throw new IllegalArgumentException("重要证据已标记保留，请先由管理员解除保留");
+        }
         try {
             Files.deleteIfExists(resolveObjectKey(objectKey));
+            jdbc.update("""
+                    update image_retention_object set state='DELETED',deleted_at=now(),row_version=row_version+1
+                    where tenant_id=:tenantId and object_key=:key and state<>'DELETED'
+                    """, base(accessPolicy.principal()).addValue("key",objectKey));
         } catch (Exception exception) {
             throw new IllegalArgumentException("附件文件删除失败", exception);
         }
+    }
+
+    /** Only for a just-created UUID object whose metadata insert failed in this transaction. */
+    public void discardUncommittedObject(StoredObject stored) {
+        deleteQuietly(resolveObjectKey(stored.objectKey()));
     }
 
     /**
@@ -453,6 +476,7 @@ public class AttachmentService {
                 where a.tenant_id = :tenantId and a.id = :attachmentId
                 """, base(principal).addValue("attachmentId", attachmentId));
         workVisibility.requireRecord(principal, (UUID) attachment.get("work_record_id"));
+        requireImageReadable(String.valueOf(attachment.get("object_key")), String.valueOf(attachment.get("media_type")));
         if (!malwareScanner.canDownload(String.valueOf(attachment.get("scan_status")))) {
             throw new IllegalArgumentException("附件尚未通过安全扫描，禁止下载");
         }
@@ -487,13 +511,24 @@ public class AttachmentService {
         if (deleted != 1) {
             throw new IllegalArgumentException("附件不存在或不属于该工作记录");
         }
-        try {
-            Files.deleteIfExists(resolveObjectKey(objectKey));
-        } catch (Exception exception) {
-            throw new IllegalArgumentException("附件文件删除失败", exception);
-        }
+        removeStoredObject(objectKey);
         auditWriter.record("WORK_RECORD_ATTACHMENT_DELETED", "ATTACHMENT", attachmentId,
                 "{\"workRecordId\":\"" + workRecordId + "\"}");
+    }
+
+    private void requireImageReadable(String objectKey, String mediaType) {
+        if (!mediaType.startsWith("image/")) return;
+        var states = jdbc.queryForList("""
+                select o.state, (p.image_cleanup_enabled and not o.legal_hold
+                    and o.uploaded_at <= now() - p.image_retention_days * interval '24 hours') as expired
+                from image_retention_object o join data_retention_policy p using(tenant_id)
+                where o.tenant_id=:tenantId and o.object_key=:key
+                """, base(accessPolicy.principal()).addValue("key",objectKey));
+        if (states.isEmpty()) throw new IllegalArgumentException("图片留存状态尚未登记，暂不可下载");
+        if ("DELETED".equals(states.getFirst().get("state")) || Boolean.TRUE.equals(states.getFirst().get("expired"))) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.GONE,"图片已超过保存期限，工作记录与经营数据仍然保留");
+        }
     }
 
     private ValidatedUpload validatedFile(MultipartFile file, String originalName) {

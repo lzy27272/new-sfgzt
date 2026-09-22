@@ -151,14 +151,25 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 """, Integer.class, TENANT, assignmentId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("""
                 select count(*)
-                from work_package_allocation
-                where tenant_id = ?::uuid
-                  and work_package_version_id = ?::uuid
-                  and position_assignment_id = ?
-                  and target_org_unit_id = ?::uuid
-                  and allocation_source = 'SYSTEM'
-                  and status = 'ACTIVE'
-                """, Integer.class, TENANT, PACKAGE_VERSION, assignmentId, HOTEL)).isEqualTo(1);
+                from work_package_allocation allocation
+                join work_package_version version on version.tenant_id=allocation.tenant_id
+                  and version.id=allocation.work_package_version_id
+                join work_package_definition definition on definition.tenant_id=version.tenant_id
+                  and definition.id=version.work_package_definition_id
+                where allocation.tenant_id = ?::uuid
+                  and definition.code='WP-PILOT-GM-DAILY'
+                  and version.lifecycle_status='PUBLISHED'
+                  and version.version_no=(select max(current_version.version_no) from work_package_version current_version
+                    where current_version.tenant_id=version.tenant_id
+                      and current_version.work_package_definition_id=definition.id
+                      and current_version.lifecycle_status='PUBLISHED'
+                      and current_version.effective_from::date<=current_date
+                      and (current_version.effective_to is null or current_version.effective_to::date>=current_date))
+                  and allocation.position_assignment_id = ?
+                  and allocation.target_org_unit_id = ?::uuid
+                  and allocation.allocation_source = 'SYSTEM'
+                  and allocation.status = 'ACTIVE'
+                """, Integer.class, TENANT, assignmentId, HOTEL)).isEqualTo(1);
 
         slaService.processTenantAsSystem(UUID.fromString(TENANT), 100, UUID.randomUUID());
         assertThat(jdbc.queryForObject("""
@@ -1300,7 +1311,8 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 select jsonb_array_length(submission_policy -> 'evidenceRequirements')
                 from work_package_item where tenant_id = ?::uuid
                   and item_code = 'GM_PUBLIC_AREA_INSPECTION_AM'
-                """, Integer.class, TENANT)).isEqualTo(12);
+                  and work_package_version_id = ?::uuid
+                """, Integer.class, TENANT, PACKAGE_VERSION)).isEqualTo(12);
         assertThat(jdbc.queryForObject("""
                 select count(*) from daily_report_template_item item
                 join daily_report_template_section relation

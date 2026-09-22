@@ -1,4 +1,7 @@
+import { WorkUsageFields } from '../storeResources/WorkUsageFields'
+import { usageValidation, usagePayload } from '../storeResources/workUsage'
 import { DailyReportAutoSummary } from './DailyReportAutoSummary'
+import editorStyles from './editor.module.css'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import { hasPermission, permissions } from '../../app/permissions'
@@ -73,6 +76,10 @@ function ResolvedReportList({ mode, identity, params, go, initialBusinessDate, o
     setBusinessDate(nextDate); setStatus(nextStatus)
     go(mode === 'my' ? 'daily-reports-my' : 'daily-reports-team', { ...params, businessDate: nextDate, status: nextStatus || undefined, orgUnitId: mode === 'team' ? orgUnitId : undefined })
   }
+  useEffect(() => {
+    if (mode === 'my' && params.open === 'today' && !resource.loading && !resource.error && resource.data.length === 1)
+      go('daily-report-detail', { reportId: resource.data[0].id })
+  }, [mode, params.open, resource.loading, resource.error, resource.data, go])
   return <section className={styles.page}>
     <FeatureHeader eyebrow={mode === 'my' ? 'MY DAILY REPORTS' : 'TEAM DAILY REPORTS'} title={mode === 'my' ? '我的日报' : '团队日报'} description={mode === 'my' ? '由当前岗位工作包驱动，按模块填报，不使用统一长表。' : '集中处理未提交、异常日报、待补充和修订审核。'} />
     <div className={styles.toolbar}>{mode === 'team' && <label>门店<select value={orgUnitId} onChange={(event) => go('daily-reports-team', { ...params, orgUnitId: event.target.value, businessDate: undefined })}>{orgOptions.map((option) => <option key={option.id} value={option.id}>{option.code ? `${option.code} · ` : ''}{option.name}</option>)}</select></label>}<label>营业日<input type="date" value={businessDate} onChange={(event) => updateFilters(event.target.value, status)} /></label><label>状态<select value={status} onChange={(event) => updateFilters(businessDate, event.target.value)}><option value="">全部</option><option value="DRAFT">草稿</option><option value="SUBMITTED">已提交</option><option value="ARCHIVED">已归档</option></select></label><button className="secondary" onClick={() => void resource.reload()}>刷新</button></div>
@@ -107,8 +114,13 @@ function hasDailyReportDraftChanges(draft: DailyReportLocalDraft, initialValues:
   return draft.exceptions.some((id) => !initialExceptions.has(id))
 }
 
+function wasDraftSaved(draft: DailyReportLocalDraft, saved?: DailyReportLocalDraft) {
+  return Boolean(saved && draft.revisionId === saved.revisionId && draft.baseRowVersion === saved.baseRowVersion
+    && !hasDailyReportDraftChanges(draft, saved.values, new Set(saved.exceptions)))
+}
+
 function ReportEditor({ report, identity, grantedPermissions, correctionRevisionId, onChanged, go }: { report: DailyReportDetail; identity: RoleContext; grantedPermissions: string[]; correctionRevisionId?: string; onChanged: () => Promise<void>; go: AppNavigate }) {
-  const initialValues = useMemo(() => Object.fromEntries(report.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), [report])
+  const initialValues = useMemo(() => ({ ...Object.fromEntries(report.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), _inventory: JSON.stringify(report.inventoryQuantities ?? null), _checkoutRooms: String(report.roomCounts?.checkoutRooms ?? ''), _stayoverRooms: String(report.roomCounts?.stayoverRooms ?? '') }), [report])
   const initialExceptions = useMemo(() => new Set(report.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.exception).map((item) => item.id))), [report])
   const [values, setValues] = useState<Record<string, string>>(initialValues)
   const [exceptions, setExceptions] = useState<Set<string>>(initialExceptions)
@@ -129,6 +141,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
     values: initialValues,
     exceptions: [...initialExceptions],
   })
+  const savedDraftRef = useRef<DailyReportLocalDraft | undefined>(undefined)
   useEffect(() => {
     let active = true
     setDraftHydrated(false)
@@ -152,6 +165,8 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
         localDraftRef.current = stored
         setDraftNotice('已恢复上次未提交的日报内容。')
       } else {
+        setValues(initialValues)
+        setExceptions(initialExceptions)
         localDraftRef.current = {
           schemaVersion: 1,
           revisionId: report.currentRevision.id,
@@ -207,6 +222,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
     }
     localDraftRef.current = snapshot
     const timeout = window.setTimeout(() => {
+      if (wasDraftSaved(snapshot, savedDraftRef.current)) return
       const operation = hasDailyReportDraftChanges(snapshot, initialValues, initialExceptions)
         ? writeResumableDraft(localDraftKey, snapshot)
         : removeResumableDraft(localDraftKey)
@@ -219,6 +235,8 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
     if (!editable || !draftHydrated || conflictingLocalDraft) return
     const flushDraft = () => {
       const snapshot = localDraftRef.current
+      // A refresh/unmount after a successful save must not resurrect the old local version.
+      if (wasDraftSaved(snapshot, savedDraftRef.current)) return
       void (hasDailyReportDraftChanges(snapshot, initialValues, initialExceptions)
         ? writeResumableDraft(localDraftKey, snapshot)
         : removeResumableDraft(localDraftKey))
@@ -232,9 +250,16 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
       flushDraft()
     }
   }, [conflictingLocalDraft, draftHydrated, editable, initialExceptions, initialValues, localDraftKey])
-  const input: DailyReportDraftInput = { itemValues: report.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.dataSource !== 'SYSTEM').map((item) => ({ templateItemId: item.templateItemId, value: values[item.id], exception: exceptions.has(item.id) }))) }
+  let inventoryValue: unknown
+  try { inventoryValue = JSON.parse(values._inventory || 'null') } catch { inventoryValue = undefined }
+  const usageCatalogue = report.inventoryContext?.catalogue
+  const roomCount = (key: string) => values[key]?.trim() ? Number(values[key]) : undefined
+  const input: DailyReportDraftInput = {
+    inventoryQuantities: usageCatalogue ? usagePayload(inventoryValue, usageCatalogue) : undefined,
+    roomCounts: usageCatalogue ? { checkoutRooms: roomCount('_checkoutRooms'), stayoverRooms: roomCount('_stayoverRooms') } : undefined,
+    itemValues: report.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.dataSource !== 'SYSTEM').map((item) => ({ templateItemId: item.templateItemId, value: values[item.id], exception: false }))) }
   const currentMissingRequiredCount = report.currentRevision.sections.flatMap((section) => section.items)
-    .filter((item) => item.required && item.dataSource !== 'SYSTEM' && !exceptions.has(item.id)
+    .filter((item) => item.required && item.dataSource !== 'SYSTEM'
       && !((values[item.id] ?? '').trim() || (item.systemValue ?? '').trim())).length
   const reviewingHistoricalRevision = Boolean(correctionRevisionId && correctionRevisionId !== report.currentRevision.id)
   const reviewPermission = report.currentRevision.revisionType === 'CORRECTION' ? permissions.dailyReport.reviewCorrection : permissions.dailyReport.reviewException
@@ -244,9 +269,17 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
       setMessage('服务器日报草稿与本机内容不一致，请先选择要继续使用的版本。')
       return
     }
+    if (action === 'submit' && usageCatalogue) {
+      const error = usageCatalogue.enabled ? usageValidation(inventoryValue, usageCatalogue) : '门店尚未配置耗用审核人，请联系管理员配置后再提交。'
+      if (error) { setMessage(error); return }
+      if (['_checkoutRooms', '_stayoverRooms'].some(key => roomCount(key) === undefined || !Number.isSafeInteger(roomCount(key)) || roomCount(key)! < 0)) {
+        setMessage('请填写退房打扫数、续住房打扫数，数量为非负整数。'); return
+      }
+    }
     setMessage(undefined); setConflict(false)
     try {
-      await command.run((key) => {
+      const submittedDraft: DailyReportLocalDraft = { ...localDraftRef.current, values: { ...values }, exceptions: [...exceptions] }
+      const result = await command.run((key) => {
         if (action === 'save') return saveDailyReportDraft(identity, report, input, key)
         if (action === 'submit') return saveDailyReportDraft(identity, report, input, `${key}-save`)
           .then((saved) => submitDailyReport(identity, saved, `${key}-submit`))
@@ -254,19 +287,27 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
         if (correctionRevisionId) return reviewDailyReportRevision(identity, report, correctionRevisionId, action === 'approve' ? 'APPROVED' : 'REJECTED', reason, key)
         return reviewDailyReport(identity, report, action === 'approve' ? 'APPROVED' : 'REJECTED', reason, key)
       })
-      if (action === 'save' || action === 'submit') await removeResumableDraft(localDraftKey)
+      if (!result) return
+      if (action === 'save' || action === 'submit') {
+        savedDraftRef.current = submittedDraft
+        await removeResumableDraft(localDraftKey)
+      }
       await onChanged()
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) { setConflict(true); setMessage('服务器已有新版本；你的本地填写内容仍保留。请查看最新版本后重新应用修改。') }
       else setMessage(error instanceof Error ? error.message : '操作失败')
     }
   }
-  const toggleException = (id: string) => setExceptions((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
   if (editable && !draftHydrationSettled) {
     return <section className={styles.section}><div className="state-card"><div className="spinner" /><strong>正在恢复未提交的日报内容</strong><small>恢复完成前暂不开放编辑，避免覆盖本机草稿。</small></div></section>
   }
   if (conflictingLocalDraft) {
     return <section className={styles.section}><div className="inline-warning"><strong>发现两个版本的未提交日报</strong><p>服务器日报已在其他页面或设备更新，本机仍保留一份未提交内容。请选择一个版本后再继续，系统不会自动覆盖。</p><div className={styles.actions}><button className="secondary" onClick={chooseServerDraft}>使用服务器最新草稿</button><button className="secondary" onClick={chooseLocalDraft}>恢复本机未提交内容</button></div></div></section>
   }
-  return <div className={styles.split}><main className={styles.stack}><DailyReportAutoSummary report={report} /><section className={styles.section}><header><h2>补充填报内容</h2><div className={styles.actions}><StatusBadge value={dailyReportStatusLabels[report.status] || report.status} /><StatusBadge value={dailyReportStatusLabels[report.reviewStatus] || report.reviewStatus} /></div></header>{draftNotice && <div className="inline-success">{draftNotice}</div>}{!editable && <div className={styles.locked}>日报已提交或当前任职无编辑权限，原始填报内容只读。需要修改时发起修订，不覆盖历史版本。</div>}{report.currentRevision.sections.filter((section) => section.applicable && section.items.some((item) => item.dataSource !== 'SYSTEM')).map((section) => <section className={styles.reportGroup} key={section.id}><header><strong>{section.name}</strong>{section.conditional && <span className={styles.badge}>条件模块</span>}</header>{section.items.filter((item) => item.dataSource !== 'SYSTEM').map((item) => <div className={styles.reportItem} key={item.id}><label>{item.label}{item.required ? ' *' : ''}{item.resultStatus === 'PENDING' && item.systemValue !== undefined && <span className={styles.badge}>已提交待审核</span>}{item.systemValue !== undefined && <span className={styles.locked}>系统预填：{item.systemValue}</span>}<textarea rows={item.inputType === 'NARRATIVE' ? 4 : 2} disabled={!editable || item.dataSource === 'SYSTEM'} value={values[item.id] ?? ''} onChange={(event) => setValues({ ...values, [item.id]: event.target.value })} /></label><div className={styles.actions}><label><input type="checkbox" disabled={!editable} checked={exceptions.has(item.id)} onChange={() => toggleException(item.id)} /> 标记异常</label><span className={styles.meta}>{item.evidenceRequired ? '需要证据' : '证据可选'} · 来源 {item.sourceLabels.join('、') || '员工填报'}</span></div>{item.evidence.map((evidence) => <div className={styles.meta} key={evidence.id}><span>{evidence.fileName}</span><span>{evidence.sensitivity === 'SENSITIVE' ? '敏感证据' : '普通证据'}</span><span>{evidence.invalidatedAt ? '已失效，历史保留' : evidence.scanStatus || '已上传'}</span></div>)}</div>)}</section>)}</section>{conflict && <div className={styles.conflict}>{message}</div>}{message && !conflict && <div className="inline-error">{message}</div>}<section className={styles.section}><div className={styles.actions}>{editable && <button className="secondary" disabled={command.busy} onClick={() => void run('save')}>保存草稿</button>}{editable && report.allowedActions.includes('SUBMIT') && <button className="primary" disabled={command.busy || currentMissingRequiredCount > 0} onClick={() => void run('submit')}>提交日报</button>}{!editable && report.allowedActions.includes('REQUEST_CORRECTION') && <button className="secondary" disabled={command.busy || !reason.trim()} onClick={() => void run('correction')}>发起修订</button>}</div>{!editable && report.allowedActions.includes('REQUEST_CORRECTION') && <label className={styles.formGrid}>修订原因<textarea rows={2} value={reason} onChange={(event) => setReason(event.target.value)} /></label>}{report.blockedActionReasons.SUBMIT && <p className={styles.locked}>{report.blockedActionReasons.SUBMIT}</p>}</section></main><aside className={styles.stack}><section className={styles.section}><h2>日报上下文</h2><div className={styles.meta}><span>模板 {report.templateVersionNo ? `V${report.templateVersionNo}` : '版本待解析'}</span><span>完成 {report.completionRate ?? '—'}%</span><span>异常 {report.exceptionCount ?? '—'}</span><span>证据 {report.evidenceCount ?? '—'}</span></div><p>截止：{formatLocalDateTime(report.dueAt)}</p><div className={styles.timeline}>{report.revisions.map((revision) => <article key={revision.id}><strong>修订 V{revision.revisionNo} · {dailyReportStatusLabels[revision.status] || revision.status}</strong><small>{formatLocalDateTime(revision.submittedAt)} {revision.correctionReason || ''}</small>{revision.id !== report.currentRevision.id && <button className="link-button" onClick={() => go('daily-report-correction', { reportId: report.id, revisionId: revision.id })}>查看修订</button>}</article>)}</div></section>{reviewingHistoricalRevision && <div className={styles.locked}>历史修订只读；后端仅允许审核当前修订。</div>}{canReviewCurrentRevision && (report.allowedActions.includes('REVIEW_APPROVE') || report.allowedActions.includes('REVIEW_REJECT')) && <section className={styles.section}><h2>主管审核</h2><label className={styles.formGrid}>审核意见<textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} /></label><div className={styles.actions}>{report.allowedActions.includes('REVIEW_APPROVE') && <button className="primary" disabled={command.busy || !reason.trim()} onClick={() => void run('approve')}>确认通过</button>}{report.allowedActions.includes('REVIEW_REJECT') && <button className="danger-button" disabled={command.busy || !reason.trim()} onClick={() => void run('reject')}>退回补充</button>}</div><p className={styles.meta}>是否允许审核由服务端依据任职、组织范围和禁止自审规则返回。</p></section>}</aside></div>
+  return <div className={`${styles.split} ${editorStyles.editor}`}><main className={styles.stack}><DailyReportAutoSummary report={report} section="work" />
+    {editable && usageCatalogue ? <section className={styles.section}>
+      {report.inventoryContext?.legacyDraft && <div className="inline-warning">原日清入口还有未提交草稿。请先完成原草稿，再返回日报引用同一份用量。<button className="secondary" onClick={() => go('my-work', { expectationId: report.inventoryContext!.expectationId, entry: 'legacy' })}>继续原草稿</button></div>}
+      <WorkUsageFields catalogue={usageCatalogue} value={inventoryValue} disabled={command.busy || report.inventoryContext?.legacyDraft} onChange={value => setValues(current => ({ ...current, _inventory: JSON.stringify(value) }))} onRefresh={() => void onChanged()} />
+      <fieldset disabled={command.busy} className={styles.formGrid}><label>退房打扫数量 *<input type="number" inputMode="numeric" min="0" step="1" value={values._checkoutRooms ?? ''} onChange={event => setValues(current => ({ ...current, _checkoutRooms: event.target.value }))} /></label><label>续住房打扫数量 *<input type="number" inputMode="numeric" min="0" step="1" value={values._stayoverRooms ?? ''} onChange={event => setValues(current => ({ ...current, _stayoverRooms: event.target.value }))} /></label></fieldset></section>
+      : <><DailyReportAutoSummary report={report} section="usage" />{report.roomCounts && <section className={styles.section}><h2>做房数量</h2><p>退房打扫 {report.roomCounts.checkoutRooms ?? '未登记'} 间 · 续住打扫 {report.roomCounts.stayoverRooms ?? '未登记'} 间</p></section>}</>}<section className={styles.section}><header><h2>补充填报内容</h2><div className={styles.actions}><StatusBadge value={dailyReportStatusLabels[report.status] || report.status} /><StatusBadge value={dailyReportStatusLabels[report.reviewStatus] || report.reviewStatus} /></div></header>{draftNotice && <div className="inline-success">{draftNotice}</div>}{!editable && <div className={styles.locked}>日报已提交或当前任职无编辑权限，原始填报内容只读。需要修改时发起修订，不覆盖历史版本。</div>}{report.currentRevision.sections.filter((section) => section.applicable && section.items.some((item) => item.dataSource !== 'SYSTEM')).map((section) => <section className={styles.reportGroup} key={section.id}><header><strong>{section.name}</strong>{section.conditional && <span className={styles.badge}>条件模块</span>}</header>{section.items.filter((item) => item.dataSource !== 'SYSTEM').map((item) => <div className={styles.reportItem} key={item.id}><label>{item.label}{item.required ? ' *' : ''}{item.resultStatus === 'PENDING' && item.systemValue !== undefined && <span className={styles.badge}>已提交待审核</span>}{item.systemValue !== undefined && <span className={styles.locked}>系统预填：{item.systemValue}</span>}<textarea rows={item.inputType === 'NARRATIVE' ? 4 : 2} disabled={!editable || command.busy || item.dataSource === 'SYSTEM'} value={values[item.id] ?? ''} onChange={(event) => setValues({ ...values, [item.id]: event.target.value })} /></label><div className={styles.actions}>{!editable && exceptions.has(item.id) && <span className={styles.warning}>历史记录含异常标记</span>}<span className={styles.meta}>{item.evidenceRequired ? '需要证据' : '证据可选'} · 来源 {item.sourceLabels.join('、') || '员工填报'}</span></div>{item.evidence.map((evidence) => <div className={styles.meta} key={evidence.id}><span>{evidence.fileName}</span><span>{evidence.sensitivity === 'SENSITIVE' ? '敏感证据' : '普通证据'}</span><span>{evidence.invalidatedAt ? '已失效，历史保留' : evidence.scanStatus || '已上传'}</span></div>)}</div>)}</section>)}</section><DailyReportAutoSummary report={report} section="ai" />{conflict && <div className={styles.conflict}>{message}</div>}{message && !conflict && <div className="inline-error">{message}</div>}<section className={styles.section}><div className={styles.actions}>{editable && <button className="secondary" disabled={command.busy} onClick={() => void run('save')}>保存草稿</button>}{editable && report.allowedActions.includes('SUBMIT') && <button className="primary" disabled={command.busy || currentMissingRequiredCount > 0} onClick={() => void run('submit')}>提交日报</button>}{!editable && report.allowedActions.includes('REQUEST_CORRECTION') && <button className="secondary" disabled={command.busy || !reason.trim()} onClick={() => void run('correction')}>发起修订</button>}</div>{!editable && report.allowedActions.includes('REQUEST_CORRECTION') && <label className={styles.formGrid}>修订原因<textarea rows={2} value={reason} onChange={(event) => setReason(event.target.value)} /></label>}{report.blockedActionReasons.SUBMIT && <p className={styles.locked}>{report.blockedActionReasons.SUBMIT}</p>}</section></main><aside className={styles.stack}><section className={styles.section}><h2>日报上下文</h2><div className={styles.meta}><span>模板 {report.templateVersionNo ? `V${report.templateVersionNo}` : '版本待解析'}</span><span>完成 {report.completionRate ?? '—'}%</span><span>异常 {report.exceptionCount ?? '—'}</span><span>证据 {report.evidenceCount ?? '—'}</span></div><p>截止：{formatLocalDateTime(report.dueAt)}</p><div className={styles.timeline}>{report.revisions.map((revision) => <article key={revision.id}><strong>修订 V{revision.revisionNo} · {dailyReportStatusLabels[revision.status] || revision.status}</strong><small>{formatLocalDateTime(revision.submittedAt)} {revision.correctionReason || ''}</small>{revision.id !== report.currentRevision.id && <button className="link-button" onClick={() => go('daily-report-correction', { reportId: report.id, revisionId: revision.id })}>查看修订</button>}</article>)}</div></section>{reviewingHistoricalRevision && <div className={styles.locked}>历史修订只读；后端仅允许审核当前修订。</div>}{canReviewCurrentRevision && (report.allowedActions.includes('REVIEW_APPROVE') || report.allowedActions.includes('REVIEW_REJECT')) && <section className={styles.section}><h2>主管审核</h2><label className={styles.formGrid}>审核意见<textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} /></label><div className={styles.actions}>{report.allowedActions.includes('REVIEW_APPROVE') && <button className="primary" disabled={command.busy || !reason.trim()} onClick={() => void run('approve')}>确认通过</button>}{report.allowedActions.includes('REVIEW_REJECT') && <button className="danger-button" disabled={command.busy || !reason.trim()} onClick={() => void run('reject')}>退回补充</button>}</div><p className={styles.meta}>是否允许审核由服务端依据任职、组织范围和禁止自审规则返回。</p></section>}</aside></div>
 }
