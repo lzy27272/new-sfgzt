@@ -56,6 +56,7 @@ function permissionGroup(option: PermissionOption): string {
   if (/^(daily-report\.|daily-operation\.|issue\.|task-candidate\.|operation-|ai-recommendation\.|investment\.|store-resource\.|metric\.)/.test(code)) return 'operations'
   if (/^(org\.|wecom-binding\.|wecom-onboarding\.)/.test(code)) return 'people'
   if (/^(kpi\.|evaluation\.)/.test(code)) return 'performance'
+  if (code.startsWith('finance.')) return 'finance'
   if (/^(template\.|daily-report-template\.|work-package\.|rule\.|standard\.|position-profile\.|iam\.|audit\.)/.test(code)) return 'configuration'
   return 'other'
 }

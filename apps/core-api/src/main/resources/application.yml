@@ -35,6 +35,9 @@ management:
         enabled: true
 
 app:
+  finance:
+    # Separate originals, but inside the mounted attachment volume by default. Never use operational retention rules here.
+    attachments-root: ${FINANCE_ATTACHMENTS_ROOT:${ATTACHMENT_STORAGE_ROOT:var/attachments}/finance-originals}
   store-cost:
     pms-source:
       # Read-only sanitized PMS aggregates. Tenant binding is mandatory; disabled by default.

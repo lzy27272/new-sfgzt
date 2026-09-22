@@ -66,6 +66,7 @@ const legacyViews: readonly ViewId[] = [
   'templates',
   'organization',
   'store-resources',
+  'finance',
   'data-retention',
   'ai-data',
   'wecom-webhooks',
