@@ -28,6 +28,17 @@ public class DailyReportWorkEntryService {
     private MapSqlParameterSource params(UUID reportId) {
         return new MapSqlParameterSource("tenantId",access.principal().tenantId()).addValue("reportId",reportId);
     }
+    public boolean supportsPlannedHygiene(UUID reportId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists (
+                  select 1 from daily_report d
+                  join work_package_item i on i.tenant_id=d.tenant_id
+                    and i.work_package_version_id=d.work_package_version_id
+                  where d.tenant_id=:tenantId and d.id=:reportId and i.item_code='HKA_DAILY_REPORT'
+                )
+                """,params(reportId),Boolean.class));
+    }
+
     public void lockDay(UUID reportId) {
         var rows=jdbc.queryForList("""
                 select d.org_unit_id,d.employee_id,d.business_date from daily_report d
@@ -105,6 +116,11 @@ public class DailyReportWorkEntryService {
         ObjectNode payload=mapper.createObjectNode();
         payload.put("dailyReportId",reportId.toString());
         if(snapshot.hasNonNull("inventoryQuantities")) payload.set("inventoryQuantities",snapshot.get("inventoryQuantities"));
+        JsonNode plannedHygiene=snapshot.path("plannedHygiene");
+        if (plannedHygiene.isObject()) {
+            payload.put("plannedHygieneContent",plannedHygiene.path("content").asText(""));
+            payload.put("plannedHygieneRoomNumbers",plannedHygiene.path("roomNumbers").asText(""));
+        }
         JsonNode counts=snapshot.path("roomCounts");
         for(String key:List.of("checkoutRooms","stayoverRooms")) {
             JsonNode count=counts.path(key);

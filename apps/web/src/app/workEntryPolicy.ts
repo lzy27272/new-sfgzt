@@ -5,7 +5,7 @@ const housekeepingFields: Record<string, Set<string>> = {
   HKA_ITEM_ISSUE: new Set(['inventoryQuantities']),
   HKA_CART_PREPARATION: new Set(['notes']),
   HKA_USAGE_RETURN: new Set(['inventoryQuantities', 'notes']),
-  HKA_DAILY_REPORT: new Set(['checkoutRooms', 'stayoverRooms', 'inventoryQuantities']),
+  HKA_DAILY_REPORT: new Set(['checkoutRooms', 'stayoverRooms', 'inventoryQuantities', 'plannedHygieneContent', 'plannedHygieneRoomNumbers']),
   HKA_LOST_PROPERTY: new Set(['roomNumber', 'itemName', 'quantity', 'foundAt', 'foundLocation', 'handoverRecipientAssignmentId', 'notes']),
 }
 

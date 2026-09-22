@@ -86,10 +86,14 @@ export type DailyReportAutoSummary = {
   excludedUsageRecordCount: number
 }
 
+export type PlannedHygiene = { content?: string; roomNumbers?: string }
+
 export type DailyReportDetail = DailyReportSummary & {
   inventoryContext?: { catalogue: import('../storeResources/workUsage').UsageCatalogue; expectationId: string; legacyDraft?: boolean }
   inventoryQuantities?: unknown
   roomCounts?: { checkoutRooms?: number; stayoverRooms?: number }
+  plannedHygieneSupported?: boolean
+  plannedHygiene?: PlannedHygiene
   currentRevision: DailyReportRevision
   revisions: Array<Pick<DailyReportRevision, 'id' | 'revisionNo' | 'status' | 'submittedAt' | 'correctionReason'>>
   aiRecommendations: DailyReportAiRecommendation[]
@@ -101,6 +105,7 @@ export type DailyReportDetail = DailyReportSummary & {
 export type DailyReportDraftInput = {
   inventoryQuantities?: unknown
   roomCounts?: { checkoutRooms?: number; stayoverRooms?: number }
+  plannedHygiene?: PlannedHygiene
   itemValues: Array<{ templateItemId: string; value?: string; exception: boolean; comment?: string }>
   narrative?: string
 }

@@ -1,6 +1,7 @@
 import { WorkUsageFields } from '../storeResources/WorkUsageFields'
 import { usageValidation, usagePayload } from '../storeResources/workUsage'
 import { DailyReportAutoSummary } from './DailyReportAutoSummary'
+import { PlannedHygieneFields } from './PlannedHygieneFields'
 import editorStyles from './editor.module.css'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
@@ -120,7 +121,7 @@ function wasDraftSaved(draft: DailyReportLocalDraft, saved?: DailyReportLocalDra
 }
 
 function ReportEditor({ report, identity, grantedPermissions, correctionRevisionId, onChanged, go }: { report: DailyReportDetail; identity: RoleContext; grantedPermissions: string[]; correctionRevisionId?: string; onChanged: () => Promise<void>; go: AppNavigate }) {
-  const initialValues = useMemo(() => ({ ...Object.fromEntries(report.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), _inventory: JSON.stringify(report.inventoryQuantities ?? null), _checkoutRooms: String(report.roomCounts?.checkoutRooms ?? ''), _stayoverRooms: String(report.roomCounts?.stayoverRooms ?? '') }), [report])
+  const initialValues = useMemo(() => ({ ...Object.fromEntries(report.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), _inventory: JSON.stringify(report.inventoryQuantities ?? null), _checkoutRooms: String(report.roomCounts?.checkoutRooms ?? ''), _stayoverRooms: String(report.roomCounts?.stayoverRooms ?? ''), _plannedHygieneContent: report.plannedHygiene?.content ?? '', _plannedHygieneRoomNumbers: report.plannedHygiene?.roomNumbers ?? '' }), [report])
   const initialExceptions = useMemo(() => new Set(report.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.exception).map((item) => item.id))), [report])
   const [values, setValues] = useState<Record<string, string>>(initialValues)
   const [exceptions, setExceptions] = useState<Set<string>>(initialExceptions)
@@ -257,6 +258,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
   const input: DailyReportDraftInput = {
     inventoryQuantities: usageCatalogue ? usagePayload(inventoryValue, usageCatalogue) : undefined,
     roomCounts: usageCatalogue ? { checkoutRooms: roomCount('_checkoutRooms'), stayoverRooms: roomCount('_stayoverRooms') } : undefined,
+    plannedHygiene: report.plannedHygieneSupported ? { content: values._plannedHygieneContent ?? '', roomNumbers: values._plannedHygieneRoomNumbers ?? '' } : undefined,
     itemValues: report.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.dataSource !== 'SYSTEM').map((item) => ({ templateItemId: item.templateItemId, value: values[item.id], exception: false }))) }
   const currentMissingRequiredCount = report.currentRevision.sections.flatMap((section) => section.items)
     .filter((item) => item.required && item.dataSource !== 'SYSTEM'
@@ -305,6 +307,10 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
     return <section className={styles.section}><div className="inline-warning"><strong>发现两个版本的未提交日报</strong><p>服务器日报已在其他页面或设备更新，本机仍保留一份未提交内容。请选择一个版本后再继续，系统不会自动覆盖。</p><div className={styles.actions}><button className="secondary" onClick={chooseServerDraft}>使用服务器最新草稿</button><button className="secondary" onClick={chooseLocalDraft}>恢复本机未提交内容</button></div></div></section>
   }
   return <div className={`${styles.split} ${editorStyles.editor}`}><main className={styles.stack}><DailyReportAutoSummary report={report} section="work" />
+    {(editable ? report.plannedHygieneSupported : report.plannedHygiene != null) && <PlannedHygieneFields
+      value={editable ? input.plannedHygiene : report.plannedHygiene} disabled={command.busy}
+      onChange={editable ? value => setValues(current => ({ ...current,
+        _plannedHygieneContent: value.content ?? '', _plannedHygieneRoomNumbers: value.roomNumbers ?? '' })) : undefined} />}
     {editable && usageCatalogue ? <section className={styles.section}>
       {report.inventoryContext?.legacyDraft && <div className="inline-warning">原日清入口还有未提交草稿。请先完成原草稿，再返回日报引用同一份用量。<button className="secondary" onClick={() => go('my-work', { expectationId: report.inventoryContext!.expectationId, entry: 'legacy' })}>继续原草稿</button></div>}
       <WorkUsageFields catalogue={usageCatalogue} value={inventoryValue} disabled={command.busy || report.inventoryContext?.legacyDraft} onChange={value => setValues(current => ({ ...current, _inventory: JSON.stringify(value) }))} onRefresh={() => void onChanged()} />

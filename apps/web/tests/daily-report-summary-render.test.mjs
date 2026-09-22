@@ -5,11 +5,12 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 
-let vite, normalizeDetail, DailyReportAutoSummary
+let vite, normalizeDetail, DailyReportAutoSummary, PlannedHygieneFields
 before(async () => {
   vite = await createServer({ appType: 'custom', configFile: './vite.config.ts', logLevel: 'silent', mode: 'pilot', root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true } })
   ;({ normalizeDetail } = await vite.ssrLoadModule('/src/features/dailyReports/api.ts'))
   ;({ DailyReportAutoSummary } = await vite.ssrLoadModule('/src/features/dailyReports/DailyReportAutoSummary.tsx'))
+  ;({ PlannedHygieneFields } = await vite.ssrLoadModule('/src/features/dailyReports/PlannedHygieneFields.tsx'))
 })
 after(async () => { await vite?.close() })
 
@@ -42,6 +43,37 @@ test('工作摘要展示真实房数并中文化，规则分析不冒充大模�
   const html = render(populated)
   for (const label of ['当日工作自动汇总', '退房打扫数：6', '续住房打扫数：3', '是否有异常：否', '已提交待审核', '事实', '分析', '建议', '未调用大模型']) assert.ok(html.includes(label), label)
   assert.doesNotMatch(html, /technicalId|should-not-display|SUBMITTED|NOT_REQUIRED/)
+})
+
+test('计划卫生为选填，日报草稿及只读历史详情保留内容和多个房号', () => {
+  const hygiene = { content: '清洗空调滤网\n清洁床底', roomNumbers: '0101、A102、1203' }
+  const payload = raw(populated, 'SUBMITTED')
+  payload.plannedHygieneSupported = true
+  payload.revisions[0].payloadSnapshot.plannedHygiene = hygiene
+  const report = normalizeDetail(payload, { businessActorAssignmentId: 'manager' })
+  assert.equal(report.plannedHygieneSupported, true)
+  assert.deepEqual(report.plannedHygiene, hygiene)
+  const readonly = renderToStaticMarkup(React.createElement(PlannedHygieneFields, { value: report.plannedHygiene }))
+  assert.match(readonly, /计划卫生内容/)
+  assert.match(readonly, /清洗空调滤网/)
+  assert.match(readonly, /0101、A102、1203/)
+  assert.doesNotMatch(readonly, /<textarea/)
+  const editable = renderToStaticMarkup(React.createElement(PlannedHygieneFields, { value: hygiene, onChange: () => {} }))
+  assert.match(editable, /当天没有安排可留空/)
+  assert.match(editable, /maxLength="2000"/)
+  assert.match(editable, /maxLength="1000"/)
+  assert.doesNotMatch(editable, /required=/)
+  assert.equal(normalize(populated).plannedHygiene, undefined)
+  assert.equal(normalize(populated).plannedHygieneSupported, false)
+})
+
+test('工作记录内的计划卫生事实以中文自动汇总，不显示内部字段名', () => {
+  const html = render({ ...populated, workItems: [{ ...populated.workItems[0], formData: {
+    plannedHygieneContent: '清洁床底', plannedHygieneRoomNumbers: '0101、A102',
+  } }] })
+  assert.match(html, /计划卫生内容：清洁床底/)
+  assert.match(html, /计划卫生房间号：0101、A102/)
+  assert.doesNotMatch(html, /plannedHygieneContent|plannedHygieneRoomNumbers/)
 })
 test('无记录与已申报无耗用明确区分，不误报零耗用或全部完成', () => {
   const empty = { ...populated, workItems: [], usageItems: [], usageRecordCount: 0 }

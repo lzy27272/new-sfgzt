@@ -119,7 +119,15 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
 
         <section className="work-rule-section"><header><h4>时间规则</h4><span>按岗位和门店时区生成</span></header>
           <div className="form-grid work-rule-grid">
-            <label>执行周期<select value={selected.periodType} onChange={(event) => updateSelected({ periodType: event.target.value })}><option value="DAY">每日</option><option value="WEEK">每周</option><option value="SHIFT">每班次</option><option value="EVENT">事件触发</option></select></label>
+            <label>执行周期<select value={selected.periodType} onChange={(event) => updateSelected({ periodType: event.target.value, cycleEnabled: ['WEEK','MONTH','QUARTER'].includes(event.target.value) })}><option value="DAY">每日</option><option value="WEEK">每周</option><option value="MONTH">每月</option><option value="QUARTER">每季度</option><option value="SHIFT">每班次</option><option value="EVENT">事件触发</option></select></label>
+            {['WEEK','MONTH','QUARTER'].includes(selected.periodType) && <>
+              {selected.periodType === 'WEEK' && <label className="checkbox-label"><input type="checkbox" checked={selected.cycleEnabled} onChange={event => updateSelected({ cycleEnabled: event.target.checked })} />按自然周生成（每周一归属）</label>}
+              {selected.cycleEnabled && (selected.periodType === 'WEEK'
+                ? <label>截止日<select value={selected.cycleDueDayOffset} onChange={event => updateSelected({ cycleDueDayOffset: event.target.value })}>{Array.from({ length: 14 }, (_, n) => <option key={n} value={n}>{n < 7 ? '本周' : '下周'}{'一二三四五六日'[n % 7]}</option>)}</select></label>
+                : <><label>截止月份偏移<input type="number" min="0" max={selected.periodType === 'MONTH' ? 1 : 3} value={selected.cycleDueMonthOffset} onChange={event => updateSelected({ cycleDueMonthOffset: event.target.value })} /><small>0为本周期首月，1为下一月，以此类推</small></label>
+                  <label>截止日期（0为月底）<input type="number" min="0" max="31" value={selected.cycleDueDay} onChange={event => updateSelected({ cycleDueDay: event.target.value })} /></label></>)}
+              <p className="full-field">截止时间可跨期，但归属周期不变；首次启用前已到期的事项不追溯生成。修改后请发布新版本并按需调整分配。</p>
+            </>}
             {selected.periodType === 'SHIFT' ? <>
               <label>可开始基准<select value={selected.shiftAvailableAnchor} onChange={(event) => updateSelected({ shiftAvailableAnchor: event.target.value as WorkPackageItemDraft['shiftAvailableAnchor'] })}><option value="SHIFT_START">班次开始</option><option value="SHIFT_MIDPOINT">班次中点</option><option value="SHIFT_END">班次结束</option></select></label>
               <label>可开始偏移（分钟）<input type="number" min="-2880" max="2880" value={selected.shiftAvailableOffsetMinutes} onChange={(event) => updateSelected({ shiftAvailableOffsetMinutes: event.target.value })} /></label>
@@ -142,7 +150,9 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
           {selected.reminderMoments.length === 0 ? <p className="empty-rule">未配置提醒时点。</p> : <div className="rule-row-list">{selected.reminderMoments.map((moment) => <div className="rule-row reminder-row" key={moment.key}>
             <label>编码<input value={moment.code} onChange={(event) => updateReminder(moment.key, { code: event.target.value.toUpperCase() })} /></label>
             <label>类型<select value={moment.kind} onChange={(event) => updateReminder(moment.key, { kind: event.target.value as ReminderMomentDraft['kind'] })}><option value="REMINDER">执行提醒</option><option value="PROGRESS">进度督办</option><option value="OVERDUE">逾期提醒</option><option value="ESCALATION">升级提醒</option></select></label>
-            <label>时间<input type="time" value={moment.localTime} onChange={(event) => updateReminder(moment.key, { localTime: event.target.value })} /></label>
+            <label>时间基准<select value={moment.dueOffsetMinutes === undefined ? 'LOCAL' : 'DUE'} onChange={event => updateReminder(moment.key, { dueOffsetMinutes: event.target.value === 'DUE' ? '-1440' : undefined })}><option value="LOCAL">归属日固定时间</option><option value="DUE">相对截止时间</option></select></label>
+            {moment.dueOffsetMinutes === undefined ? <label>时间<input type="time" value={moment.localTime} onChange={(event) => updateReminder(moment.key, { localTime: event.target.value })} /></label>
+              : <label>截止前后分钟<input type="number" min="-527040" max="527040" value={moment.dueOffsetMinutes} onChange={event => updateReminder(moment.key, { dueOffsetMinutes: event.target.value })} /><small>负数为提前，-1440为提前1天</small></label>}
             <label>接收人<select value={moment.recipient} onChange={(event) => updateReminder(moment.key, { recipient: event.target.value as ReminderMomentDraft['recipient'] })}><option value="EXECUTORS">执行人</option><option value="DIRECT_MANAGER">直属领导</option></select></label>
             <button type="button" className="text-action danger" onClick={() => updateSelected({ reminderMoments: selected.reminderMoments.filter((entry) => entry.key !== moment.key) })}>删除</button>
           </div>)}</div>}

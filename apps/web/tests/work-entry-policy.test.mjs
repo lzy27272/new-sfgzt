@@ -21,6 +21,13 @@ test('only events become occurrence entries; report references use the same cont
   assert.equal(isGenericWorkQuestion('complaintContent', '客诉内容'), false)
 })
 
+test('planned hygiene belongs to the housekeeping daily report, not every work item', () => {
+  const fields = { plannedHygieneContent: { title: '计划卫生内容' }, plannedHygieneRoomNumbers: { title: '计划卫生房间号' } }
+  assert.deepEqual(focusedWorkFields(fields, 'HKA_DAILY_REPORT'), fields)
+  assert.deepEqual(focusedWorkFields(fields, 'HKA_CART_PREPARATION'), {})
+  assert.deepEqual(focusedWorkFields(fields, 'HKA_LOST_PROPERTY'), {})
+})
+
 test('task assignee search supports role and name, not just employee names', () => {
   const candidate = { employeeName: '测试员工', positionName: '前厅主管', orgName: '解放路店' }
   assert.equal(matchesTaskAssignee(candidate, '前厅主管'), true)

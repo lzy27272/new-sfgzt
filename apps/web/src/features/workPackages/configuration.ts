@@ -24,6 +24,7 @@ export type ReminderMomentDraft = {
   code: string
   kind: 'REMINDER' | 'PROGRESS' | 'OVERDUE' | 'ESCALATION'
   localTime: string
+  dueOffsetMinutes?: string
   recipient: 'EXECUTORS' | 'DIRECT_MANAGER'
   extras: JsonRecord
 }
@@ -38,6 +39,10 @@ export type WorkPackageItemDraft = {
   required: boolean
   enabled: boolean
   periodType: string
+  cycleEnabled: boolean
+  cycleDueDayOffset: string
+  cycleDueMonthOffset: string
+  cycleDueDay: string
   timezoneMode: string
   fixedTimezone: string
   workWindowStart: string
@@ -141,8 +146,9 @@ function reminderDraft(source: JsonRecord): ReminderMomentDraft {
     code: text(source, 'code').toUpperCase(),
     kind: ['REMINDER', 'PROGRESS', 'OVERDUE', 'ESCALATION'].includes(kind) ? kind as ReminderMomentDraft['kind'] : 'REMINDER',
     localTime: normalizedTime(text(source, 'localTime')),
+    dueOffsetMinutes: source.dueOffsetMinutes === undefined ? undefined : String(source.dueOffsetMinutes),
     recipient: recipient === 'DIRECT_MANAGER' ? 'DIRECT_MANAGER' : 'EXECUTORS',
-    extras: policyWithout(source, ['code', 'kind', 'localTime', 'recipient']),
+    extras: policyWithout(source, ['code', 'kind', 'localTime', 'recipient', 'dueOffsetMinutes']),
   }
 }
 
@@ -201,6 +207,7 @@ export function createWorkPackageItemDraft(sequence: number, formVersionId = '')
   return {
     key: newKey('item'), itemCode: code, name: `新工作项 ${sequence}`, description: '', itemType: 'SCHEDULED_RECORD',
     formVersionId, required: true, enabled: true, periodType: 'DAY', timezoneMode: 'HOTEL', fixedTimezone: '',
+    cycleEnabled: false, cycleDueDayOffset: '4', cycleDueMonthOffset: '0', cycleDueDay: '28',
     workWindowStart: '', workWindowEnd: '', dueLocalTime: '18:00',
     shiftAvailableAnchor: 'SHIFT_START', shiftAvailableOffsetMinutes: '0', shiftDueAnchor: 'SHIFT_END', shiftDueOffsetMinutes: '0',
     graceMinutes: '0', weekdays: [1, 2, 3, 4, 5, 6, 7],
@@ -228,6 +235,8 @@ export function mapWorkPackageItem(source: JsonRecord, _index: number): WorkPack
     itemCode: text(source, 'item_code', 'itemCode'), name: text(source, 'name'), description: text(source, 'description'),
     itemType: text(source, 'item_type', 'itemType') || 'SCHEDULED_RECORD', formVersionId: text(source, 'form_version_id', 'formVersionId'),
     required: bool(source, true, 'required'), enabled: execution.enabled !== false,
+    cycleEnabled: Boolean(execution.cycleSchedule), cycleDueDayOffset: numericText(record(execution.cycleSchedule), '4', 'dueDayOffset'),
+    cycleDueMonthOffset: numericText(record(execution.cycleSchedule), '0', 'dueMonthOffset'), cycleDueDay: numericText(record(execution.cycleSchedule), '28', 'dueDay'),
     periodType: text(source, 'period_type', 'periodType') || 'DAY', timezoneMode: text(source, 'timezone_mode', 'timezoneMode') || 'HOTEL',
     fixedTimezone: text(source, 'fixed_timezone', 'fixedTimezone'), workWindowStart: normalizedTime(text(source, 'work_window_start', 'workWindowStart')),
     workWindowEnd: normalizedTime(text(source, 'work_window_end', 'workWindowEnd')), dueLocalTime: normalizedTime(text(source, 'due_local_time', 'dueLocalTime')),
@@ -253,7 +262,7 @@ export function mapWorkPackageItem(source: JsonRecord, _index: number): WorkPack
     responsibilities: list<JsonRecord>(source.responsibilities),
     submissionExtras: policyWithout(submission, ['completionStatementRequired', 'exceptionStatementRequired', 'nextActionRequired', 'attachmentRequired', 'attachmentCountUnlimited', 'maxAttachments', 'maxFileSizeBytes', 'allowedExtensions', 'evidenceRequirements']),
     reminderExtras: policyWithout(reminder, ['moments']), reportExtras: policyWithout(report, ['dailyReport', 'factLabel', 'includeEvidence', 'includeExceptions']),
-    applicabilityPolicy: policyWithout(applicability, ['holidayDates', 'workdayOverrides']), executionExtras: policyWithout(execution, ['enabled', 'shiftTiming']),
+    applicabilityPolicy: policyWithout(applicability, ['holidayDates', 'workdayOverrides']), executionExtras: policyWithout(execution, ['enabled', 'shiftTiming', 'cycleSchedule']),
   }
 }
 
@@ -273,7 +282,8 @@ const serializeEvidence = (draft: EvidenceRequirementDraft): JsonRecord => {
 }
 
 const serializeReminder = (draft: ReminderMomentDraft): JsonRecord => ({
-  ...draft.extras, code: draft.code.trim().toUpperCase(), kind: draft.kind, localTime: draft.localTime, recipient: draft.recipient,
+  ...draft.extras, code: draft.code.trim().toUpperCase(), kind: draft.kind, recipient: draft.recipient,
+  ...(draft.dueOffsetMinutes === undefined ? { localTime: draft.localTime } : { dueOffsetMinutes: Number(draft.dueOffsetMinutes) }),
 })
 
 function normalizedResponsibilities(draft: WorkPackageItemDraft): JsonRecord[] {
@@ -324,6 +334,9 @@ export function serializeWorkPackageItems(drafts: WorkPackageItemDraft[]): JsonR
       executionPolicy: {
         ...draft.executionExtras,
         enabled: draft.enabled,
+        ...(draft.cycleEnabled && ['WEEK','MONTH','QUARTER'].includes(draft.periodType) ? { cycleSchedule: draft.periodType === 'WEEK'
+          ? { dueDayOffset: Number(draft.cycleDueDayOffset) }
+          : { dueMonthOffset: Number(draft.cycleDueMonthOffset), dueDay: Number(draft.cycleDueDay) } } : {}),
         ...(draft.periodType === 'SHIFT' ? { shiftTiming: {
           availableAnchor: draft.shiftAvailableAnchor,
           availableOffsetMinutes: Number(draft.shiftAvailableOffsetMinutes || 0),
@@ -350,6 +363,13 @@ export function validateWorkPackageItems(drafts: WorkPackageItemDraft[]): string
     else codes.add(code)
     if (!item.name.trim()) issues.push(`${label}缺少工作项名称。`)
     if (!item.formVersionId) issues.push(`${label}未选择已发布表单。`)
+    if (['MONTH','QUARTER'].includes(item.periodType) && !item.cycleEnabled) issues.push(`${label}月清、季清必须配置周期截止规则。`)
+    if (item.cycleEnabled && ['WEEK','MONTH','QUARTER'].includes(item.periodType)) {
+      const day = Number(item.cycleDueDayOffset), month = Number(item.cycleDueMonthOffset), calendarDay = Number(item.cycleDueDay)
+      if (item.periodType === 'WEEK' ? !Number.isInteger(day) || day < 0 || day > 13
+        : !Number.isInteger(month) || month < 0 || month > (item.periodType === 'MONTH' ? 1 : 3) || !Number.isInteger(calendarDay) || calendarDay < 0 || calendarDay > 31)
+        issues.push(`${label}周期截止日期无效。`)
+    }
     const maxAttachments = Number(item.maxAttachments)
     if (!Number.isInteger(maxAttachments) || maxAttachments < 0 || maxAttachments > 200) issues.push(`${label}附件上限必须为 0 到 200。`)
     const maxFileSizeMb = Number(item.maxFileSizeMb)
@@ -374,7 +394,9 @@ export function validateWorkPackageItems(drafts: WorkPackageItemDraft[]): string
     }
     const reminderCodes = new Set<string>()
     item.reminderMoments.forEach((moment) => {
-      if (!/^[A-Z][A-Z0-9_]{0,23}$/.test(moment.code.trim().toUpperCase()) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(moment.localTime)) issues.push(`${label}存在无效的提醒编码或时间。`)
+      const validTime = moment.dueOffsetMinutes === undefined ? /^([01]\d|2[0-3]):[0-5]\d$/.test(moment.localTime)
+        : moment.dueOffsetMinutes.trim() !== '' && Number.isInteger(Number(moment.dueOffsetMinutes)) && Math.abs(Number(moment.dueOffsetMinutes)) <= 527040
+      if (!/^[A-Z][A-Z0-9_]{0,23}$/.test(moment.code.trim().toUpperCase()) || !validTime) issues.push(`${label}存在无效的提醒编码或时间。`)
       if (reminderCodes.has(moment.code.trim().toUpperCase())) issues.push(`${label}提醒编码“${moment.code}”重复。`)
       reminderCodes.add(moment.code.trim().toUpperCase())
     })

@@ -178,6 +178,7 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 where tenant_id = ?::uuid
                   and position_assignment_id = ?
                   and business_date = current_date
+                  and work_package_item_id in (select id from work_package_item where tenant_id = work_expectation.tenant_id and period_type='DAY')
                 """, Integer.class, TENANT, assignmentId)).isEqualTo(7);
     }
 

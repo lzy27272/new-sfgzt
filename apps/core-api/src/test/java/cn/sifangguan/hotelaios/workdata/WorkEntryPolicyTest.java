@@ -34,12 +34,31 @@ class WorkEntryPolicyTest {
         assertThat(WorkEntryPolicy.schema(shared,"HKA_ITEM_ISSUE").path("properties").size()).isEqualTo(1);
         assertThat(WorkEntryPolicy.schema(shared,"HKA_CART_PREPARATION").path("properties").size()).isEqualTo(1);
         var daily = WorkEntryPolicy.schema(shared,"HKA_DAILY_REPORT");
-        assertThat(daily.path("properties").size()).isEqualTo(3);
+        assertThat(daily.path("properties").size()).isEqualTo(5);
         assertThat(daily.path("properties").has("checkoutRooms")).isTrue();
         var lost = WorkEntryPolicy.schema(shared,"HKA_LOST_PROPERTY");
         assertThat(lost.path("required").size()).isEqualTo(6);
         assertThat(lost.path("properties").has("lostPropertyOccurred")).isFalse();
         assertThat(lost.path("properties").path("roomNumber").path("minLength").asInt()).isEqualTo(1);
+    }
+
+    @Test void plannedHygieneIsOptionalAndOnlyAddedToHousekeepingDailyReport() throws Exception {
+        var original = json.readTree("""
+          {"type":"object","additionalProperties":false,"required":[],"properties":{}}
+          """);
+        var schema = WorkEntryPolicy.schema(original,"HKA_DAILY_REPORT");
+        assertThat(schema.path("required")).isEmpty();
+        assertThat(schema.path("properties").path("plannedHygieneContent").path("title").asText())
+                .isEqualTo("计划卫生内容（选填）");
+        assertThat(schema.path("properties").path("plannedHygieneContent").path("maxLength").asInt()).isEqualTo(2000);
+        assertThat(schema.path("properties").path("plannedHygieneRoomNumbers").path("maxLength").asInt()).isEqualTo(1000);
+        var payload = json.readTree("""
+          {"plannedHygieneContent":"清洗空调滤网","plannedHygieneRoomNumbers":"0101、A102"}
+          """);
+        assertThat(WorkEntryPolicy.validationPayload(payload,schema,original,"HKA_DAILY_REPORT")).isEqualTo(payload);
+        assertThat(original.path("properties")).isEmpty();
+        assertThat(WorkEntryPolicy.schema(original,"OTHER_ROLE_DAILY").path("properties")).isEmpty();
+        assertThat(WorkEntryPolicy.schema(original,"HKA_GUEST_SERVICE_EVENT").path("properties")).isEmpty();
     }
 
     @Test void staleDraftsValidateWithoutRewritingTheirEvidenceFacts() throws Exception {

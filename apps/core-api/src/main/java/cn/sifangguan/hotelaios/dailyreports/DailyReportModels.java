@@ -6,6 +6,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -39,12 +40,18 @@ public final class DailyReportModels {
             String narrative,
             @PositiveOrZero long expectedVersion,
             JsonNode inventoryQuantities,
-            JsonNode roomCounts
+            JsonNode roomCounts,
+            @Valid PlannedHygiene plannedHygiene
     ) {
         public SaveDraft(UUID revisionId, List<ItemValue> items, String narrative, long expectedVersion) {
-            this(revisionId,items,narrative,expectedVersion,null,null);
+            this(revisionId,items,narrative,expectedVersion,null,null,null);
         }
     }
+
+    public record PlannedHygiene(
+            @Size(max = 2000, message = "计划卫生内容不能超过2000字") String content,
+            @Size(max = 1000, message = "计划卫生房间号不能超过1000字") String roomNumbers
+    ) { }
 
     public record SubmitReport(
             @NotNull UUID revisionId,

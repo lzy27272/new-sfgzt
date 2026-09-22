@@ -91,6 +91,8 @@ const workRecordFieldLabels: Record<string, string> = {
   issueSummary: '异常说明',
   checkoutRooms: '退房打扫数',
   stayoverRooms: '续住房打扫数',
+  plannedHygieneContent: '计划卫生内容',
+  plannedHygieneRoomNumbers: '计划卫生房间号',
   lostPropertyOccurred: '是否发现遗留物',
   inspectionResult: '检查结果',
 }
@@ -397,6 +399,8 @@ export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyRep
     inventoryContext: source.inventoryContext as DailyReportDetail['inventoryContext'],
     inventoryQuantities: snapshot.inventoryQuantities,
     roomCounts: snapshot.roomCounts as DailyReportDetail['roomCounts'],
+    plannedHygieneSupported: source.plannedHygieneSupported === true,
+    plannedHygiene: snapshot.plannedHygiene as DailyReportDetail['plannedHygiene'],
     currentRevision,
     revisions,
     autoSummary: Object.keys(autoSummary).length ? {
@@ -501,6 +505,7 @@ export async function saveDailyReportDraft(identity: ApiIdentity, report: DailyR
     narrative: input.narrative,
     inventoryQuantities: input.inventoryQuantities,
     roomCounts: input.roomCounts,
+    plannedHygiene: input.plannedHygiene,
     items: input.itemValues.map((item) => ({
       templateItemId: item.templateItemId,
       value: commandValue(item.value, itemTypes.get(item.templateItemId) || 'TEXT'),

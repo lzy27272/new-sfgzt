@@ -15,6 +15,36 @@ public class OperationalDailyAllocationService {
 
     public OperationalDailyAllocationService(NamedParameterJdbcTemplate jdbc) { this.jdbc = jdbc; }
 
+    /** Independent of daily packages. An administrator's revoked/expired allocation is never resurrected. */
+    public void ensureManagerCycles(TenantPrincipal principal, LocalDate date) {
+        jdbc.update("""
+                insert into work_package_allocation
+                  (tenant_id, work_package_version_id, position_assignment_id, target_org_unit_id,
+                   allocation_source, valid_from, valid_to, status)
+                select a.tenant_id, v.id, a.id, hotel.id, 'SYSTEM',
+                       greatest(:date, a.valid_from, v.effective_from::date), a.valid_to, 'ACTIVE'
+                from employee_position_assignment a
+                join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                join user_account u on u.tenant_id=e.tenant_id and u.id=e.account_id and u.status='ACTIVE'
+                join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id and p.code='GENERAL_MANAGER'
+                join work_package_definition d on d.tenant_id=a.tenant_id and d.code='WP-GM-CYCLES' and d.status='ACTIVE'
+                join lateral (select pv.* from work_package_version pv where pv.tenant_id=d.tenant_id
+                  and pv.work_package_definition_id=d.id and pv.lifecycle_status='PUBLISHED'
+                  and pv.effective_from::date<=:date and (pv.effective_to is null or pv.effective_to::date>=:date)
+                  order by pv.version_no desc limit 1) v on true
+                join lateral (select h.id from org_unit_closure c join org_unit h
+                  on h.tenant_id=c.tenant_id and h.id=c.ancestor_id and h.unit_type='HOTEL'
+                  where c.tenant_id=a.tenant_id and c.descendant_id=a.org_unit_id order by c.depth limit 1) hotel on true
+                where a.tenant_id=:tenantId and a.status='ACTIVE' and a.valid_from<=:date
+                  and (a.valid_to is null or a.valid_to>=:date) and e.employment_status='ACTIVE' and e.deleted_at is null
+                  and not exists (select 1 from work_package_allocation old join work_package_version ov
+                    on ov.tenant_id=old.tenant_id and ov.id=old.work_package_version_id
+                    where old.tenant_id=a.tenant_id and old.position_assignment_id=a.id
+                      and old.target_org_unit_id=hotel.id and ov.work_package_definition_id=d.id)
+                on conflict (tenant_id,work_package_version_id,position_assignment_id,target_org_unit_id,valid_from) do nothing
+                """, base(principal).addValue("date", date));
+    }
+
     /** Recover only initial gaps: never reactivate revoked/expired administrator allocations. */
     public void ensureInitialAllocations(TenantPrincipal principal, LocalDate businessDate) {
         List<UUID> missing = jdbc.queryForList("""

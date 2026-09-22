@@ -278,11 +278,16 @@ public class WorkExpectationSlaService {
             String kind = configured.path("kind").asText("REMINDER").trim().toUpperCase();
             String localTime = configured.path("localTime").asText("").trim();
             String recipient = configured.path("recipient").asText("EXECUTORS").trim().toUpperCase();
-            if (!code.matches("[A-Z][A-Z0-9_]{0,23}") || localTime.isBlank()) {
+            boolean relative = configured.has("dueOffsetMinutes");
+            if (!code.matches("[A-Z][A-Z0-9_]{0,23}") || (!relative && localTime.isBlank())) {
                 throw new IllegalArgumentException("提醒时点编码或时间无效");
             }
-            OffsetDateTime scheduledAt = source.businessDate().atTime(LocalTime.parse(localTime))
-                    .atZone(reminderZone(source)).toOffsetDateTime();
+            if (relative && (!configured.path("dueOffsetMinutes").isIntegralNumber()
+                    || Math.abs(configured.path("dueOffsetMinutes").asLong()) > 527040))
+                throw new IllegalArgumentException("提醒偏移分钟数无效");
+            OffsetDateTime scheduledAt = relative ? source.dueAt().plusMinutes(configured.path("dueOffsetMinutes").asLong())
+                    : source.businessDate().atTime(LocalTime.parse(localTime)).atZone(reminderZone(source)).toOffsetDateTime();
+            if (scheduledAt.isBefore(source.availableAt())) scheduledAt = source.availableAt();
             List<ReminderRecipient> recipients = "DIRECT_MANAGER".equals(recipient)
                     ? source.managerAccountId() == null ? List.of()
                     : List.of(new ReminderRecipient(source.managerAccountId(), source.managerAssignmentId()))

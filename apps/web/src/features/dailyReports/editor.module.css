@@ -1,4 +1,5 @@
 .editor { align-items: start; }
+.plannedHygieneText { white-space: pre-wrap; overflow-wrap: anywhere; }
 .editor > main, .editor > aside { min-width: 0; }
 .editor fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .editor h2 { font-size: 18px; }

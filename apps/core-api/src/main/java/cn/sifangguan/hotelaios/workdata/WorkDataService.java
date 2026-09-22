@@ -2,6 +2,8 @@ package cn.sifangguan.hotelaios.workdata;
 
 import cn.sifangguan.hotelaios.dailyreports.DailyReportRoutineProjectionService;
 import cn.sifangguan.hotelaios.storeassets.StoreWorkUsageService;
+import cn.sifangguan.hotelaios.workpackage.WeeklyAssessmentService;
+import cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
@@ -49,6 +51,8 @@ public class WorkDataService {
     private final ObjectMapper objectMapper;
     private final DailyReportRoutineProjectionService routineProjectionService;
     private final StoreWorkUsageService usageService;
+    private final WeeklyAssessmentService weeklyAssessments;
+    private final StoreManagerSupervisorResolver supervisors;
 
     public WorkDataService(
             NamedParameterJdbcTemplate jdbc,
@@ -59,7 +63,9 @@ public class WorkDataService {
             FormPayloadValidator payloadValidator,
             ObjectMapper objectMapper,
             DailyReportRoutineProjectionService routineProjectionService,
-            StoreWorkUsageService usageService
+            StoreWorkUsageService usageService,
+            WeeklyAssessmentService weeklyAssessments,
+            StoreManagerSupervisorResolver supervisors
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -70,6 +76,8 @@ public class WorkDataService {
         this.objectMapper = objectMapper;
         this.routineProjectionService = routineProjectionService;
         this.usageService = usageService;
+        this.weeklyAssessments = weeklyAssessments;
+        this.supervisors = supervisors;
     }
 
     @Transactional(readOnly = true)
@@ -266,6 +274,7 @@ public class WorkDataService {
                 requireFirstSharedSubmission(principal, workContext.expectationId(), null);
             }
             validateConditionalFields(workContext.itemCode(), request.payload());
+            weeklyAssessments.validateSubmission(workContext.itemCode(), workContext.expectationId(), request.payload());
             applicable = validateSubmissionPolicy(principal, workContext.itemId(), null,
                     request.payload(), targetOrgUnitId,
                     request.completionStatement(), request.exceptionStatement(), request.nextAction());
@@ -410,8 +419,9 @@ public class WorkDataService {
     @Transactional
     public Map<String, Object> review(UUID recordId, WorkDataModels.ReviewRecord request) {
         TenantPrincipal principal = prepare();
-        accessPolicy.requirePermission("work-record.review");
+        accessPolicy.requireAnyPermission("work-record.review", "manager-cycle.review");
         RecordAccess record = recordAccessForUpdate(principal, recordId);
+        if (!isManagerCycle(principal, record.workPackageItemId())) accessPolicy.requirePermission("work-record.review");
         accessPolicy.requireOrgScope(record.targetOrgUnitId());
         if (usageService.isReviewRetry(recordId, request.outcome().trim().toUpperCase(Locale.ROOT), request.expectedVersion())) {
             return response("id", recordId, "status", record.status(), "rowVersion", request.expectedVersion() + 1);
@@ -593,13 +603,15 @@ public class WorkDataService {
         Map<String, Object> record = jdbc.queryForMap("""
                 select record.work_package_item_id, record.target_org_unit_id, record.completion_statement,
                        record.exception_statement, record.next_action, record.payload::text,
-                       item.item_code
+                       item.item_code, record.work_expectation_id
                 from work_record record
                 left join work_package_item item
                   on item.tenant_id = record.tenant_id and item.id = record.work_package_item_id
                 where record.tenant_id = :tenantId and record.id = :recordId
                 """, base(principal).addValue("recordId", recordId));
         validateConditionalFields((String) record.get("item_code"), readJson((String) record.get("payload")));
+        weeklyAssessments.validateSubmission((String) record.get("item_code"), (UUID) record.get("work_expectation_id"),
+                readJson((String) record.get("payload")));
         return validateSubmissionPolicy(principal, (UUID) record.get("work_package_item_id"), recordId,
                 readJson((String) record.get("payload")), (UUID) record.get("target_org_unit_id"),
                 (String) record.get("completion_statement"), (String) record.get("exception_statement"),
@@ -1268,6 +1280,10 @@ public class WorkDataService {
     }
 
     private void validateConditionalFields(String itemCode, JsonNode payload) {
+        if ("GM_M_WATER".equals(itemCode)
+                && ("不正常".equals(payload.path("equipmentNormal").asText()) || "不足".equals(payload.path("chemicalSufficient").asText()))
+                && payload.path("handlingPlan").asText("").isBlank())
+            throw new IllegalArgumentException("设备不正常或药剂不足时，请填写处理安排");
         if (itemCode == null || !Set.of("GM_PUBLIC_AREA_INSPECTION", "GM_PUBLIC_AREA_INSPECTION_AM",
                 "GM_PUBLIC_AREA_INSPECTION_PM", "GM_ROOM_INSPECTION")
                 .contains(itemCode) || !WorkEntryPolicy.policyValue(payload,"issueFound").asBoolean(false)) {
@@ -1640,6 +1656,14 @@ public class WorkDataService {
         if (record.workPackageItemId() == null) {
             return;
         }
+        if (isManagerCycle(principal, record.workPackageItemId())) {
+            boolean allowed = principal.hasRole("PLATFORM_ADMIN") || supervisors.load(principal, "manager-cycle.review")
+                    .forWork(record.assignmentId(), record.targetOrgUnitId()).stream()
+                    .anyMatch(s -> s.accountId().equals(principal.actorId()) && (principal.businessActorAssignmentId()==null
+                            || principal.businessActorAssignmentId().equals(s.assignmentId())));
+            if (!allowed) throw new AccessDeniedException("店长周期工作须由该门店的分管副总复核");
+            return;
+        }
         Integer directManagerRuleCount = jdbc.queryForObject("""
                 select count(*)
                 from work_package_item_responsibility
@@ -1676,6 +1700,21 @@ public class WorkDataService {
     }
 
     private void notifySubmittedForReview(TenantPrincipal principal, UUID recordId) {
+        var record = recordAccessForUpdate(principal, recordId);
+        if (record.workPackageItemId()!=null && isManagerCycle(principal, record.workPackageItemId())) {
+            for (var supervisor : supervisors.load(principal, "manager-cycle.review").forWork(record.assignmentId(), record.targetOrgUnitId())) {
+                jdbc.update("""
+                    insert into notification(tenant_id,recipient_account_id,recipient_assignment_id,notification_type,
+                      title,content,source_type,source_id,idempotency_key)
+                    values(:tenantId,:account,:assignment,'WORK_RECORD_REVIEW_PENDING','店长周期工作待复核',
+                      '店长已提交周期工作，请查看内容与证据并完成复核。照片按留存策略到期清理，请及时查看。',
+                      'WORK_RECORD',:record,:key)
+                    on conflict(tenant_id,recipient_account_id,idempotency_key) do nothing
+                    """, base(principal).addValue("account",supervisor.accountId()).addValue("assignment",supervisor.assignmentId())
+                    .addValue("record",recordId).addValue("key","cycle-review:"+recordId));
+            }
+            return;
+        }
         SupervisorNotificationContext context = jdbc.queryForObject("""
                 select record.business_date, coalesce(item.name, '工作记录') as item_name,
                        exists (
@@ -1790,6 +1829,12 @@ public class WorkDataService {
         TenantPrincipal principal = accessPolicy.principal();
         databaseContext.apply(principal.tenantId());
         return principal;
+    }
+
+    private boolean isManagerCycle(TenantPrincipal principal, UUID itemId) {
+        if (itemId == null) return false;
+        return Boolean.TRUE.equals(jdbc.queryForObject("select coalesce((execution_policy->>'managerCycle')::boolean,false) from work_package_item where tenant_id=:tenantId and id=:id",
+                base(principal).addValue("id",itemId),Boolean.class));
     }
 
     private MapSqlParameterSource base(TenantPrincipal principal) {

@@ -117,6 +117,8 @@ export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { 
 }
 
 const payloadLabels: Record<string, string> = {
+  employeeAssessments: '员工绩效评估', employeeName: '员工姓名', positionName: '岗位', score: '评估分数', focus: '关注重点', periodLabel: '归属周期',
+  plannedHygieneContent: '计划卫生内容', plannedHygieneRoomNumbers: '计划卫生房间号',
   expectedAttendance: '应到人数', actualAttendance: '实到人数', appearancePassed: '仪容仪表是否合格',
   meetingTopic: '晨会主题', meetingNotes: '会议记录', issueFound: '是否发现问题', issueSummary: '问题说明',
   inspectionResult: '巡查结果', lobbyStatus: '大堂情况', equipmentRoomStatus: '设备间情况',
@@ -153,7 +155,7 @@ function readableValue(raw: unknown): string {
   if (Array.isArray(value)) return value.length ? value.map(readableValue).join('、') : '未填写'
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
-    return entries.length ? entries.map(([key, child]) => `${payloadLabels[key] ?? '记录内容'}：${readableValue(child)}`).join('；') : '未填写'
+    return entries.length ? entries.filter(([key]) => key !== 'employeeId').map(([key, child]) => `${payloadLabels[key] ?? '记录内容'}：${readableValue(child)}`).join('；') : '未填写'
   }
   return String(value)
 }
@@ -317,7 +319,9 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   const standards = expectation.standards ?? []
   const payloadFields = readablePayload(expectation, record?.payload ?? {})
   const isDemo = resource.source === 'demo'
-  const allows = (permission: string) => permissions.includes(permission) || (demoFallbackEnabled && isDemo)
+  const allows = (permission: string) => permissions.includes(permission)
+    || (permission === 'work-record.review' && expectation.executionPolicy?.managerCycle === true && permissions.includes('manager-cycle.review'))
+    || (demoFallbackEnabled && isDemo)
   const imageAttachments = (record?.attachments ?? []).filter(isImageAttachment)
   const documentAttachments = (record?.attachments ?? []).filter((item) => !isImageAttachment(item))
   const attachmentLoadKey = imageAttachments.map((item) => item.id).join(':')

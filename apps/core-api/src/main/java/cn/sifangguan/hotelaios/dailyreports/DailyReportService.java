@@ -367,6 +367,15 @@ public class DailyReportService {
         snapshot.set("items", itemSnapshot);
         if (request.inventoryQuantities() != null) snapshot.set("inventoryQuantities", request.inventoryQuantities());
         if (request.roomCounts() != null) snapshot.set("roomCounts", request.roomCounts());
+        if (request.plannedHygiene() != null) {
+            if (!workEntry.supportsPlannedHygiene(reportId)) {
+                throw new IllegalArgumentException("计划卫生只适用于客房服务员日报");
+            }
+            var hygiene = request.plannedHygiene();
+            snapshot.set("plannedHygiene", objectMapper.valueToTree(new DailyReportModels.PlannedHygiene(
+                    hygiene.content() == null ? "" : hygiene.content().trim(),
+                    hygiene.roomNumbers() == null ? "" : hygiene.roomNumbers().trim())));
+        }
         int revisionChanged = jdbc.update("""
                 update daily_report_revision
                 set payload_snapshot = cast(:snapshot as jsonb), narrative = :narrative,
@@ -754,6 +763,7 @@ public class DailyReportService {
         revisions.forEach(revision -> revision.put(
                 "payloadSnapshot", parseJson(String.valueOf(revision.get("payloadSnapshot")))));
         result.put("revisions", revisions);
+        result.put("plannedHygieneSupported", workEntry.supportsPlannedHygiene(reportId));
         if ("DRAFT".equals(result.get("reportStatus"))
                 && java.util.Objects.equals(result.get("positionAssignmentId"), principal.businessActorAssignmentId())
                 && principal.hasPermission("work-record.submit")) {

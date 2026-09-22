@@ -1200,6 +1200,8 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
         if (!active) return
         if (result.data.itemCode === 'HKA_DAILY_REPORT' && routeParams.entry !== 'legacy') {
           go('daily-reports-my', { businessDate: result.data.businessDate, open: 'today' })
+        } else if (result.data.itemCode === 'GM_W_EMPLOYEE') {
+          go('workbench', { cycle: 'WEEK', cycleDate: result.data.businessDate, assessmentId: result.data.id })
         } else setEditing(result.data)
       })
         .catch(reason => { if (active) setOpenError(reason instanceof Error ? reason.message : '工作详情加载失败') })

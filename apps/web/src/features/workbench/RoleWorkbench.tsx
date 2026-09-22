@@ -10,6 +10,7 @@ import { useResource } from '../../useResource'
 import { resolveTaskDispatchMode } from '../tasks/taskDispatchAccess'
 import { OwnDailyReportShortcut, TeamDailyReportShortcut } from './DailyReportShortcuts'
 import { DailyReportTodo } from './DailyReportTodo'
+import { ManagerCycles, cycleType } from './ManagerCycles'
 import { WorkBoardPanel, WorkDateToolbar, WorkQueueAlerts, useWorkBoard } from './WorkBoard'
 import { boardLabels, emptyMetric, personalWorkLabel, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
 export { isLateSubmitted } from './workBoardModel'
@@ -79,6 +80,8 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   const headline = canReadTeam ? team : own
   const activeTasks = tasks.data.filter(task => !['COMPLETED', 'CANCELLED'].includes(task.status))
   const unreadNotices = notices.data.filter(notice => !notice.readAt)
+  const managerCycles = presentationKey === 'HOTEL_MANAGER' && canReadOwn
+  const cycleOnly = managerCycles && cycleType(routeParams.cycle) !== 'DAY' && routeParams.cycleTeam !== 'true'
 
   return <section className="wb-page">
     <header className="wb-page-heading"><div><span className="eyebrow">当前岗位工作</span><h1>{identity.label}工作台</h1><p>{identity.orgName} · 所选日期的工作进展与待办</p></div>
@@ -89,6 +92,8 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
         {canReadNotices && <button className="secondary" onClick={() => go('notifications')}>消息提醒{unreadNotices.length ? ' ' + unreadNotices.length : ''}</button>}
       </div></header>
     {navigation}
+    {managerCycles && <ManagerCycles key={identity.key} identity={identity} routeParams={routeParams} go={go} />}
+    {!cycleOnly && <>
     {dailyReportsAvailable && Boolean(identity.businessActorAssignmentId) && allows(permissions, 'daily-report.read') && <DailyReportTodo key={identity.key} identity={identity} go={go} />}
     <WorkDateToolbar params={routeParams} businessDate={headline.data.businessDate} onChange={change} />
     <nav className="wb-mobile-anchors" aria-label="工作台快捷定位">{canReadTeam && <a href="#team-board" onClick={event => { event.preventDefault(); document.getElementById('team-board')?.scrollIntoView({ behavior: 'smooth' }) }}>团队看板</a>}
@@ -155,6 +160,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
           <span><strong>{notice.title}</strong><small>{notice.content}</small></span><b>查看 ›</b></button>) : <p className="wb-empty">暂无未读提醒</p>}
       </article>}
     </div>
+    </>}
     {creatingTask && dispatchMode === 'MANAGEMENT' && <TaskCreateDialog identity={identity} permissions={permissions}
       initialHotelId={selectedHotel?.id} creationSource="WORKBENCH_QUICK_DISPATCH" onClose={() => setCreatingTask(false)}
       onCreated={async () => { await tasks.reload() }} />}

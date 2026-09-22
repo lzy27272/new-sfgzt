@@ -148,7 +148,9 @@ class WorkDataEvidencePolicyTest {
                 mock(FormPayloadValidator.class),
                 objectMapper,
                 mock(DailyReportRoutineProjectionService.class),
-                mock(cn.sifangguan.hotelaios.storeassets.StoreWorkUsageService.class));
+                mock(cn.sifangguan.hotelaios.storeassets.StoreWorkUsageService.class),
+                mock(cn.sifangguan.hotelaios.workpackage.WeeklyAssessmentService.class),
+                mock(cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver.class));
 
         assertThatThrownBy(() -> invokeValidation(service, json("""
                 {"publicAreaFacilityIds":[],
@@ -265,7 +267,9 @@ class WorkDataEvidencePolicyTest {
                 mock(FormPayloadValidator.class),
                 objectMapper,
                 mock(DailyReportRoutineProjectionService.class),
-                mock(cn.sifangguan.hotelaios.storeassets.StoreWorkUsageService.class));
+                mock(cn.sifangguan.hotelaios.storeassets.StoreWorkUsageService.class),
+                mock(cn.sifangguan.hotelaios.workpackage.WeeklyAssessmentService.class),
+                mock(cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver.class));
     }
 
     private void invokeValidation(WorkDataService service, JsonNode payload) {

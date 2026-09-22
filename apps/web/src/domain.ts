@@ -143,6 +143,7 @@ export type WorkExpectation = {
   reportPolicy?: Record<string, unknown>
   applicabilityPolicy?: Record<string, unknown>
   executionPolicy?: {
+    managerCycle?: boolean
     sharedPerOrg?: boolean
     allowedPositionCodes?: string[]
     delegationAllowed?: boolean

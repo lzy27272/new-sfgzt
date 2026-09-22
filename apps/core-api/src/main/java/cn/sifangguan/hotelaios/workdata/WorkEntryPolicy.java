@@ -20,7 +20,8 @@ public final class WorkEntryPolicy {
             "HKA_ITEM_ISSUE", Set.of("inventoryQuantities"),
             "HKA_CART_PREPARATION", Set.of("notes"),
             "HKA_USAGE_RETURN", Set.of("inventoryQuantities", "notes"),
-            "HKA_DAILY_REPORT", Set.of("checkoutRooms", "stayoverRooms", "inventoryQuantities"),
+            "HKA_DAILY_REPORT", Set.of("checkoutRooms", "stayoverRooms", "inventoryQuantities",
+                    "plannedHygieneContent", "plannedHygieneRoomNumbers"),
             "HKA_LOST_PROPERTY", Set.of("roomNumber", "itemName", "quantity", "foundAt", "foundLocation", "handoverRecipientAssignmentId", "notes"));
 
     public static boolean occursOnDemand(String itemCode) {
@@ -57,6 +58,12 @@ public final class WorkEntryPolicy {
         for (JsonNode field : original.path("required")) if (properties.has(field.asText())) required.add(field.asText());
         if ("HKA_CART_PREPARATION".equals(itemCode) || "HKA_USAGE_RETURN".equals(itemCode)) {
             properties.set("notes", stringField("补充说明（选填）", 2000));
+        }
+        if ("HKA_DAILY_REPORT".equals(itemCode)) {
+            properties.set("plannedHygieneContent", stringField("计划卫生内容（选填）", 2000));
+            properties.set("plannedHygieneRoomNumbers", stringField("计划卫生房间号（选填）", 1000));
+            ((ObjectNode) properties.get("plannedHygieneRoomNumbers"))
+                    .put("description", "可填写多个房号，例如：1201、1202、1203；无安排时可留空。");
         }
         if ("HKA_LOST_PROPERTY".equals(itemCode)) {
             properties.set("roomNumber", stringField("房号", 32));

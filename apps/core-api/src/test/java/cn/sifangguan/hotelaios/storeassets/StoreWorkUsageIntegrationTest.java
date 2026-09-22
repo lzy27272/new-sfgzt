@@ -412,6 +412,8 @@ class StoreWorkUsageIntegrationTest {
         String report=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
         JsonNode detail=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
         assertThat(detail.path("inventoryContext").path("catalogue").path("enabled").asBoolean()).isTrue();
+        assertThat(detail.path("plannedHygieneSupported").asBoolean()).isTrue();
+        Map<String,String> hygiene=Map.of("content","清洗空调滤网\n清洁床底","roomNumbers","0101、A102、1203");
         String brush=item("CONSUMABLE","支","支",1,100,0.5);
         Map<String,Object> quantities=Map.of("schemaVersion",1,"noUsage",false,"lines",List.of(line(brush,"3","支",0)));
         JsonNode invalid=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
@@ -424,12 +426,25 @@ class StoreWorkUsageIntegrationTest {
         assertThat(jdbc.queryForObject("select report_status from daily_report where id=?::uuid",String.class,report)).isEqualTo("DRAFT");
         JsonNode saved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
                 Map.of("revisionId",revision,"expectedVersion",invalid.path("rowVersion").asLong(),"items",List.of(),
-                        "inventoryQuantities",quantities,"roomCounts",Map.of("checkoutRooms",6,"stayoverRooms",4)),200);
+                        "inventoryQuantities",quantities,"roomCounts",Map.of("checkoutRooms",6,"stayoverRooms",4),
+                        "plannedHygiene",hygiene),200);
         assertThat(saved.path("revisions").get(0).path("payloadSnapshot").path("inventoryQuantities")).isEqualTo(mapper.valueToTree(quantities));
+        JsonNode reopened=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+        assertThat(reopened.path("revisions").get(0).path("payloadSnapshot").path("plannedHygiene")).isEqualTo(mapper.valueToTree(hygiene));
         JsonNode submitted=call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
                 Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),200);
         assertThat(submitted.path("reportStatus").asText()).isEqualTo("SUBMITTED");
         String record=jdbc.queryForObject("select id::text from work_record where work_expectation_id=?::uuid",String.class,expectation);
+        JsonNode workPayload=mapper.readTree(jdbc.queryForObject("select payload::text from work_record where id=?::uuid",String.class,record));
+        assertThat(workPayload.path("plannedHygieneContent").asText()).isEqualTo(hygiene.get("content"));
+        assertThat(workPayload.path("plannedHygieneRoomNumbers").asText()).isEqualTo(hygiene.get("roomNumbers"));
+        JsonNode managerView=call(get("/api/v1/daily-reports/"+report),GM,null,200);
+        assertThat(managerView.path("revisions").get(0).path("payloadSnapshot").path("plannedHygiene")).isEqualTo(mapper.valueToTree(hygiene));
+        call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",submitted.path("rowVersion").asLong(),"items",List.of(),
+                        "plannedHygiene",Map.of("content","覆盖已提交内容","roomNumbers","9999")),409);
+        assertThat(call(get("/api/v1/daily-reports/"+report),EMP,null,200).path("revisions").get(0).path("payloadSnapshot").path("plannedHygiene"))
+                .isEqualTo(mapper.valueToTree(hygiene));
         balance(brush,"100","50");
         review(record,GM,"APPROVED",0,200); review(record,GM,"APPROVED",0,200);
         balance(brush,"97","48.5");
@@ -466,6 +481,50 @@ class StoreWorkUsageIntegrationTest {
         assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isEqualTo(1);
         balance(brush,"100","50");
         assertThat(movements(record)).isZero();
+    }
+
+    @Test void plannedHygieneCanBeClearedAndOldClientsDoNotEraseIt() throws Exception {
+        usageItemCode="HKA_DAILY_REPORT"; setup();
+        LocalDate date=LocalDate.now().minusDays(4);
+        jdbc.update("update work_package_allocation set valid_from=? where id=(select work_package_allocation_id from work_expectation where id=?::uuid)",date,expectation);
+        jdbc.update("update work_expectation set business_date=? where id=?::uuid",date,expectation);
+        String itemId=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
+        UUID revision=createUsageDailyReport(version,itemId,date);
+        String report=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
+        JsonNode detail=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+        Map<String,String> hygiene=Map.of("content","清洁床底","roomNumbers","001、002");
+        for (String field:List.of("content","roomNumbers")) {
+            call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                    Map.of("revisionId",revision,"expectedVersion",detail.path("rowVersion").asLong(),"items",List.of(),
+                            "plannedHygiene",Map.of(field,"长".repeat(field.equals("content")?2001:1001))),400);
+        }
+        JsonNode saved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",detail.path("rowVersion").asLong(),"items",List.of(),"plannedHygiene",hygiene),200);
+        JsonNode legacySaved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong(),"items",List.of()),200);
+        assertThat(legacySaved.path("revisions").get(0).path("payloadSnapshot").path("plannedHygiene")).isEqualTo(mapper.valueToTree(hygiene));
+        JsonNode cleared=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",legacySaved.path("rowVersion").asLong(),"items",List.of(),
+                        "plannedHygiene",Map.of("content","  ","roomNumbers",""),
+                        "inventoryQuantities",Map.of("schemaVersion",1,"noUsage",true,"lines",List.of()),
+                        "roomCounts",Map.of("checkoutRooms",0,"stayoverRooms",0)),200);
+        assertThat(cleared.path("revisions").get(0).path("payloadSnapshot").path("plannedHygiene"))
+                .isEqualTo(mapper.valueToTree(Map.of("content","","roomNumbers","")));
+        JsonNode submitted=call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",cleared.path("rowVersion").asLong()),200);
+        assertThat(submitted.path("reportStatus").asText()).isEqualTo("SUBMITTED");
+    }
+
+    @Test void otherReportsCannotWriteHousekeepingPlannedHygiene() throws Exception {
+        String itemId=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
+        UUID revision=createUsageDailyReport(version,itemId,LocalDate.now().minusDays(5));
+        String report=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
+        JsonNode detail=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+        assertThat(detail.path("plannedHygieneSupported").asBoolean()).isFalse();
+        call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",detail.path("rowVersion").asLong(),"items",List.of(),
+                        "plannedHygiene",Map.of("content","无关岗位","roomNumbers","101")),400);
+        assertThat(call(get("/api/v1/daily-reports/"+report),EMP,null,200).path("rowVersion")).isEqualTo(detail.path("rowVersion"));
     }
 
     @Test void issuePickerValidatesConfigurationWithoutPostingConsumption() throws Exception {

@@ -27,7 +27,7 @@ import java.util.*;
 
 @Service
 public class WorkPackageService {
-    private static final Set<String> PERIOD_TYPES = Set.of("SHIFT", "DAY", "WEEK", "EVENT");
+    private static final Set<String> PERIOD_TYPES = Set.of("SHIFT", "DAY", "WEEK", "MONTH", "QUARTER", "EVENT");
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext databaseContext;
     private final AccessPolicy accessPolicy;
@@ -558,6 +558,7 @@ public class WorkPackageService {
         TenantPrincipal principal = prepare();
         LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
         operationalAllocations.reconcile(principal, assignmentId, today);
+        operationalAllocations.ensureManagerCycles(principal, today);
         generateDailyExpectations(principal, today, assignmentId);
     }
 
@@ -569,12 +570,13 @@ public class WorkPackageService {
     int generateDailyExpectationsForAutomation(LocalDate businessDate) {
         TenantPrincipal principal = prepare();
         operationalAllocations.ensureInitialAllocations(principal, businessDate);
+        operationalAllocations.ensureManagerCycles(principal, businessDate);
         return generateDailyExpectations(principal, businessDate, null);
     }
 
     private int generateDailyExpectations(TenantPrincipal principal, LocalDate businessDate, UUID assignmentId) {
         List<AllocationTarget> targets = jdbc.query("""
-                select distinct a.position_assignment_id, a.target_org_unit_id
+                select distinct a.position_assignment_id, a.target_org_unit_id, i.period_type
                 from work_package_allocation a
                 join work_package_version v
                   on v.tenant_id = a.tenant_id and v.id = a.work_package_version_id
@@ -593,7 +595,8 @@ public class WorkPackageService {
                   and v.lifecycle_status = 'PUBLISHED'
                   and v.effective_from::date <= :businessDate
                   and (v.effective_to is null or v.effective_to::date >= :businessDate)
-                  and i.period_type = 'DAY'
+                  and (i.period_type = 'DAY' or (i.period_type in ('WEEK','MONTH','QUARTER')
+                       and jsonb_typeof(i.execution_policy->'cycleSchedule') = 'object'))
                   and coalesce((i.execution_policy ->> 'enabled')::boolean, true)
                   and (cardinality(i.weekdays) = 0
                        or extract(isodow from cast(:businessDate as date))::smallint = any(i.weekdays))
@@ -601,16 +604,16 @@ public class WorkPackageService {
                   and assignment.valid_from <= :businessDate
                   and (assignment.valid_to is null or assignment.valid_to >= :businessDate)
                   and employee_row.employment_status = 'ACTIVE'
-                order by a.position_assignment_id, a.target_org_unit_id
+                order by a.position_assignment_id, a.target_org_unit_id, i.period_type
                 """, base(principal).addValue("businessDate", businessDate).addValue("assignmentId", assignmentId),
                 (rs, rowNum) -> new AllocationTarget(
                         rs.getObject("position_assignment_id", UUID.class),
-                        rs.getObject("target_org_unit_id", UUID.class)));
+                        rs.getObject("target_org_unit_id", UUID.class), rs.getString("period_type")));
         int created = 0;
         for (AllocationTarget target : targets) {
             Map<String, Object> result = generateExpectationsInternal(principal,
                     new WorkPackageModels.GenerateExpectations(
-                            target.assignmentId(), target.targetOrgUnitId(), businessDate, "DAY", null));
+                            target.assignmentId(), target.targetOrgUnitId(), businessDate, target.periodType(), null));
             created += ((Number) result.getOrDefault("createdCount", 0)).intValue();
         }
         return created;
@@ -1480,8 +1483,8 @@ public class WorkPackageService {
             WorkPackageModels.GenerateExpectations request
     ) {
         String periodType = request.periodType().trim().toUpperCase(Locale.ROOT);
-        if (!Set.of("SHIFT", "DAY", "WEEK").contains(periodType)) {
-            throw new IllegalArgumentException("期望生成只支持SHIFT、DAY或WEEK周期");
+        if (!Set.of("SHIFT", "DAY", "WEEK", "MONTH", "QUARTER").contains(periodType)) {
+            throw new IllegalArgumentException("期望生成只支持班次、日、周、月或季度周期");
         }
         requireActiveAssignment(principal, request.positionAssignmentId(), request.businessDate());
         DutyWindow dutyWindow = null;
@@ -1517,7 +1520,7 @@ public class WorkPackageService {
                        i.execution_policy::text as execution_policy,
                        i.applicability_policy::text as applicability_policy,
                        to_jsonb(h)::text as hotel_profile,
-                       a.id as allocation_id
+                       a.id as allocation_id, greatest(a.valid_from, v.effective_from::date) as eligible_from
                 from work_package_allocation a
                 join work_package_version v on v.tenant_id = a.tenant_id and v.id = a.work_package_version_id
                 join work_package_item i on i.tenant_id = v.tenant_id and i.work_package_version_id = v.id
@@ -1567,7 +1570,7 @@ public class WorkPackageService {
                         rs.getBoolean("waiver_allowed"),
                         rs.getString("execution_policy"),
                         rs.getString("applicability_policy"),
-                        rs.getString("hotel_profile")));
+                        rs.getString("hotel_profile"), rs.getObject("eligible_from", LocalDate.class)));
 
         String tenantTimezone = jdbc.queryForObject(
                 "select timezone from tenant where id = :tenantId",
@@ -1590,6 +1593,8 @@ public class WorkPackageService {
             OffsetDateTime availableAt;
             OffsetDateTime dueAt;
             String periodKey;
+            LocalDate periodStart = request.businessDate();
+            LocalDate periodEnd = request.businessDate();
             if (dutyWindow != null) {
                 ShiftTimingResolver.Window window = ShiftTimingResolver.resolve(
                         dutyWindow.start(), dutyWindow.end(), candidate.dueLocalTime(), zone,
@@ -1597,7 +1602,20 @@ public class WorkPackageService {
                 availableAt = window.availableAt();
                 dueAt = window.dueAt();
                 periodKey = "SHIFT:" + request.dutyPeriodId();
+            } else if (CycleSchedule.configured(periodType, executionPolicy)) {
+                CycleSchedule.Window window = CycleSchedule.resolve(periodType, request.businessDate(),
+                        candidate.dueLocalTime(), zone, executionPolicy);
+                // Do not invent overdue work from before a template/assignment was first enabled.
+                if (window.dueAt().isBefore(candidate.eligibleFrom().atStartOfDay(zone).toOffsetDateTime())) continue;
+                periodStart = window.start();
+                periodEnd = window.end();
+                availableAt = window.availableAt().isBefore(candidate.eligibleFrom().atStartOfDay(zone).toOffsetDateTime())
+                        ? candidate.eligibleFrom().atStartOfDay(zone).toOffsetDateTime() : window.availableAt();
+                dueAt = window.dueAt();
+                periodKey = window.key();
             } else {
+                if (Set.of("MONTH", "QUARTER").contains(periodType))
+                    throw new IllegalArgumentException("月清、季清必须配置周期截止规则");
                 LocalTime availableTime = candidate.windowStart() == null ? LocalTime.MIN : candidate.windowStart();
                 LocalTime dueTime = candidate.dueLocalTime() == null ? LocalTime.of(23, 59, 59) : candidate.dueLocalTime();
                 availableAt = request.businessDate().atTime(availableTime).atZone(zone).toOffsetDateTime();
@@ -1667,11 +1685,11 @@ public class WorkPackageService {
                     insert into work_expectation
                         (id, tenant_id, work_package_item_id, work_package_allocation_id,
                          position_assignment_id, duty_period_id, target_org_unit_id, business_date,
-                         period_key, available_at, due_at, status, waiver_allowed)
+                         period_key, available_at, due_at, status, waiver_allowed, period_start, period_end)
                     values
                         (:id, :tenantId, :itemId, :allocationId, :assignmentId, :dutyPeriodId,
                          :targetOrgUnitId, :businessDate, :periodKey, :availableAt, :dueAt, :status,
-                         :waiverAllowed)
+                         :waiverAllowed, :periodStart, :periodEnd)
                     on conflict (tenant_id, work_package_item_id, position_assignment_id,
                                  target_org_unit_id, period_key) do nothing
                     """, base(principal)
@@ -1683,6 +1701,7 @@ public class WorkPackageService {
                     .addValue("targetOrgUnitId", request.targetOrgUnitId())
                     .addValue("businessDate", request.businessDate())
                     .addValue("periodKey", periodKey)
+                    .addValue("periodStart", periodStart).addValue("periodEnd", periodEnd)
                     .addValue("availableAt", availableAt)
                     .addValue("dueAt", dueAt)
                     .addValue("status", initialStatus)
@@ -1764,6 +1783,10 @@ public class WorkPackageService {
         if (!PERIOD_TYPES.contains(periodType)) {
             throw new IllegalArgumentException("不支持的工作周期: " + periodType);
         }
+        if (Set.of("MONTH", "QUARTER").contains(periodType) && !CycleSchedule.configured(periodType, item.executionPolicy()))
+            throw new IllegalArgumentException("月清、季清必须配置周期截止规则");
+        if (item.executionPolicy()!=null && CycleSchedule.configured(periodType,item.executionPolicy()))
+            CycleSchedule.resolve(periodType,LocalDate.of(2026,1,1),LocalTime.NOON,ZoneId.of("Asia/Shanghai"),item.executionPolicy());
         String weekdays = toPostgresSmallIntArray(item.weekdays());
         UUID itemId = UUID.randomUUID();
         jdbc.update("""
@@ -2576,11 +2599,12 @@ public class WorkPackageService {
             boolean waiverAllowed,
             String executionPolicy,
             String applicabilityPolicy,
-            String hotelProfile
+            String hotelProfile,
+            LocalDate eligibleFrom
     ) {
     }
 
-    private record AllocationTarget(UUID assignmentId, UUID targetOrgUnitId) {
+    private record AllocationTarget(UUID assignmentId, UUID targetOrgUnitId, String periodType) {
     }
 
     private record DutyWindow(
