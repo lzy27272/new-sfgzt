@@ -49,6 +49,24 @@ public class StoreWorkUsageController {
     public record Configure(@NotNull UUID reviewerAssignmentId, @Min(-1) long expectedVersion) { }
     public record Reverse(@NotBlank @Size(max=1000) String reason) { }
 
+    @GetMapping("/hotels/{hotelId}/usage-quick-list-positions")
+    public List<Map<String,Object>> quickListPositions(@PathVariable UUID hotelId) {
+        return service.quickListPositions(hotelId);
+    }
+
+    @GetMapping("/hotels/{hotelId}/usage-quick-lists/{positionId}")
+    public Map<String,Object> quickList(@PathVariable UUID hotelId, @PathVariable UUID positionId) {
+        return service.quickList(hotelId, positionId);
+    }
+
+    @PutMapping("/hotels/{hotelId}/usage-quick-lists/{positionId}")
+    public Map<String,Object> configureQuickList(@PathVariable UUID hotelId, @PathVariable UUID positionId,
+                                               @Valid @RequestBody QuickList request) {
+        return service.configureQuickList(hotelId, positionId, request.itemIds(), request.expectedVersion());
+    }
+
+    public record QuickList(@NotNull @Size(max=100) List<@NotNull UUID> itemIds, @Min(-1) long expectedVersion) { }
+
     @PostMapping("/hotels/{hotelId}/work-usage/{recordId}/correct")
     public Map<String,Object> correct(@PathVariable UUID hotelId, @PathVariable UUID recordId, @Valid @RequestBody Correct request) {
         return service.correct(hotelId,recordId,request.quantities(),request.expectedVersion(),request.reason());

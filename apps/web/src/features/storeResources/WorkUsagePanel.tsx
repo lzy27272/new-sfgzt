@@ -7,6 +7,7 @@ import { useScopedResource } from '../../shared/useScopedResource'
 import { correctWorkUsage, loadUsageCatalogue, loadUsageConfig, loadUsageReviewers, loadWorkUsages, reverseWorkUsage, saveUsageConfig, usageStatus, usageSummary, usageValidation } from './workUsage'
 import type { UsageCatalogue, UsageConfig, UsageDetail, UsageInput, UsageRow } from './workUsage'
 import { WorkUsageFields } from './WorkUsageFields'
+import { UsageQuickListConfig } from './UsageQuickListConfig'
 import styles from './storeResources.module.css'
 
 export function UsageEvidenceSummary({ usage }: { usage: UsageDetail }) {
@@ -40,6 +41,7 @@ export function WorkUsagePanel({ identity, hotelId, canConfigure, canReverse, go
     {config.data && <section className={styles.usageForm}><h3>本店耗用审核人</h3><p>{config.data.enabled ? `${config.data.reviewerName} · ${config.data.reviewerPositionName}` : '尚未启用：原有文字填报不自动扣库。配置审核人后，新提交的耗用工作必须按清单填写。'}</p>{config.data.enabled && !config.data.reviewerAvailable && <p className={styles.error}>当前审核人已失效，请重新选择有效人员。</p>}
       {canConfigure && <><p>可按门店选择客房主管、店助或店长等有权限的人员。更换后，未审核记录也交给新审核人，原分配及操作历史保留。</p><div className={styles.actions}><label>审核人员<select aria-label="耗用审核人员" disabled={busy || reviewers.loading} value={reviewerId} onChange={(event) => setSelectedReviewer(event.target.value)}><option value="">请选择</option>{config.data.reviewerAssignmentId && !reviewers.data.some((person) => person.assignmentId === config.data?.reviewerAssignmentId) && <option value={config.data.reviewerAssignmentId}>原审核人（已失效或无权限）</option>}{reviewers.data.map((person) => <option key={person.assignmentId} value={person.assignmentId}>{person.employeeName} · {person.positionName}</option>)}</select></label><button type="button" className="primary" disabled={busy || !reviewers.data.some((person) => person.assignmentId === reviewerId)} onClick={() => void command(() => saveUsageConfig(identity, hotelId, reviewerId, config.data!.rowVersion), '耗用审核配置已保存，未审核记录已按新配置流转。')}>保存审核配置</button></div><AsyncState loading={reviewers.loading} error={reviewers.error} onRetry={reviewers.reload} />{!reviewers.loading && !reviewers.error && !reviewers.data.length && <p>没有可选人员。请先配置本店有效任职，并授予工作复核、门店库存查看及模块权限。</p>}</>}
     </section>}
+    {canConfigure && <UsageQuickListConfig identity={identity} hotelId={hotelId} />}
     <label>审核状态<select aria-label="耗用审核状态" value={filter} disabled={busy} onChange={(event) => { setFilter(event.target.value); setConfirmation(undefined) }}>{['PENDING', 'APPROVED', 'REJECTED', 'REVERSED', 'ALL'].map((status) => <option key={status} value={status}>{status === 'ALL' ? '全部状态' : usageStatus(status)}</option>)}</select></label><small>显示所选状态最近100条记录，历史记录不删除。</small>
     {message && <div className={styles.success} role="status">{message}</div>}{error && <div className={styles.error} role="alert">{error}</div>}
     <AsyncState loading={records.loading} error={records.error} empty={!records.data.length} onRetry={records.reload} emptyTitle="当前状态暂无耗用记录" />
