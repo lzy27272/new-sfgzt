@@ -100,7 +100,7 @@ test('store resource client uses concrete backend routes and dedicated handover 
   assert.match(page, /participants\.filter\(\(person\) => person\.canApproveHandover\)/)
   assert.match(page, /key=\{editing\?\.id \?\? 'new-item'\}/)
   assert.match(page, /key=\{editing\?\.id \?\? 'new-asset'\}/)
-  assert.match(page, /key=\{`items:\$\{selectedHotelId\}`\}/)
+  assert.match(page, /key=\{`\$\{identity.key\}:items:\$\{selectedHotelId\}`\}/)
   assert.match(page, /activeItemIds\.has\(balance\.itemId\)/)
   assert.match(page, /asset\.status !== 'RETIRED'/)
   assert.match(css, /@media \(max-width: 760px\)/)

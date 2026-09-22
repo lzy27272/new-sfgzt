@@ -53,6 +53,11 @@ public class StoreResourceController {
         return service.summary(hotelId);
     }
 
+    @GetMapping("/hotels/{hotelId}/usage-scope-options")
+    public StoreItemUsageScopes.Options usageScopeOptions(@PathVariable UUID hotelId) {
+        return service.usageScopeOptions(hotelId);
+    }
+
     @PostMapping("/hotels/{hotelId}/items")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> createItem(

@@ -1917,6 +1917,17 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/store-resources/hotels/{hotelId}/usage-scope-options:
+    get:
+      tags: [Store Resource]
+      operationId: getStoreItemUsageScopeOptions
+      summary: Get active departments of this hotel and active tenant-wide position definitions
+      description: Requires store-resource.item-manage and hotel scope. Returns departments and positions arrays with id, code and name. No staff records or extra permissions are exposed. Position definitions are not limited to currently staffed positions.
+      parameters:
+        - $ref: '#/components/parameters/HotelId'
+      responses:
+        '200': { $ref: '#/components/responses/ObjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/store-resources/hotels/{hotelId}/summary:
     get:
       tags: [Store Resource]
@@ -2101,6 +2112,7 @@ paths:
       tags: [Store Resource]
       operationId: downloadStoreResourceImportTemplate
       summary: Download the controlled new-store inventory and fixed-asset XLSX template
+      description: V3 adds required usage departments and optional usage positions, plus a read-only reference sheet populated from this hotel and tenant. Names or codes are resolved against current server data, not the uploaded reference sheet. Semicolons separate selections. V1/V2 files remain supported with LEGACY usage scope, never implicitly all departments. Apply revalidates references; no partial writes on failure.
       parameters:
         - $ref: '#/components/parameters/HotelId'
       responses:
@@ -3413,6 +3425,8 @@ components:
         purchaseFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
         issueUnit: { type: [string, 'null'], maxLength: 32, description: Issue or consumption entry unit; defaults to base unit. }
         issueFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
+        employeeUsageEnabled: { type: [boolean, 'null'], description: Existing employee catalogue opt-in flag; does not grant workflow permissions. }
+        usageScope: { $ref: '#/components/schemas/StoreItemUsageScopeInput' }
     UpdateStoreResourceItem:
       type: object
       description: Optimistic item configuration update. Omitted unit metadata preserves current settings. The base unit is immutable after any stock movement, even if stock is zero. Alias changes affect future postings only.
@@ -3433,6 +3447,25 @@ components:
         purchaseFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
         issueUnit: { type: [string, 'null'], maxLength: 32 }
         issueFactor: { $ref: '#/components/schemas/StoreItemUnitFactor' }
+        employeeUsageEnabled: { type: [boolean, 'null'] }
+        usageScope: { $ref: '#/components/schemas/StoreItemUsageScopeInput' }
+    StoreItemUsageScopeInput:
+      type: [object, 'null']
+      description: Descriptive configuration for future quick selection. Omitted/null creates LEGACY on old clients and preserves existing scopes on update. New configuration must explicitly select ALL_DEPARTMENTS or DEPARTMENTS. DEPARTMENTS requires at least one active department within this hotel; ALL_DEPARTMENTS requires an empty departmentIds array. Empty positionIds means all positions within the selected departments, not all departments. No ledger split, access grant, approval change or quick-list rewrite. Read responses include usage_scope.mode (including LEGACY), departmentIds, positionIds and department/position label snapshots.
+      required: [mode]
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [ALL_DEPARTMENTS, DEPARTMENTS] }
+        departmentIds:
+          type: [array, 'null']
+          maxItems: 200
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        positionIds:
+          type: [array, 'null']
+          maxItems: 200
+          uniqueItems: true
+          items: { type: string, format: uuid }
     StoreItemUnitFactor:
       type: [number, string, 'null']
       description: One alias unit equals this many base units. Exact positive decimal with at most 12 integer and 6 fractional digits; strings preserve decimal precision. Same-name units must have identical factors, and the base unit factor must be 1.

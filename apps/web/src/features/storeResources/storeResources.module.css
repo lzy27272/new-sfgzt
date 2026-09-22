@@ -45,6 +45,30 @@
 .form .checkbox { display: flex; align-items: center; gap: 8px; }
 .form .checkbox input { width: 16px; min-height: 16px; }
 .full { grid-column: 1/-1; }
+.usageScopeLayout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr); gap: 20px; margin-top: 20px; }
+.usageScopeFields, .usageScopeSummary { min-width: 0; padding: 18px; border: 1px solid #cfdfec; border-radius: 12px; background: #eff7fd; }
+.usageScopeFields h3, .usageScopeSummary h3 { font-size: 17px; }
+.usageScopeFields p, .usageScopeSummary p, .usageScopeSummary dd { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.usageScopeFields fieldset { margin-top: 18px; }
+.usageScopeFields legend { margin-bottom: 12px; font-size: 13px; font-weight: 700; color: #294e69; }
+.scopeModes { display: flex; flex-wrap: wrap; gap: 12px 20px; }
+.form .scopeModes label, .form .scopeChoiceList label { display: flex; flex-direction: row; align-items: center; gap: 9px; font-size: 13px; min-height: 36px; cursor: pointer; }
+.form .scopeModes input, .form .scopeChoiceList input { width: 18px; height: 18px; min-height: 18px; padding: 0; flex-shrink: 0; accent-color: #2378ed; }
+.scopeChips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.scopeChips button { padding: 8px 10px; border: 1px solid #b9d6ed; border-radius: 8px; background: #e2f0ff; color: #236b9e; font-size: 12px; cursor: pointer; }
+.scopeChoices > label { font-size: 12px; }
+.scopeChoiceList { margin-top: 10px; padding: 8px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px 12px; max-height: 200px; overflow: auto; border: 1px solid #d7e4ee; border-radius: 9px; background: #fff; }
+.scopeChoiceList label { min-width: 0; overflow-wrap: anywhere; }
+.scopeChoiceList small { display: block; color: #7c8e9b; font-size: 9px; font-weight: 400; }
+.scopeChoiceList > p { grid-column: 1/-1; }
+.usageScopeSummary { align-self: start; background: #fff; }
+.usageScopeSummary > span { font-size: 12px; color: #7890a3; display: block; margin-bottom: 14px; }
+.usageScopeSummary dl { margin: 20px 0; }
+.usageScopeSummary dt { margin-top: 16px; font-size: 11px; color: #6b8293; }
+.usageScopeSummary dd { margin: 6px 0 0; color: #225c7f; font-weight: 600; }
+.panel .itemScopeLabel { color: #376983; padding: 8px 10px; background: #edf5fb; border-radius: 8px; overflow-wrap: anywhere; }
+.scopeImportNotice { padding: 12px 14px; margin: 12px 0; color: #526f83; background: #eff7fd; border: 1px solid #cfe0eb; border-radius: 10px; font-size: 12px; line-height: 1.8; }
+.scopeImportWarning { padding: 12px 14px; margin: 12px 0; border: 1px solid #edd299; border-radius: 10px; color: #866019; background: #fff8e9; font-size: 12px; line-height: 1.7; }
 .timeline { display: grid; gap: 9px; }
 .timeline article { padding: 13px 14px; display: grid; grid-template-columns: 1fr auto; gap: 5px 12px; border: 1px solid #e2eaee; border-radius: 11px; }
 .timeline article > div { display: flex; align-items: center; gap: 8px; }
@@ -95,6 +119,17 @@
   .metrics, .tabs, .importMetrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 @media (max-width: 760px) {
+  .usageScopeLayout { grid-template-columns: 1fr; gap: 12px; }
+  .usageScopeFields, .usageScopeSummary { padding: 12px; }
+  .scopeChoiceList { grid-template-columns: 1fr; }
+  .scopeModes label, .scopeChips button, .form .scopeChoiceList label { min-height: 44px; }
+  .form input, .form select { font-size: 16px; min-width: 0; }
+  .importPanel p, .importPanel label, .importPanel .success, .importPanel .error,
+  .importMetrics span, .importMetrics small, .previewColumns span { font-size: 12px; }
+  .importPanel button { min-height: 44px; font-size: 13px; }
+  .importUpload label { min-width: 0; }
+  .importPanel input { width: 100%; min-width: 0; max-width: 100%; font-size: 16px; }
+  .importTable { min-width: 540px; font-size: 12px; }
   .scopeBar, .panel > header, .importUpload { align-items: stretch; flex-direction: column; }
   .scopeBar label { min-width: 0; }
   .metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
