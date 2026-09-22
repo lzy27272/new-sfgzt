@@ -36,7 +36,11 @@ CREATE POLICY tenant_isolation_employee_weekly_assessment ON employee_weekly_ass
  USING (tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid)
  WITH CHECK (tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid);
 COMMENT ON TABLE employee_weekly_assessment IS '人工周评，至少保留三年；不直接修改月度KPI、薪酬或工作完成率';
+-- Production default privileges may grant DELETE/TRUNCATE on newly created
+-- tables. Reset inherited creation-time grants before applying the allowlist.
+REVOKE ALL ON employee_weekly_assessment FROM PUBLIC;
 DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='hotel_ai_os_app') THEN
+  REVOKE ALL ON employee_weekly_assessment FROM hotel_ai_os_app;
   GRANT SELECT,INSERT,UPDATE ON employee_weekly_assessment TO hotel_ai_os_app;
 END IF; END $$;
 

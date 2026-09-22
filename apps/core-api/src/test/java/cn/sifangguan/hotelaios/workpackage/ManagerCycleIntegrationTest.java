@@ -32,6 +32,23 @@ class ManagerCycleIntegrationTest {
         r.add("app.security.development-header-auth-enabled",()->true); r.add("app.database.rls-enabled",()->true);
     }
     @AfterAll static void close() throws Exception { PG.close(); }
+    @Test void assessmentHistoryPermissionsOverrideBroadDefaultGrants() throws Exception {
+        for (String privilege : List.of("SELECT", "INSERT", "UPDATE")) {
+            assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app','employee_weekly_assessment',?)",
+                Boolean.class, privilege)).as(privilege).isTrue();
+        }
+        for (String privilege : List.of("DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")) {
+            assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app','employee_weekly_assessment',?)",
+                Boolean.class, privilege)).as(privilege).isFalse();
+        }
+        try (var connection = PG.getPostgresDatabase().getConnection(); var statement = connection.createStatement()) {
+            statement.execute("set role hotel_ai_os_app");
+            assertThatThrownBy(() -> statement.execute("delete from employee_weekly_assessment"))
+                .isInstanceOfSatisfying(java.sql.SQLException.class, error -> assertThat(error.getSQLState()).isEqualTo("42501"));
+            assertThatThrownBy(() -> statement.execute("truncate employee_weekly_assessment"))
+                .isInstanceOfSatisfying(java.sql.SQLException.class, error -> assertThat(error.getSQLState()).isEqualTo("42501"));
+        }
+    }
     @Test void calendarGenerationAssessmentSubmissionReturnAndHistoricalScore() throws Exception {
         PlatformAdminTestFixture.ensure(jdbc,T,"19000000-0000-0000-0000-000000000001");
         String vpEmployee=UUID.randomUUID().toString();
@@ -100,5 +117,14 @@ class ManagerCycleIntegrationTest {
         assertThat(response.getStatus()).as(response.getContentAsString()).isEqualTo(status);
         return mapper.readTree(response.getContentAsString());
     }
-    static EmbeddedPostgres start(){try{return EmbeddedPostgres.builder().start();}catch(Exception e){throw new ExceptionInInitializerError(e);}}
+    static EmbeddedPostgres start(){
+        try {
+            var pg = EmbeddedPostgres.builder().start();
+            try (var connection = pg.getPostgresDatabase().getConnection(); var statement = connection.createStatement()) {
+                statement.execute("create role hotel_ai_os_app nologin nosuperuser nobypassrls");
+                statement.execute("alter default privileges in schema public grant all on tables to hotel_ai_os_app");
+            }
+            return pg;
+        } catch(Exception e) { throw new ExceptionInInitializerError(e); }
+    }
 }
