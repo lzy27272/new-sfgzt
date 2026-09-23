@@ -28,6 +28,10 @@ export function resolveNotificationNavigation(
   const canGovernPositions = has('position-profile.read', 'position-profile.manage')
   const personalBindingResult = ['WECOM_BINDING_ACTIVE', 'WECOM_BINDING_REJECTED', 'WECOM_BINDING_SUSPENDED', 'WECOM_BINDING_RESUMED', 'WECOM_BINDING_REVOKED'].includes(type)
 
+  if (sourceType === 'PROCUREMENT' && sourceId && has('procurement.read', 'procurement.request', 'procurement.configure')) {
+    return { view: 'procurement', params: { orderId: sourceId }, actionLabel: '查看采购与收货' }
+  }
+
   if (
     ['WECOM_ONBOARDING', 'WECOM_PERSON_ONBOARDING'].includes(sourceType)
     || type.startsWith('WECOM_ONBOARDING_')

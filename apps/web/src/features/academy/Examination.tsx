@@ -40,4 +40,3 @@ export default function Examination({identity,id,onBack}:{identity:ApiIdentity;i
     {confirm&&<div className="ac-modal"><section role="dialog" aria-modal="true" aria-label="确认交卷"><h3>确认提交试卷</h3><p>{answered<exam!.questionCount?'还有 '+(exam!.questionCount-answered)+' 道题未作答。':'所有题目已作答。'}交卷后无法修改。</p><div className="ac-toolbar"><button onClick={()=>setConfirm(false)}>继续答题</button><button className="primary" disabled={busy} onClick={()=>void submit()}>确认交卷</button></div></section></div>}
   </>
 }
-

@@ -147,6 +147,10 @@ public class WeComDeliveryWorker {
                                  and ap.state in ('ACTIVE','COMPLETED') and aa.status='ACTIVE' and aa.valid_from<=current_date
                                  and (aa.valid_to is null or aa.valid_to>=current_date) and ae.employment_status='ACTIVE'
                                  and ae.deleted_at is null and au.status='ACTIVE'))
+                           or (n.source_type = 'PROCUREMENT' and exists(select 1 from procurement_order po
+                                join user_account ua on ua.tenant_id=po.tenant_id and ua.id=n.recipient_account_id and ua.status='ACTIVE'
+                                where po.tenant_id=n.tenant_id and po.id=n.source_id
+                                  and (n.notification_type<>'PROCUREMENT_OVERDUE_30_DAYS' or po.status<>'COMPLETED')))
                            or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
                                and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
                                and exists (select 1 from work_package_item item
@@ -258,6 +262,10 @@ public class WeComDeliveryWorker {
                                  and ap.state in ('ACTIVE','COMPLETED') and aa.status='ACTIVE' and aa.valid_from<=current_date
                                  and (aa.valid_to is null or aa.valid_to>=current_date) and ae.employment_status='ACTIVE'
                                  and ae.deleted_at is null and au.status='ACTIVE'))
+                           or (n.source_type = 'PROCUREMENT' and exists(select 1 from procurement_order po
+                                join user_account ua on ua.tenant_id=po.tenant_id and ua.id=n.recipient_account_id and ua.status='ACTIVE'
+                                where po.tenant_id=n.tenant_id and po.id=n.source_id
+                                  and (n.notification_type<>'PROCUREMENT_OVERDUE_30_DAYS' or po.status<>'COMPLETED')))
                            or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
                                and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
                                and exists (select 1 from work_package_item item
@@ -366,6 +374,7 @@ public class WeComDeliveryWorker {
             // Keep review reminders usable without widening that security boundary here; the
             // reviewer lands on the authenticated workbench and can open 团队工作 from there.
             case "WORK_RECORD" -> "#/workbench";
+            case "PROCUREMENT" -> "#/procurement?orderId=" + sourceId;
             default -> throw new IllegalArgumentException("Unsupported WeCom notification source type");
         };
     }

@@ -23,6 +23,7 @@ export const navigation: Array<{ id: AppRouteId; sectionId?: string; label: stri
   { id: 'store-resources', label: '库存与固定资产', icon: '库', group: '系统配置', permissions: [permissionCodes.storeResource.read] },
   { id: 'academy', label: '学院中心', icon: '学', permissions: ['academy.learn','academy.manage','academy.team-read'] },
   { id: 'finance', label: '报销与费用', icon: '¥', group: '财务中心', permissions: ['finance.submit', 'finance.review', 'finance.read', 'finance.pay', 'finance.configure'] },
+  { id: 'procurement', label: '采购与收货', icon: '购', permissions: ['procurement.read', 'procurement.request', 'procurement.configure'] },
   { id: 'data-retention', label: '数据留存策略', icon: '◷', group: '系统配置', administratorOnly: true },
   { id: 'ai-data', label: 'AI 数据与复盘', icon: '◈', permissions: ['ui.module.ai-data'] },
   { id: 'wecom-webhooks', label: '企业微信 Webhook', icon: '◉', group: '系统配置', permissions: ['org.manage'] },

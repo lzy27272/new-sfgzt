@@ -2,7 +2,20 @@ import type { ApiIdentity } from '../../api/client'
 
 export type EvidenceKind = 'INVOICE' | 'TRANSACTION' | 'PAYMENT'
 export const evidenceLabels: Record<EvidenceKind, string> = { INVOICE: '发票', TRANSACTION: '交易记录', PAYMENT: '付款凭证' }
-export const statusLabels: Record<string, string> = { DRAFT: '草稿', RETURNED: '退回补充', MANAGER_REVIEW: '待门店负责人审核', FINANCE_REVIEW: '待财务复核', LEADER_REVIEW: '待集团领导审核', APPROVED: '审批通过', REJECTED: '已拒绝', WITHDRAWN: '已撤回' }
+export const statusLabels: Record<string, string> = { DRAFT: '草稿', RETURNED: '退回补充', MANAGER_REVIEW: '待初审', FINANCE_REVIEW: '待门店财务复核', DIRECTOR_REVIEW: '待财务总监审核', LEADER_REVIEW: '待CEO终审', APPROVED: '审批通过', REJECTED: '已拒绝', WITHDRAWN: '已撤回' }
+export function approvalStageLabel(stage: string, workflowVersion = 2): string {
+  const labels: Record<string, string> = workflowVersion === 1
+    ? { MANAGER_REVIEW: '门店负责人', FINANCE_REVIEW: '财务', LEADER_REVIEW: '集团领导' }
+    : { MANAGER_REVIEW: '初审', FINANCE_REVIEW: '门店财务', DIRECTOR_REVIEW: '财务总监', LEADER_REVIEW: 'CEO终审' }
+  return labels[stage] ?? stage
+}
+export function claimStatusLabel(claim: { status: string; workflow_version?: number }): string {
+  if (claim.workflow_version === 1 && ['MANAGER_REVIEW', 'FINANCE_REVIEW', 'LEADER_REVIEW'].includes(claim.status)) return `待${approvalStageLabel(claim.status, 1)}审核`
+  return statusLabels[claim.status] ?? claim.status
+}
+export function canWithdrawClaim(status: string): boolean {
+  return ['DRAFT', 'RETURNED', 'MANAGER_REVIEW', 'FINANCE_REVIEW', 'DIRECTOR_REVIEW', 'LEADER_REVIEW'].includes(status)
+}
 export const treatmentLabels: Record<string, string> = { EXPENSE: '当期费用', INVENTORY: '库存采购', ASSET: '固定资产', PREPAID: '预付 / 待摊', ALREADY_RECORDED: '已记成本（不重复计入）' }
 export type Category = { id: string; hotel_id: string; name: string; treatment: string; keywords: string; debit_account: string; enabled: boolean; version: number }
 export type FinanceContext = {
@@ -15,11 +28,12 @@ export type DraftForm = { expectedVersion: number; title: string; businessDate: 
 export type PendingEvidence = { id: string; kind: EvidenceKind; file: File }
 export type LocalDraft = { form: DraftForm; files: PendingEvidence[]; dirty: boolean }
 export type ReviewRecord = { stage: string; decision: string; note: string; created_at: string; reviewer_name: string; review_snapshot?: {
-  claim: { title: string; requested_amount: string; approved_amount: string | null; category_name: string }
+  claim: { title: string; requested_amount: string; approved_amount: string | null; category_name: string; workflow_version?: number }
   evidence: { id: string; kind: EvidenceKind; original_name: string; sha256: string }[]
   invoices: { invoice_code: string; invoice_number: string; amount: string; buyer_tax_number: string }[]
 } }
 export type Claim = {
+  workflow_version?: number; submitted_at?: string; approvalRoute?: { stage: string; label: string; accountId: string | null; accountName: string; skipped: boolean }[];
   id: string; version: number; status: string; assignment_id: string; hotel_id: string; applicant_name: string; hotel_name: string; company_name: string; company_tax_number: string;
   title: string; business_date: string; category_id: string | null; category_name: string; treatment: string; invoice_amount: string; transaction_amount: string; payment_amount: string; requested_amount: string; approved_amount: string | null; difference_note: string; mismatch: boolean; updated_at: string;
   canEdit: boolean; canReview: boolean; canPay: boolean; attachments: Evidence[];

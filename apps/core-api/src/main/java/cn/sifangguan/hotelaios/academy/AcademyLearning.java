@@ -100,4 +100,3 @@ public class AcademyLearning {
         return Map.of("sequence",body.sequence(),"watchedSeconds",watched,"completedPages",completed,"pageElapsed",pageElapsed,"completed",done);
     }
 }
-

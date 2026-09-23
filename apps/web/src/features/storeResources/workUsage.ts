@@ -4,7 +4,8 @@ import { baseQuantityPreview } from './unitConversion'
 
 export type UsageConfig = { hotelOrgUnitId: string; enabled: boolean; rowVersion: number; reviewerAssignmentId?: string; reviewerName?: string; reviewerPositionName?: string; reviewerAvailable: boolean }
 export type UsageItem = { id: string; name: string; sku?: string; category: string; specification: string; unit: string; issueUnit: string; issueFactor: number; rowVersion: number }
-export type UsageCatalogue = UsageConfig & { items: UsageItem[]; referenceUsage?: UsageDetail; mode?: 'ISSUE' | 'USAGE' }
+export type UsageQuickList = { positionId: string; rowVersion: number; configured: boolean; itemIds: string[] }
+export type UsageCatalogue = UsageConfig & { items: UsageItem[]; referenceUsage?: UsageDetail; mode?: 'ISSUE' | 'USAGE'; quickList?: UsageQuickList }
 export type UsageInputLine = { itemId: string; quantity: string; unit: string; expectedItemVersion: number }
 export type UsageInput = { schemaVersion: 1; noUsage: boolean; lines: UsageInputLine[] }
 export type UsageLine = { itemId: string; itemName: string; category: string; baseUnit: string; inputUnit: string; inputQuantity: number; conversionFactor: number; baseQuantity: number }
@@ -49,6 +50,9 @@ export function usageSummary(detail: UsageDetail) {
   return detail.lines.map((line) => `${line.itemName} ${line.inputQuantity} ${line.inputUnit}（${line.baseQuantity} ${line.baseUnit}${line.category === 'LINEN' ? '，布草使用，不扣总库存' : ''}）`).join('；')
 }
 const path = (hotelId: string) => `/store-resources/hotels/${encodeURIComponent(hotelId)}`
+export const loadQuickListPositions = (identity: RoleContext, hotelId: string, signal?: AbortSignal) => featureApiRequest<Array<{ id: string; name: string; code: string }>>(`${path(hotelId)}/usage-quick-list-positions`, identity, { signal })
+export const loadUsageQuickList = (identity: RoleContext, hotelId: string, positionId: string, signal?: AbortSignal) => featureApiRequest<UsageQuickList & { items: UsageItem[] }>(`${path(hotelId)}/usage-quick-lists/${encodeURIComponent(positionId)}`, identity, { signal })
+export const saveUsageQuickList = (identity: RoleContext, hotelId: string, positionId: string, itemIds: string[], expectedVersion: number) => featureApiMutation<UsageQuickList & { items: UsageItem[] }>(`${path(hotelId)}/usage-quick-lists/${encodeURIComponent(positionId)}`, identity, { method: 'PUT', body: { itemIds }, expectedVersion })
 export const loadUsageCatalogue = (identity: RoleContext, orgUnitId: string, signal?: AbortSignal, context?: { businessDate: string; itemCode?: string }) => featureApiRequest<UsageCatalogue>(`/store-resources/usage-catalog?orgUnitId=${encodeURIComponent(orgUnitId)}${context ? `&businessDate=${encodeURIComponent(context.businessDate)}&itemCode=${encodeURIComponent(context.itemCode ?? '')}` : ''}`, identity, { signal })
 export const loadUsageConfig = (identity: RoleContext, hotelId: string, signal?: AbortSignal) => featureApiRequest<UsageConfig>(`${path(hotelId)}/usage-review-config`, identity, { signal })
 export const loadUsageReviewers = (identity: RoleContext, hotelId: string, signal?: AbortSignal) => featureApiRequest<UsageReviewer[]>(`${path(hotelId)}/usage-reviewers`, identity, { signal })

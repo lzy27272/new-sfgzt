@@ -1,0 +1,25 @@
+.form { min-width: 0; margin: 0; padding: 0; border: 0; color: #183e52; }
+.form legend { font-size: 22px; font-weight: 750; padding: 0; }
+.form p { margin: 8px 0 16px; color: #6f8190; line-height: 1.6; }
+.form small { display: block; color: #6f8190; font-size: 13px; font-weight: 400; line-height: 1.6; }
+.group { margin: 16px 0; overflow: hidden; border: 1px solid #dce5eb; border-radius: 12px; }
+.group h3 { margin: 0; padding: 8px 14px; font-size: 18px; background: #eaf2f7; }
+.columns, .row { display: grid; grid-template-columns: minmax(0,1fr) 44px minmax(80px,26%); align-items: center; gap: 10px; padding: 6px 14px; }
+.columns { color: #6f8190; font-size: 13px; background: #f4f7fa; }
+.columns > :last-child { text-align: right; }
+.row { min-height: 56px; border-top: 1px solid #e7edf2; font-size: 16px; }
+.row > div { min-width: 0; overflow-wrap: anywhere; }
+.row > span { color: #6f8190; text-align: center; }
+.row input { width: 100%; min-width: 0; min-height: 44px; text-align: right; padding: 10px; border: 1px solid #cedbe5; border-radius: 8px; background: #fff; color: #183e52; font-size: 16px; }
+.row input:focus { outline: 2px solid #2679e9; outline-offset: 2px; }
+.row input::placeholder { color: #93a2b1; }
+.add { width: 100%; min-height: 44px; }
+.refresh { min-height: 44px; margin-top: 4px; }
+.confirm { display: flex; align-items: flex-start; gap: 10px; padding: 18px 0; line-height: 1.6; font-size: 16px; }
+.confirm input { width: 22px; height: 22px; margin: 2px 0; flex-shrink: 0; }
+.form .warning { background: #fff6e3; color: #8b590d; border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+.stale { grid-column: 1/-1; color: #9b6316; font-size: 14px; line-height: 1.6; }
+.stale button { display: block; margin-top: 8px; }
+.configuration select { width: 100%; min-height: 44px; padding: 10px; margin: 8px 0; border: 1px solid #cedbe5; border-radius: 8px; font: inherit; font-size: 16px; color: #183e52; background: white; }
+.configuration summary { min-height: 44px; cursor: pointer; }
+@media (max-width: 420px) { .columns, .row { padding: 6px 10px; gap: 6px; grid-template-columns: minmax(0,1fr) 36px 86px; } }

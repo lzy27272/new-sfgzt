@@ -64,6 +64,30 @@ class DailyReportDispatchIntegrationTest {
     }
 
     @Test
+    void housekeepingReportOpensAt1530WithoutChangingIts1800Deadline() {
+        LocalDate day=BUSINESS_DATE.plusDays(3);
+        UUID account=UUID.randomUUID(),employee=UUID.randomUUID(),assignment=UUID.randomUUID();
+        jdbc.update("insert into user_account(id,tenant_id,login_name,display_name) values (?,?,?,'日报开放验证')",account,TENANT,"open-1530-"+account);
+        jdbc.update("insert into employee(id,tenant_id,account_id,employee_no,name,hired_on) values (?,?,?,?,'日报开放验证',?)",employee,TENANT,account,"open-1530-"+employee,day);
+        jdbc.update("""
+                insert into employee_position_assignment(id,tenant_id,employee_id,org_unit_id,position_id,valid_from)
+                select ?,?,?, '12000000-0000-0000-0000-000000000003'::uuid,id,?
+                from position_definition where tenant_id=? and code='HOUSEKEEPING_ATTENDANT'
+                """,assignment,TENANT,employee,day,TENANT);
+        Instant opens=day.atTime(15,30).atZone(BUSINESS_ZONE).toInstant();
+        service.processTenantAsSystem(TENANT,100,UUID.randomUUID(),opens.minusSeconds(1));
+        assertThat(count("select count(*) from daily_report where position_assignment_id=? and business_date=?",assignment,day)).isZero();
+        service.processTenantAsSystem(TENANT,100,UUID.randomUUID(),opens);
+        assertThat(count("select count(*) from daily_report where position_assignment_id=? and business_date=?",assignment,day)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                select (report_deadline_at at time zone 'Asia/Shanghai')::time=time '18:00'
+                from daily_report where position_assignment_id=? and business_date=?
+                """,Boolean.class,assignment,day)).isTrue();
+        service.processTenantAsSystem(TENANT,100,UUID.randomUUID(),opens);
+        assertThat(count("select count(*) from daily_report where position_assignment_id=? and business_date=?",assignment,day)).isEqualTo(1);
+    }
+
+    @Test
     void materializesFiveHotelRolesOnceAndUsesFrozenPolicyForEligibleDraftReports() {
         // This test isolates the current-business-day lifecycle. Production keeps
         // the seeded one-day backfill policy, which is covered by the dispatcher itself.

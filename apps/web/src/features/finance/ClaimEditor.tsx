@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ApiIdentity } from '../../api/client'
 import { financeRequest, errorMessage } from './api'
 import { loadFinanceDraft, removeFinanceDraft, saveFinanceDraft } from './encryptedDrafts'
-import { cents, differs, draftFromClaim, draftValidation, evidenceLabels, financeScope, invoiceTotal, money, statusLabels, type Claim, type DraftForm, type Evidence, type EvidenceKind, type FinanceContext, type LocalDraft } from './model'
+import { canWithdrawClaim, cents, claimStatusLabel, differs, draftFromClaim, draftValidation, evidenceLabels, financeScope, invoiceTotal, money, type Claim, type DraftForm, type Evidence, type EvidenceKind, type FinanceContext, type LocalDraft } from './model'
 import { EvidencePreview } from './EvidencePreview'
 import { ReviewHistory } from './ReviewHistory'
 import s from './finance.module.css'
@@ -125,7 +125,7 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
   const invoiceSources = [...claim.attachments.filter(a => a.kind === 'INVOICE').map(a => ({ id: a.id, name: a.original_name })), ...local.files.filter(a => a.kind === 'INVOICE').map(a => ({ id: a.id, name: a.file.name }))]
   return <section className={s.editor}>
     <div className={s.heading}><div><small>REIMBURSEMENT</small><h2>{claim.canEdit ? '报销申请' : claim.title || '报销详情'}</h2></div><button type="button" onClick={onBack}>返回列表</button></div>
-    <div className={s.identity}><strong>{claim.applicant_name} · {claim.hotel_name}</strong><span>{claim.company_name}</span><small>税号 {claim.company_tax_number} · {statusLabels[claim.status]}</small></div>
+    <div className={s.identity}><strong>{claim.applicant_name} · {claim.hotel_name}</strong><span>{claim.company_name}</span><small>税号 {claim.company_tax_number} · {claimStatusLabel(claim)}</small></div>
     {!online && <p className={s.warning}>离线模式 · 可继续填写和选择凭证。重新联网仅同步草稿，不会自动提交。</p>}
     {notice && <p role="status" className={s.info}>{notice}</p>}
     {error && <p role="alert" className={s.error}>{error}</p>}
@@ -162,7 +162,7 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
       {busy && <p role="status" className={s.info}>{busy}</p>}
       {online && <button type="button" className={s.textButton} disabled={!!busy} onClick={() => void discardLocal()}>刷新云端 / 处理版本冲突</button>}
     </>}
-    {['DRAFT', 'RETURNED', 'MANAGER_REVIEW', 'FINANCE_REVIEW', 'LEADER_REVIEW'].includes(claim.status) && <button className={s.textButton} disabled={!online || !!busy} onClick={() => void withdraw()}>撤回并结束此报销</button>}
+    {canWithdrawClaim(claim.status) && <button className={s.textButton} disabled={!online || !!busy} onClick={() => void withdraw()}>撤回并结束此报销</button>}
     {claim.attachments.length > 0 && <details><summary>已保存原始凭证（{claim.attachments.length}）</summary><div className={s.evidenceGrid}>{claim.attachments.map(a => <EvidencePreview key={a.id} identity={identity} claimId={claim.id} evidence={a} />)}</div></details>}
     {claim.reviews.length > 0 && <section><h3>审核记录</h3><ReviewHistory records={claim.reviews} identity={identity} claimId={claim.id} /></section>}
   </section>

@@ -16,6 +16,7 @@ public class FinanceController {
     public FinanceController(FinanceService service,FinanceEvidenceService evidence) { this.service=service;this.evidence=evidence; }
     @GetMapping("/context") public Map<String,Object> context() { return service.context(); }
     @GetMapping("/configuration") public Map<String,Object> configuration() { return service.configuration(); }
+    @PutMapping("/configuration") public Map<String,Object> configureBatch(@Valid @RequestBody FinanceModels.ConfigureBatch input) { return service.configureBatch(input); }
     @PutMapping("/hotels/{hotelId}/configuration") public Map<String,Object> configure(@PathVariable UUID hotelId,@Valid @RequestBody FinanceModels.StoreConfig input) { return service.configure(hotelId,input); }
     @PutMapping("/hotels/{hotelId}/categories/{categoryId}") public Map<String,Object> category(@PathVariable UUID hotelId,@PathVariable UUID categoryId,@Valid @RequestBody FinanceModels.Category input) { return service.category(hotelId,categoryId,input); }
     @PostMapping("/historical-invoices") public Map<String,Object> historical(@Valid @RequestBody FinanceModels.Historical input) { return service.historical(input); }

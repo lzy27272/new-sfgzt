@@ -29,7 +29,8 @@ public final class StoreResourceModels {
             BigDecimal purchaseFactor,
             @Size(max = 32) String issueUnit,
             BigDecimal issueFactor,
-            Boolean employeeUsageEnabled
+            Boolean employeeUsageEnabled,
+            @Valid UsageScopeInput usageScope
     ) {
     }
 
@@ -46,11 +47,19 @@ public final class StoreResourceModels {
             BigDecimal purchaseFactor,
             @Size(max = 32) String issueUnit,
             BigDecimal issueFactor,
-            Boolean employeeUsageEnabled
+            Boolean employeeUsageEnabled,
+            @Valid UsageScopeInput usageScope
     ) {
     }
 
     public record VersionCommand(long expectedVersion, String reason) {
+    }
+
+    public record UsageScopeInput(
+            @NotBlank String mode,
+            @Size(max = 200) List<@NotNull UUID> departmentIds,
+            @Size(max = 200) List<@NotNull UUID> positionIds
+    ) {
     }
 
     public record CreateMovementRequest(

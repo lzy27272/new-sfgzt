@@ -135,6 +135,7 @@ const AiDataFeature = lazy(() => import('./features/aiData/AiDataFeature'))
 const StoreResourceFeature = lazy(() => import('./features/storeResources/StoreResourceRoutes').then((module) => ({ default: module.StoreResourceRoutes })))
 const AcademyFeature = lazy(() => import('./features/academy/AcademyRoutes'))
 const FinanceFeature = lazy(() => import('./features/finance/FinanceRoutes'))
+const ProcurementFeature = lazy(() => import('./features/procurement/ProcurementRoutes'))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
 
@@ -2020,6 +2021,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       case 'store-resources': legacyPage = <StoreResourceFeature identity={activeIdentity} grantedPermissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'academy': legacyPage = <AcademyFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'finance': legacyPage = <FinanceFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
+      case 'procurement': legacyPage = <ProcurementFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'data-retention': legacyPage = <DataRetentionAdministration identity={activeIdentity} />; break
       case 'ai-data': legacyPage = <AiDataFeature key={activeIdentity.key} identity={activeIdentity} />; break
       case 'wecom-webhooks': legacyPage = <WecomStoreWebhookConfiguration identity={activeIdentity} permissions={activePermissions} />; break

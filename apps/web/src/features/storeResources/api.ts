@@ -2,6 +2,7 @@ import type { RoleContext } from '../../domain'
 import { apiBlob } from '../../api/client'
 import { featureApiMutation, featureApiRequest } from '../shared/featureApi'
 import {
+  parseUsageScopeOptions,
   parseFixedAsset,
   parseFixedAssets,
   parseHandoverParticipants,
@@ -22,6 +23,10 @@ import {
 } from './types'
 
 const hotelPath = (hotelId: string) => `/store-resources/hotels/${encodeURIComponent(hotelId)}`
+
+export async function loadItemUsageScopeOptions(identity: RoleContext, hotelId: string, signal?: AbortSignal) {
+  return parseUsageScopeOptions(await featureApiRequest<unknown>(`${hotelPath(hotelId)}/usage-scope-options`, identity, { signal }))
+}
 
 export async function loadStoreResourceHotels(identity: RoleContext, signal?: AbortSignal) {
   return parseStoreResourceHotels(await featureApiRequest<unknown>('/store-resources/hotels', identity, { signal }))
@@ -99,7 +104,7 @@ async function downloadStoreResourceImportFile(identity: RoleContext, path: stri
 }
 
 export async function downloadStoreResourceImportTemplate(identity: RoleContext, hotelId: string) {
-  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template`, '新店库存与固定资产导入模板_V2.xlsx')
+  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template`, '新店库存与固定资产导入模板_V3.xlsx')
 }
 
 export async function downloadStoreResourceImportErrors(identity: RoleContext, hotelId: string, jobId: string) {

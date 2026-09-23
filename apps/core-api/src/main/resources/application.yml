@@ -96,7 +96,13 @@ app:
       batch-size: ${WORK_EXPECTATION_SLA_BATCH_SIZE:100}
       fixed-delay-ms: ${WORK_EXPECTATION_SLA_FIXED_DELAY_MS:60000}
       initial-delay-ms: ${WORK_EXPECTATION_SLA_INITIAL_DELAY_MS:30000}
+  procurement:
+    scheduler-enabled: ${PROCUREMENT_SCHEDULER_ENABLED:false}
+    tenant-ids: ${PROCUREMENT_TENANT_IDS:}
+    fixed-delay-ms: ${PROCUREMENT_FIXED_DELAY_MS:60000}
+    initial-delay-ms: ${PROCUREMENT_INITIAL_DELAY_MS:30000}
   attachments:
+    # Procurement evidence lives in a child directory of this backed-up root.
     root: ${ATTACHMENT_STORAGE_ROOT:var/attachments}
     max-size-bytes: ${ATTACHMENT_MAX_SIZE_BYTES:20971520}
     scan:

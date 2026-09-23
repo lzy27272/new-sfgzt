@@ -96,6 +96,11 @@ public class StoreWorkUsageService {
                   and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN')
                 order by category,name,id
                 """, base(p).addValue("hotelId", hotelId)));
+        if (!issue) {
+            List<UUID> positions = jdbc.queryForList("select position_id from employee_position_assignment where tenant_id=:tenantId and id=:assignmentId",
+                    base(p).addValue("assignmentId", p.businessActorAssignmentId()), UUID.class);
+            if (!positions.isEmpty()) result.put("quick_list", quickList(p, hotelId, positions.getFirst()));
+        }
         if (businessDate != null && SHARED_ITEMS.contains(Objects.toString(itemCode, ""))) {
             List<UUID> employees = jdbc.queryForList("select employee_id from employee_position_assignment where tenant_id=:tenantId and id=:assignmentId",
                     base(p).addValue("assignmentId", p.businessActorAssignmentId()), UUID.class);
@@ -105,6 +110,78 @@ public class StoreWorkUsageService {
             }
         }
         return result;
+    }
+
+    @Transactional(readOnly = true)
+    public List<Map<String,Object>> quickListPositions(UUID hotelId) {
+        TenantPrincipal p = prepareHotel("store-resource.item-manage", hotelId);
+        return jdbc.queryForList("select id,name,code from position_definition where tenant_id=:tenantId and status='ACTIVE' and deleted_at is null and permanently_deleted_at is null order by name,id", base(p));
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String,Object> quickList(UUID hotelId, UUID positionId) {
+        TenantPrincipal p = prepareHotel("store-resource.item-manage", hotelId);
+        requireQuickListPosition(p, positionId);
+        var result = new LinkedHashMap<>(quickList(p, hotelId, positionId));
+        result.put("items", selectableItems(p, hotelId));
+        return result;
+    }
+
+    private List<Map<String,Object>> selectableItems(TenantPrincipal p, UUID hotelId) {
+        return jdbc.queryForList("""
+                select id,sku,name,category,specification,unit,issue_unit,issue_factor,row_version
+                from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
+                  and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN')
+                order by case category when 'LINEN' then 0 when 'CONSUMABLE' then 1 else 2 end,name,id
+                """, base(p).addValue("hotelId", hotelId));
+    }
+
+    private void requireQuickListPosition(TenantPrincipal p, UUID positionId) {
+        if (!Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from position_definition where tenant_id=:tenantId and id=:positionId and status='ACTIVE' and deleted_at is null and permanently_deleted_at is null)",
+                base(p).addValue("positionId", positionId), Boolean.class)))
+            throw new IllegalArgumentException("请选择有效岗位");
+    }
+
+    private Map<String,Object> quickList(TenantPrincipal p, UUID hotelId, UUID positionId) {
+        var params = base(p).addValue("hotelId", hotelId).addValue("positionId", positionId);
+        var versions = jdbc.queryForList("select row_version from store_usage_quick_list where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and position_id=:positionId", params, Long.class);
+        List<UUID> itemIds = versions.isEmpty() ? selectableItems(p, hotelId).stream().limit(100).map(item -> (UUID)item.get("id")).toList()
+                : jdbc.queryForList("select item_id from store_usage_quick_list_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and position_id=:positionId order by display_order", params, UUID.class);
+        return Map.of("position_id", positionId, "row_version", versions.isEmpty() ? -1L : versions.getFirst(), "configured", !versions.isEmpty(), "item_ids", itemIds);
+    }
+
+    @Transactional
+    public Map<String,Object> configureQuickList(UUID hotelId, UUID positionId, List<UUID> itemIds, long expectedVersion) {
+        TenantPrincipal p = prepareHotel("store-resource.item-manage", hotelId);
+        requireQuickListPosition(p, positionId);
+        if (itemIds == null || itemIds.size() > 100 || new HashSet<>(itemIds).size() != itemIds.size() || itemIds.stream().anyMatch(Objects::isNull))
+            throw new IllegalArgumentException("常用品最多100项，同一物品不能重复选择");
+        jdbc.queryForList("select pg_advisory_xact_lock(hashtextextended(:key,75))", new MapSqlParameterSource("key",p.tenantId()+":"+hotelId+":"+positionId));
+        var params = base(p).addValue("hotelId",hotelId).addValue("positionId",positionId).addValue("actorId",p.actorId());
+        var before = quickList(p,hotelId,positionId);
+        if (((Number)before.get("row_version")).longValue() != expectedVersion) throw conflict("常用品配置已被修改，请刷新后核对再保存");
+        // Lock selected items in UUID order; concurrent disabling cannot slip through configuration validation.
+        for (UUID id : itemIds.stream().sorted().toList()) {
+            var items = jdbc.queryForList("""
+                    select id from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
+                      and id=:itemId and status='ACTIVE' and employee_usage_enabled
+                      and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for share
+                    """, params.addValue("itemId",id));
+            if (items.isEmpty()) throw new IllegalArgumentException("所选物品已停用或不属于本门店，请刷新后核对");
+        }
+        jdbc.update("""
+                insert into store_usage_quick_list(tenant_id,hotel_org_unit_id,position_id,updated_by)
+                values(:tenantId,:hotelId,:positionId,:actorId)
+                on conflict(tenant_id,hotel_org_unit_id,position_id) do update
+                set row_version=store_usage_quick_list.row_version+1,updated_by=excluded.updated_by,updated_at=now()
+                """, params);
+        jdbc.update("delete from store_usage_quick_list_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and position_id=:positionId",params);
+        for (int order=0; order<itemIds.size(); order++) jdbc.update("""
+                insert into store_usage_quick_list_item(tenant_id,hotel_org_unit_id,position_id,item_id,display_order)
+                values(:tenantId,:hotelId,:positionId,:itemId,:displayOrder)
+                """,params.addValue("itemId",itemIds.get(order)).addValue("displayOrder",order));
+        audit.record("STORE_USAGE_QUICK_LIST_CONFIGURED","ORG_UNIT",hotelId,json(Map.of("before",before,"positionId",positionId,"itemIds",itemIds)));
+        return quickList(hotelId,positionId);
     }
 
     @Transactional(readOnly = true)
@@ -191,7 +268,7 @@ public class StoreWorkUsageService {
                 """, base(p).addValue("recordId", recordId));
         JsonNode input = read((String) record.get("payload")).path("inventoryQuantities");
         boolean typed = input.path("schemaVersion").isIntegralNumber()
-                && input.path("schemaVersion").canConvertToInt() && input.path("schemaVersion").intValue() == 1;
+                && input.path("schemaVersion").canConvertToInt() && Set.of(1,2).contains(input.path("schemaVersion").intValue());
         if (ISSUE_ITEMS.contains(Objects.toString(record.get("item_code"), ""))) {
             validateIssue(p, record, input);
             audit.record("WORK_ITEM_ISSUE_REGISTERED", "WORK_RECORD", recordId, input.toString());
@@ -225,6 +302,7 @@ public class StoreWorkUsageService {
             if (typed) throw conflict("门店尚未配置耗用审核人，请联系管理员配置后提交");
             return; // Legacy pilot stores retain their existing reporting flow until enabled.
         }
+        if (input.path("schemaVersion").asInt() == 2) input = normalizeDailyUsage(p, hotelId, input);
         if (!typed || !input.path("noUsage").isBoolean() || !input.path("lines").isArray()) {
             throw new IllegalArgumentException("请按门店物品清单填写实际耗用数量，或明确勾选本次无耗用");
         }
@@ -283,6 +361,30 @@ public class StoreWorkUsageService {
         }
         audit.record("WORK_USAGE_PENDING", "WORK_RECORD", recordId, json(Map.of("hotelId", hotelId, "lineCount", lines.size(), "noUsage", none)));
         notifyReviewer(p, recordId, reviewerId);
+    }
+
+    private JsonNode normalizeDailyUsage(TenantPrincipal p, UUID hotelId, JsonNode input) {
+        JsonNode normalized = DailyUsageInput.normalize(input);
+        // Check even zero/blank rows: old units, disabled and foreign items are never silently discarded.
+        List<JsonNode> lines = new ArrayList<>();
+        input.path("lines").forEach(lines::add);
+        lines.sort(Comparator.comparing(line -> UUID.fromString(line.path("itemId").asText()).toString()));
+        for (JsonNode line : lines) {
+            var items = jdbc.queryForList("""
+                    select * from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
+                      and id=:itemId and status='ACTIVE' and employee_usage_enabled
+                      and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for update
+                    """,base(p).addValue("hotelId",hotelId).addValue("itemId",UUID.fromString(line.path("itemId").asText())));
+            if (items.isEmpty()) throw conflict("清单中有已停用或不属于本门店的物品，请刷新后核对");
+            var item = items.getFirst();
+            if (!line.path("expectedItemVersion").isIntegralNumber() || !line.path("expectedItemVersion").canConvertToLong()
+                    || line.path("expectedItemVersion").asLong(-1) != ((Number)item.get("row_version")).longValue())
+                throw conflict(item.get("name")+" 的配置已变化，请刷新后核对数量和单位");
+            var units = StoreItemUnits.from(item);
+            if (!units.baseUnit().equals(line.path("unit").asText()) && !units.issueUnit().equals(line.path("unit").asText()))
+                throw new IllegalArgumentException("请选择物品支持的耗用单位");
+        }
+        return normalized;
     }
 
     @Transactional(readOnly = true)

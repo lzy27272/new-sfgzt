@@ -23,4 +23,3 @@ export function MapEditor({identity,initial,catalogue,onClose,onChanged}:{identi
     {!readOnly&&<footer className="ac-toolbar"><p className="ac-muted">发布时校验课件与题库；已有计划保留原版本。</p><button disabled={busy||!form.title||!form.position_id} onClick={()=>void save()}>保存草稿</button><button className="primary" disabled={busy||!form.title||!form.position_id} onClick={()=>void save(true)}>{busy?'校验与保存中…':'校验并发布地图'}</button></footer>}
   </section></div>
 }
-

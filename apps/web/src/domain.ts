@@ -18,6 +18,7 @@ export type ViewId =
   | 'store-resources'
   | 'finance'
   | 'academy'
+  | 'procurement'
   | 'data-retention'
   | 'ai-data'
   | 'wecom-webhooks'

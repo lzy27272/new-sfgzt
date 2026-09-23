@@ -155,6 +155,14 @@ class OperationalDailyAssignmentIntegrationTest {
             assertThat(workPackages.expectations(null, null, null, LocalDate.now(), null, null, true, 0, 200))
                     .as("current-day owned or explicitly shared work for " + positionCode).isNotEmpty();
         } finally { TenantContext.clear(); }
+        if ("HOUSEKEEPING_ATTENDANT".equals(positionCode)) {
+            assertThat(jdbc.queryForObject("""
+                    select (x.available_at at time zone 'Asia/Shanghai')::time=time '15:30'
+                      and (x.due_at at time zone 'Asia/Shanghai')::time=time '18:00'
+                    from work_expectation x join work_package_item i on i.tenant_id=x.tenant_id and i.id=x.work_package_item_id
+                    where x.position_assignment_id=? and x.business_date=current_date and i.item_code='HKA_DAILY_REPORT'
+                    """,Boolean.class,assignment)).isTrue();
+        }
         int count = jdbc.queryForObject("select count(*) from work_expectation where business_date = current_date", Integer.class);
         // Reopening / repeating automation must not create a second copy of today's work.
         sla.processTenantAsSystem(UUID.fromString(TENANT), 100, UUID.randomUUID());
@@ -259,7 +267,7 @@ class OperationalDailyAssignmentIntegrationTest {
         UUID position = jdbc.queryForObject("select id from position_definition where tenant_id = ? and code = ?",
                 UUID.class, UUID.fromString(TENANT), positionCode);
         UUID employee = UUID.fromString(json(postJson("/api/v1/org/employees", CEO, """
-                {"employeeNo":"INIT-%s","name":"岗位当天生成测试","hiredOn":"%s",
+                {"employeeNo":"INIT-%s","name":"岗位当天生成测试","employeeType":"REGULAR","hiredOn":"%s",
                  "loginName":"init.%s","temporaryPassword":"TempPass!2026"}
                 """.formatted(suffix, validFrom, suffix))).path("id").asText());
         return UUID.fromString(json(postJson("/api/v1/org/employees/" + employee + "/assignments", CEO, """

@@ -1,4 +1,31 @@
+import type { ItemUsageScope, UsageScopeOptions, UsageScopeOption } from './usageScope.ts'
+
 export type StoreResourceTab = 'items' | 'inventory' | 'usage' | 'laundry' | 'costs' | 'assets' | 'handovers'
+
+export function parseUsageScopeOptions(value: unknown): UsageScopeOptions {
+  if (!value || typeof value !== 'object') throw new Error('物品使用范围选项格式异常')
+  const row = value as Record<string, unknown>
+  const options = (entries: unknown): UsageScopeOption[] => {
+    if (!Array.isArray(entries)) throw new Error('物品使用范围选项格式异常')
+    return entries.map(entry => {
+      if (!entry || typeof entry !== 'object' || !['id', 'code', 'name'].every(key => typeof entry[key] === 'string' && entry[key].trim())) throw new Error('物品使用范围选项格式异常')
+      return { id: entry.id, code: entry.code, name: entry.name }
+    })
+  }
+  return { departments: options(row.departments), positions: options(row.positions) }
+}
+
+export function parseItemUsageScope(value: unknown): ItemUsageScope {
+  if (!value || typeof value !== 'object') throw new Error('物品使用范围格式异常')
+  const row = value as Record<string, unknown>
+  if (!['LEGACY', 'ALL_DEPARTMENTS', 'DEPARTMENTS'].includes(String(row.mode))) throw new Error('物品使用范围模式异常')
+  const ids = (input: unknown): string[] => {
+    if (!Array.isArray(input) || input.some(id => typeof id !== 'string' || !id) || new Set(input).size !== input.length) throw new Error('物品使用范围标识异常')
+    return input
+  }
+  const labels = parseUsageScopeOptions({ departments: row.departments ?? [], positions: row.positions ?? [] })
+  return { mode: row.mode as ItemUsageScope['mode'], departmentIds: ids(row.departmentIds), positionIds: ids(row.positionIds), ...labels }
+}
 
 export type StoreResourceHotel = {
   id: string
@@ -10,6 +37,7 @@ export type StoreResourceHotel = {
 export type StoreResourceItemCategory = 'LINEN' | 'CONSUMABLE' | 'CLEANING_SUPPLY' | 'OPERATING_ITEM'
 
 export type StoreResourceItem = {
+  usageScope?: ItemUsageScope
   employeeUsageEnabled?: boolean
   id: string
   hotelOrgUnitId: string
@@ -130,6 +158,7 @@ export type StoreResourceHandoverLine = {
 export type StoreResourceHandoverDetail = StoreResourceHandover & { lines: StoreResourceHandoverLine[] }
 
 export type StoreResourceItemInput = {
+  usageScope?: Pick<ItemUsageScope, 'mode' | 'departmentIds' | 'positionIds'>
   employeeUsageEnabled?: boolean
   sku: string
   name: string
@@ -184,6 +213,9 @@ export type StoreResourceImportError = {
 }
 
 export type StoreResourceImportPreviewItem = {
+  usageScope?: ItemUsageScope
+  usageDepartmentNames: string
+  usagePositionNames: string
   rowNumber: number
   sku: string
   name: string
@@ -221,6 +253,7 @@ export type StoreResourceImportJob = {
   canApply: boolean
   duplicateUpload: boolean
   summary: {
+    unconfiguredUsageCount: number
     itemCount: number
     assetCount: number
     openingQuantity: number
@@ -308,6 +341,7 @@ export function parseStoreResourceHotels(value: unknown): StoreResourceHotel[] {
 export function parseStoreResourceItem(value: unknown): StoreResourceItem {
   const row = object(value, 'item')
   return {
+    ...(row.usageScope ? { usageScope: parseItemUsageScope(row.usageScope) } : {}),
     id: text(row, 'id'), hotelOrgUnitId: text(row, 'hotelOrgUnitId', text(row, 'hotelId', '')), sku: text(row, 'sku'), name: text(row, 'name'),
     category: category(text(row, 'category', 'OPERATING_ITEM')), unit: text(row, 'unit'),
     unitCost: numberValue(row, 'unitCost'), minimumQuantity: numberValue(row, 'minimumQuantity'),
@@ -430,23 +464,28 @@ export function parseStoreResourceImportJob(value: unknown): StoreResourceImport
   }
   const summary = object(row.summary ?? {}, 'import-summary')
   const preview = object(row.preview ?? {}, 'import-preview')
+  // Invalid rows deliberately contain blank required cells; keep their row errors visible.
+  // Successful previews still require the complete server response contract.
+  const previewText = (entry: JsonObject, key: string) => text(entry, key, status === 'INVALID' ? '未填写' : undefined)
   const parseItem = (entry: unknown): StoreResourceImportPreviewItem => {
     const item = object(entry, 'import-item')
     return {
-      rowNumber: numberValue(item, 'rowNumber'), sku: text(item, 'sku'), name: text(item, 'name'),
-      category: category(text(item, 'category', 'OPERATING_ITEM')), unit: text(item, 'unit'),
+      ...(item.usageScope ? { usageScope: parseItemUsageScope(item.usageScope) } : {}),
+      usageDepartmentNames: text(item, 'usageDepartmentNames', ''), usagePositionNames: text(item, 'usagePositionNames', ''),
+      rowNumber: numberValue(item, 'rowNumber'), sku: previewText(item, 'sku'), name: previewText(item, 'name'),
+      category: category(text(item, 'category', 'OPERATING_ITEM')), unit: previewText(item, 'unit'),
       unitCost: numberValue(item, 'unitCost'), minimumQuantity: numberValue(item, 'minimumQuantity'),
       openingQuantity: numberValue(item, 'openingQuantity'),
-      specification: text(item, 'specification', ''), purchaseUnit: text(item, 'purchaseUnit', text(item, 'unit')),
-      purchaseFactor: numberValue(item, 'purchaseFactor', 1), issueUnit: text(item, 'issueUnit', text(item, 'unit')),
+      specification: text(item, 'specification', ''), purchaseUnit: text(item, 'purchaseUnit', previewText(item, 'unit')),
+      purchaseFactor: numberValue(item, 'purchaseFactor', 1), issueUnit: text(item, 'issueUnit', previewText(item, 'unit')),
       issueFactor: numberValue(item, 'issueFactor', 1),
     }
   }
   const parseAsset = (entry: unknown): StoreResourceImportPreviewAsset => {
     const asset = object(entry, 'import-asset')
     return {
-      rowNumber: numberValue(asset, 'rowNumber'), assetCode: text(asset, 'assetCode'), name: text(asset, 'name'),
-      category: text(asset, 'category'), unit: text(asset, 'unit'), originalValue: numberValue(asset, 'originalValue'),
+      rowNumber: numberValue(asset, 'rowNumber'), assetCode: previewText(asset, 'assetCode'), name: previewText(asset, 'name'),
+      category: previewText(asset, 'category'), unit: previewText(asset, 'unit'), originalValue: numberValue(asset, 'originalValue'),
       acquiredOn: optionalText(asset, 'acquiredOn'), location: optionalText(asset, 'location'), status: text(asset, 'status', 'ACTIVE'),
     }
   }
@@ -462,6 +501,7 @@ export function parseStoreResourceImportJob(value: unknown): StoreResourceImport
     rowCount: numberValue(row, 'rowCount'), validRowCount: numberValue(row, 'validRowCount'), errorCount: numberValue(row, 'errorCount'),
     canApply: booleanValue(row, 'canApply'), duplicateUpload: booleanValue(row, 'duplicateUpload'),
     summary: {
+      unconfiguredUsageCount: numberValue(summary, 'unconfiguredUsageCount'),
       itemCount: numberValue(summary, 'itemCount'), assetCount: numberValue(summary, 'assetCount'),
       openingQuantity: numberValue(summary, 'openingQuantity'), openingInventoryValue: numberValue(summary, 'openingInventoryValue'),
       assetOriginalValue: numberValue(summary, 'assetOriginalValue'),

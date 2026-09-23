@@ -567,6 +567,93 @@ class StoreWorkUsageIntegrationTest {
         call(post("/api/v1/org/positions/"+positionId+"/profile/publish"),ADMIN,
                 Map.of("expectedProfileVersion",draft.path("draftRowVersion").asLong(),"expectedPositionVersion",position.path("rowVersion").asLong()),200);
     }
+    @Test void quickListsAreHotelPositionScopedOrderedVersionedAndPermissionChecked() throws Exception {
+        String position=jdbc.queryForObject("select position_id::text from employee_position_assignment where id=?::uuid",String.class,EA);
+        String endpoint="/api/v1/store-resources/hotels/"+H+"/usage-quick-lists/"+position;
+        String brush=item("CONSUMABLE","支","支",1,10,2), linen=item("LINEN","条","条",1,10,2);
+        var before=call(get(endpoint),ADMIN,null,200);
+        var body=Map.of("itemIds",List.of(linen,brush),"expectedVersion",before.path("row_version").asLong());
+        call(put(endpoint),EMP,body,403);
+        var saved=call(put(endpoint),ADMIN,body,200);
+        assertThat(saved.path("item_ids")).isEqualTo(mapper.valueToTree(List.of(linen,brush)));
+        call(put(endpoint),ADMIN,body,409);
+        var catalog=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",D),EMP,null,200);
+        assertThat(catalog.path("quick_list").path("item_ids")).isEqualTo(mapper.valueToTree(List.of(linen,brush)));
+        assertThat(catalog.toString()).doesNotContain("unit_cost","inventory_value","current_quantity");
+        var other=call(get("/api/v1/store-resources/hotels/"+OTHER_H+"/usage-quick-lists/"+position),ADMIN,null,200);
+        assertThat(other.path("configured").asBoolean()).isFalse();
+        call(put("/api/v1/store-resources/hotels/"+OTHER_H+"/usage-quick-lists/"+position),ADMIN,Map.of("itemIds",List.of(brush),"expectedVersion",-1),400);
+        call(get("/api/v1/store-resources/hotels/"+OTHER_H+"/usage-quick-lists/"+position),GM,null,403);
+        call(put(endpoint),ADMIN,Map.of("itemIds",List.of(brush,brush),"expectedVersion",saved.path("row_version").asLong()),400);
+        jdbc.update("update store_resource_item set employee_usage_enabled=false,row_version=row_version+1 where id=?::uuid",linen);
+        call(put(endpoint),ADMIN,Map.of("itemIds",List.of(linen),"expectedVersion",saved.path("row_version").asLong()),400);
+        call(put(endpoint),ADMIN,Map.of("itemIds",List.of(),"expectedVersion",saved.path("row_version").asLong()),200);
+        var empty=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",D),EMP,null,200);
+        assertThat(empty.path("quick_list").path("configured").asBoolean()).isTrue();
+        assertThat(empty.path("quick_list").path("item_ids").isEmpty()).isTrue();
+        call(get("/api/v1/store-resources/hotels/"+H+"/usage-quick-list-positions"),ADMIN,null,200);
+    }
+
+    @Test void quickEntryRetainsZeroBlankAndPositiveSnapshotAndPostsOnlyAfterReview() throws Exception {
+        usageItemCode="NSA_DAILY_HANDOVER"; setup();
+        String brush=item("CONSUMABLE","支","支",1,10,2), linen=item("LINEN","条","条",1,10,2), soap=item("CLEANING_SUPPLY","毫升","毫升",1,10,2);
+        var input=new LinkedHashMap<String,Object>(Map.of("schemaVersion",2,"remainingUnusedConfirmed",false,"lines",List.of(line(brush,"3","支",0),line(linen,"0","条",0),line(soap,"","毫升",0))));
+        call(post("/api/v1/work-data/records"),EMP,recordBody(input,false),400);
+        input.put("remainingUnusedConfirmed",true);
+        String record=call(post("/api/v1/work-data/records"),EMP,recordBody(input,false),201).path("id").asText();
+        balance(brush,"10","20");
+        assertThat(mapper.readTree(jdbc.queryForObject("select payload::text from work_record where id=?::uuid",String.class,record)).path("inventoryQuantities")).isEqualTo(mapper.valueToTree(input));
+        assertThat(jdbc.queryForObject("select count(*) from store_work_usage_line where work_record_id=?::uuid",Integer.class,record)).isEqualTo(1);
+        review(record,GM,"APPROVED",0,200); review(record,GM,"APPROVED",0,200);
+        balance(brush,"7","14"); balance(linen,"10","20"); balance(soap,"10","20");
+        assertThat(movements(record)).isEqualTo(1);
+    }
+
+    @Test void quickEntryChecksVersionsAndScopeEvenForZerosAndConfirmedBlanks() throws Exception {
+        usageItemCode="NSA_DAILY_HANDOVER"; setup();
+        String brush=item("CONSUMABLE","支","支",1,10,2);
+        for (String quantity:List.of("0","")) {
+            call(post("/api/v1/work-data/records"),EMP,recordBody(Map.of("schemaVersion",2,"remainingUnusedConfirmed",true,"lines",List.of(line(brush,quantity,"支",99))),false),409);
+            call(post("/api/v1/work-data/records"),EMP,recordBody(Map.of("schemaVersion",2,"remainingUnusedConfirmed",true,"lines",List.of(line(UUID.randomUUID().toString(),quantity,"支",0))),false),409);
+        }
+        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isZero();
+        var input=Map.of("schemaVersion",2,"remainingUnusedConfirmed",false,"lines",List.of(line(brush,"0","支",0)));
+        String record=call(post("/api/v1/work-data/records"),EMP,recordBody(input,false),201).path("id").asText();
+        review(record,GM,"APPROVED",0,200); balance(brush,"10","20"); assertThat(movements(record)).isZero();
+    }
+
+    @Test void dailyQuickEntryDraftPreservesBlankAndZeroUntilOneAtomicReportSubmission() throws Exception {
+        usageItemCode="HKA_DAILY_REPORT"; setup();
+        LocalDate date=LocalDate.now().minusDays(9);
+        jdbc.update("update work_package_allocation set valid_from=? where id=(select work_package_allocation_id from work_expectation where id=?::uuid)",date,expectation);
+        jdbc.update("update work_expectation set business_date=? where id=?::uuid",date,expectation);
+        String workItem=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
+        UUID revision=createUsageDailyReport(version,workItem,date);
+        String report=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
+        String brush=item("CONSUMABLE","支","支",1,100,0.5), linen=item("LINEN","条","条",1,10,2), soap=item("CLEANING_SUPPLY","毫升","毫升",1,10,2);
+        var quantities=new LinkedHashMap<String,Object>(Map.of("schemaVersion",2,"remainingUnusedConfirmed",false,"commonItemIds",List.of(brush,linen,soap),"lines",List.of(line(brush,"3","支",0),line(linen,"0","条",0),line(soap,"","毫升",0))));
+        var initial=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+        var draft=new LinkedHashMap<String,Object>(Map.of("revisionId",revision,"expectedVersion",initial.path("rowVersion").asLong(),"items",List.of(),"inventoryQuantities",quantities,"roomCounts",Map.of("checkoutRooms",19,"stayoverRooms",6)));
+        var saved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,draft,200);
+        var reopened=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+        assertThat(reopened.path("revisions").get(0).path("payloadSnapshot").path("inventoryQuantities")).isEqualTo(mapper.valueToTree(quantities));
+        call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),400);
+        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isZero();
+        quantities.put("remainingUnusedConfirmed",true); draft.put("expectedVersion",saved.path("rowVersion").asLong());
+        saved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,draft,200);
+        var command=Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong());
+        String key=UUID.randomUUID().toString();
+        call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",key),EMP,command,200);
+        // Report commands reject stale row versions before checking an idempotency key.
+        call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",key),EMP,command,409);
+        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isEqualTo(1);
+        String record=jdbc.queryForObject("select id::text from work_record where work_expectation_id=?::uuid",String.class,expectation);
+        balance(brush,"100","50"); assertThat(movements(record)).isZero();
+        assertThat(mapper.readTree(jdbc.queryForObject("select payload_snapshot::text from daily_report_revision where id=?",String.class,revision)).path("inventoryQuantities")).isEqualTo(mapper.valueToTree(quantities));
+        review(record,GM,"APPROVED",0,200); balance(brush,"97","48.5"); balance(linen,"10","20"); balance(soap,"10","20");
+        assertThat(movements(record)).isEqualTo(1);
+    }
+
     private String item(String category,String base,String unit,int factor,int qty,double cost) throws Exception {
         String id=call(post("/api/v1/store-resources/hotels/"+H+"/items"),ADMIN,Map.of("sku",UUID.randomUUID().toString(),"name","耗用测试物品","category",category,"unit",base,"unitCost",cost,"minimumQuantity",0,"issueUnit",unit,"issueFactor",factor),201).path("id").asText();
         if(qty>0)receipt(id,qty,cost); return id;

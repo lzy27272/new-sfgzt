@@ -1,0 +1,37 @@
+.layout { display: grid; grid-template-columns: minmax(0,860px) minmax(240px,320px); align-items: start; gap: 24px; color: #183e52; }
+.main, .side { display: grid; gap: 16px; min-width: 0; }
+.card, .fold { min-width: 0; padding: 20px; border: 1px solid #dce5eb; border-radius: 12px; background: white; }
+.card h2, .fold summary strong { font-size: 22px; font-weight: 750; margin: 0; color: #183e52; }
+.card header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.card header > span, .card small, .saved small, .history small { color: #6f8190; font-size: 14px; line-height: 1.6; display: block; }
+.card p { line-height: 1.6; }
+.fold summary { position: relative; padding-right: 24px; cursor: pointer; list-style: none; min-height: 44px; }
+.fold summary::-webkit-details-marker { display: none; }
+.fold summary::after { position: absolute; right: 4px; top: 8px; content: ''; height: 9px; width: 9px; border-right: 2px solid #38576a; border-bottom: 2px solid #38576a; transform: rotate(45deg); }
+.fold[open] summary::after { transform: rotate(225deg); top: 13px; }
+.fold summary > span { display: block; margin-top: 6px; color: #6f8190; font-size: 14px; line-height: 1.6; }
+.fold > section { border: 0; padding: 16px 0 0; }
+.fold > section > header { display: none; }
+.rooms { margin: 14px 0 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.rooms label { display: grid; gap: 8px; min-width: 0; color: #6f8190; font-size: 16px; font-weight: 400; }
+.rooms input, .manualItem textarea { width: 100%; min-width: 0; min-height: 44px; border: 1px solid #cedbe5; border-radius: 8px; padding: 12px; background: white; color: #183e52; font-size: 16px; }
+.manualItem textarea { resize: vertical; min-height: 126px; margin: 14px 0 6px; line-height: 1.65; font-weight: 400; }
+.rooms input:focus, .manualItem textarea:focus { outline: 2px solid #2679e9; outline-offset: 2px; }
+.readonly { padding: 12px; border-radius: 8px; color: #6f8190; background: #f4f7fa; font-size: 14px; }
+.saved { background: #eaf7ee; color: #178345; padding: 14px 18px; border-radius: 10px; line-height: 1.6; }
+.submit > div { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.submit button { min-height: 48px; font-size: 16px; }
+.submit p { color: #8d641a; font-size: 14px; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.hygiene section { padding: 20px; border-radius: 12px; }
+.hygiene fieldset { border: 0; padding: 0; margin: 12px 0 0; min-width: 0; }
+.hygiene textarea { font-weight: 400; }
+.hygiene h2 { font-size: 22px; }
+.hygiene label, .hygiene textarea { font-size: 16px; }
+.history { margin-top: 14px; font-size: 14px; overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .layout { grid-template-columns: minmax(0,1fr); } }
+@media (max-width: 600px) { .card, .fold, .hygiene section { padding: 14px; } .card h2, .fold summary strong, .hygiene h2 { font-size: 20px; } }
+.reportHeader { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 0 16px; padding: 4px 0; }
+.reportHeader h1 { margin: 0 0 6px; color: #10374e; font-size: 26px; line-height: 1.3; }
+.reportHeader p { margin: 0; color: #6f8190; font-size: 14px; }
+.reportHeader button { min-height: 44px; flex-shrink: 0; }

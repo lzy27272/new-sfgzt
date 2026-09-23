@@ -39,4 +39,3 @@ public final class AcademyModels {
     public record Responses(@NotNull Map<String,List<Integer>> answers, int version) {}
     public record ExtraAttempt(@NotNull UUID stageId, @NotBlank @Size(max=500) String reason) {}
 }
-

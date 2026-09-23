@@ -45,6 +45,7 @@ public class StoreResourceService {
     private final EffectiveIdentityService effectiveIdentityService;
     private final AuditWriter auditWriter;
     private final ObjectMapper objectMapper;
+    private final StoreItemUsageScopes usageScopes;
 
     public StoreResourceService(
             NamedParameterJdbcTemplate jdbc,
@@ -52,7 +53,8 @@ public class StoreResourceService {
             AccessPolicy accessPolicy,
             EffectiveIdentityService effectiveIdentityService,
             AuditWriter auditWriter,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            StoreItemUsageScopes usageScopes
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -60,6 +62,7 @@ public class StoreResourceService {
         this.effectiveIdentityService = effectiveIdentityService;
         this.auditWriter = auditWriter;
         this.objectMapper = objectMapper;
+        this.usageScopes = usageScopes;
     }
 
     @Transactional(readOnly = true)
@@ -103,7 +106,7 @@ public class StoreResourceService {
                       on balance.tenant_id = item.tenant_id and balance.hotel_org_unit_id = item.hotel_org_unit_id
                      and balance.item_id = item.id
                     where item.tenant_id = :tenantId and item.hotel_org_unit_id = :hotelId
-                      and item.status = 'ACTIVE' and balance.quantity < item.minimum_quantity) as low_stock_count,
+                      and item.status = 'ACTIVE' and balance.quantity <= item.minimum_quantity) as low_stock_count,
                   (select count(*) from store_fixed_asset asset
                     where asset.tenant_id = :tenantId and asset.hotel_org_unit_id = :hotelId
                       and asset.status <> 'RETIRED') as asset_count,
@@ -122,7 +125,7 @@ public class StoreResourceService {
     @Transactional(readOnly = true)
     public List<Map<String, Object>> items(UUID hotelId, boolean includeInactive) {
         TenantPrincipal principal = prepareHotel("store-resource.read", hotelId);
-        return jdbc.queryForList("""
+        return usageScopes.decorate(principal.tenantId(), hotelId, jdbc.queryForList("""
                 select item.id, item.hotel_org_unit_id, item.sku, item.name,
                        item.category, item.unit, item.unit_cost, item.minimum_quantity,
                        item.employee_usage_enabled, item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
@@ -132,8 +135,10 @@ public class StoreResourceService {
                         or exists (select 1 from store_work_usage_line usage_line
                           where usage_line.tenant_id=item.tenant_id and usage_line.item_id=item.id)
                         or exists (select 1 from store_laundry_rate rate
-                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)) as base_unit_locked,
-                       item.status, item.row_version,
+                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)
+                        or exists (select 1 from procurement_line purchase
+                          where purchase.tenant_id=item.tenant_id and purchase.item_id=item.id)) as base_unit_locked,
+                       item.status, item.row_version, item.usage_scope_mode,
                        coalesce(balance.quantity, 0) as current_quantity,
                        coalesce(balance.inventory_value, 0) as inventory_value,
                        item.created_at, item.updated_at
@@ -145,12 +150,20 @@ public class StoreResourceService {
                 where item.tenant_id = :tenantId and item.hotel_org_unit_id = :hotelId
                   and (:includeInactive = true or item.status = 'ACTIVE')
                 order by item.status, item.category, item.name
-                """, hotel(principal, hotelId).addValue("includeInactive", includeInactive));
+                """, hotel(principal, hotelId).addValue("includeInactive", includeInactive)));
+    }
+
+    @Transactional(readOnly = true)
+    public StoreItemUsageScopes.Options usageScopeOptions(UUID hotelId) {
+        TenantPrincipal principal = prepareHotel("store-resource.item-manage", hotelId);
+        return usageScopes.options(principal.tenantId(), hotelId, false);
     }
 
     @Transactional
     public Map<String, Object> createItem(UUID hotelId, StoreResourceModels.CreateItemRequest request) {
         TenantPrincipal principal = prepareHotel("store-resource.item-manage", hotelId);
+        var usageScope = request.usageScope() == null ? null : usageScopes.validate(request.usageScope(),
+                usageScopes.options(principal.tenantId(), hotelId, true));
         String category = enumValue(request.category(), ITEM_CATEGORIES, "物品分类");
         StoreItemUnits units = new StoreItemUnits(request.unit(), request.purchaseUnit(), request.purchaseFactor(),
                 request.issueUnit(), request.issueFactor());
@@ -185,9 +198,12 @@ public class StoreResourceService {
                   (tenant_id, hotel_org_unit_id, item_id, quantity, inventory_value)
                 values (:tenantId, :hotelId, :id, 0, 0)
                 """, params);
+        usageScopes.save(principal.tenantId(), hotelId, id, usageScope);
+        var created = requireItem(principal, hotelId, id);
         audit(principal, "STORE_RESOURCE_ITEM_CREATED", "STORE_RESOURCE_ITEM", id,
-                Map.of("hotelId", hotelId, "sku", clean(request.sku()), "category", category, "units", units));
-        return requireItem(principal, hotelId, id);
+                Map.of("hotelId", hotelId, "sku", clean(request.sku()), "category", category, "units", units,
+                        "usageScope", created.get("usage_scope")));
+        return created;
     }
 
     @Transactional
@@ -200,9 +216,13 @@ public class StoreResourceService {
         if (((Number) current.get("row_version")).longValue() != request.expectedVersion()) {
             throw conflict("物品配置已变化，请刷新后重试");
         }
+        var beforeDetails = requireItem(principal, hotelId, itemId);
+        var beforeScope = beforeDetails.get("usage_scope");
+        var usageScope = request.usageScope() == null ? null : usageScopes.validate(request.usageScope(),
+                usageScopes.options(principal.tenantId(), hotelId, true));
         // Omitted optional fields from older clients preserve existing conversion configuration.
         boolean baseChanged = !clean(request.unit()).equals(current.get("unit"));
-        if (baseChanged && Boolean.TRUE.equals(requireItem(principal, hotelId, itemId).get("base_unit_locked"))) {
+        if (baseChanged && Boolean.TRUE.equals(beforeDetails.get("base_unit_locked"))) {
             throw conflict("该物品已有库存、耗用记录或洗涤配置，不能修改基础单位；规格变更请新建物品");
         }
         if (!category.equals(current.get("category")) && jdbc.queryForObject(
@@ -246,10 +266,13 @@ public class StoreResourceService {
             throw conflict("该门店已存在相同物品编码");
         }
         changed(changed, "物品配置已变化，请刷新后重试");
+        usageScopes.save(principal.tenantId(), hotelId, itemId, usageScope);
+        var updated = requireItem(principal, hotelId, itemId);
         audit(principal, "STORE_RESOURCE_ITEM_UPDATED", "STORE_RESOURCE_ITEM", itemId,
                 Map.of("hotelId", hotelId, "sku", clean(request.sku()),
-                        "unitsBefore", StoreItemUnits.from(current), "unitsAfter", units));
-        return requireItem(principal, hotelId, itemId);
+                        "unitsBefore", StoreItemUnits.from(current), "unitsAfter", units,
+                        "usageScopeBefore", beforeScope, "usageScopeAfter", updated.get("usage_scope")));
+        return updated;
     }
 
     @Transactional
@@ -425,6 +448,21 @@ public class StoreResourceService {
         var units = new StoreItemUnits(unit, unit, BigDecimal.ONE, unit, BigDecimal.ONE);
         return postMovementFact(principal, hotelId, request, item, request.movementType(), delta, units,
                 unit, BigDecimal.ONE, delta, key, sha256(key), "LAUNDRY", receiptId, reversal ? originalValue : null);
+    }
+
+    /** Internal entry point: caller holds the procurement receipt/order locks and authorizes its configured reviewer. */
+    Map<String, Object> postProcurementReceipt(TenantPrincipal principal, UUID hotelId, UUID receiptId,
+            UUID itemId, String baseUnit, BigDecimal quantity, BigDecimal receivedValue) {
+        var item = lockItem(principal, hotelId, itemId);
+        if (!"ACTIVE".equals(item.get("status")) || !baseUnit.equals(item.get("unit"))) {
+            throw conflict("采购物品已停用或基础单位发生变化，请核对后再复核入库");
+        }
+        String key = "procurement:" + receiptId + ":" + itemId;
+        var request = new StoreResourceModels.CreateMovementRequest(itemId, "RECEIPT", quantity,
+                receivedValue.divide(quantity, 4, RoundingMode.HALF_UP), "采购收货复核入库", null, baseUnit, null);
+        var units = new StoreItemUnits(baseUnit, baseUnit, BigDecimal.ONE, baseUnit, BigDecimal.ONE);
+        return postMovementFact(principal, hotelId, request, item, "RECEIPT", quantity, units,
+                baseUnit, BigDecimal.ONE, quantity, key, sha256(key), "PROCUREMENT", receiptId, receivedValue);
     }
 
     private Map<String, Object> postMovementFact(TenantPrincipal principal, UUID hotelId,
@@ -1085,7 +1123,7 @@ public class StoreResourceService {
     }
 
     private Map<String, Object> requireItem(TenantPrincipal principal, UUID hotelId, UUID itemId) {
-        return jdbc.queryForMap("""
+        return usageScopes.decorate(principal.tenantId(), hotelId, List.of(jdbc.queryForMap("""
                 select item.id, item.hotel_org_unit_id, item.sku, item.name,
                        item.category, item.unit, item.unit_cost, item.minimum_quantity,
                        item.employee_usage_enabled, item.specification, item.purchase_unit, item.purchase_factor, item.issue_unit, item.issue_factor,
@@ -1095,8 +1133,10 @@ public class StoreResourceService {
                         or exists (select 1 from store_work_usage_line usage_line
                           where usage_line.tenant_id=item.tenant_id and usage_line.item_id=item.id)
                         or exists (select 1 from store_laundry_rate rate
-                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)) as base_unit_locked,
-                       item.status, item.row_version,
+                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)
+                        or exists (select 1 from procurement_line purchase
+                          where purchase.tenant_id=item.tenant_id and purchase.item_id=item.id)) as base_unit_locked,
+                       item.status, item.row_version, item.usage_scope_mode,
                        coalesce(balance.quantity, 0) as current_quantity,
                        coalesce(balance.inventory_value, 0) as inventory_value,
                        item.created_at, item.updated_at
@@ -1104,7 +1144,7 @@ public class StoreResourceService {
                 left join store_inventory_balance balance on balance.tenant_id = item.tenant_id
                   and balance.hotel_org_unit_id = item.hotel_org_unit_id and balance.item_id = item.id
                 where item.tenant_id = :tenantId and item.hotel_org_unit_id = :hotelId and item.id = :itemId
-                """, hotel(principal, hotelId).addValue("itemId", itemId));
+                """, hotel(principal, hotelId).addValue("itemId", itemId)))).getFirst();
     }
 
     private Map<String, Object> lockItem(TenantPrincipal principal, UUID hotelId, UUID itemId) {

@@ -19,4 +19,3 @@ export default function AcademyAdmin({identity,tab}:{identity:ApiIdentity;tab:st
     {importing&&<QuestionImport identity={identity} catalogue={data} onClose={()=>setImporting(false)} onChanged={refresh}/>}
   </>
 }
-

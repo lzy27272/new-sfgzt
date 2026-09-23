@@ -43,7 +43,7 @@ import java.util.UUID;
 @Service
 public class StoreResourceImportService {
     private static final String IMPORT_TYPE = "STORE_RESOURCE_INITIALIZATION";
-    private static final int TEMPLATE_VERSION = 2;
+    private static final int TEMPLATE_VERSION = 3;
     private static final String ITEM_SHEET = "物品与期初库存";
     private static final String ASSET_SHEET = "固定资产";
     private static final String XLSX_MEDIA_TYPE =
@@ -52,7 +52,7 @@ public class StoreResourceImportService {
             "物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*");
     private static final List<String> ITEM_TEMPLATE_HEADERS = List.of(
             "物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*",
-            "规格型号", "采购单位", "采购换算比例", "领用耗用单位", "领用耗用换算比例");
+            "规格型号", "采购单位", "采购换算比例", "领用耗用单位", "领用耗用换算比例", "适用部门*", "适用岗位");
     private static final List<String> ASSET_HEADERS = List.of(
             "资产编号*", "资产名称*", "资产分类*", "规格型号", "序列号", "计量单位*",
             "原值*", "购置日期", "存放位置", "责任人工号", "责任人岗位编码", "状态");
@@ -64,6 +64,7 @@ public class StoreResourceImportService {
     private final ObjectMapper objectMapper;
     private final XlsxWorkbook workbook;
     private final AttachmentMalwareScanner malwareScanner;
+    private final StoreItemUsageScopes usageScopes;
 
     public StoreResourceImportService(
             NamedParameterJdbcTemplate jdbc,
@@ -72,7 +73,8 @@ public class StoreResourceImportService {
             AuditWriter auditWriter,
             ObjectMapper objectMapper,
             XlsxWorkbook workbook,
-            AttachmentMalwareScanner malwareScanner
+            AttachmentMalwareScanner malwareScanner,
+            StoreItemUsageScopes usageScopes
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -81,11 +83,13 @@ public class StoreResourceImportService {
         this.objectMapper = objectMapper;
         this.workbook = workbook;
         this.malwareScanner = malwareScanner;
+        this.usageScopes = usageScopes;
     }
 
     @Transactional(readOnly = true)
     public ImportFile template(UUID hotelId) {
-        prepareHotel("store-resource.import-preview", hotelId);
+        TenantPrincipal principal = prepareHotel("store-resource.import-preview", hotelId);
+        var options = usageScopes.options(principal.tenantId(), hotelId, false);
         LinkedHashMap<String, List<List<String>>> sheets = new LinkedHashMap<>();
         sheets.put("填写说明", List.of(
                 List.of("新店库存与固定资产导入说明"),
@@ -97,11 +101,19 @@ public class StoreResourceImportService {
                 List.of("6", "资产状态可填：在用、维修中、损坏、盘亏、已退役；留空默认为在用。"),
                 List.of("7", "当前版本为仅新增模式：门店内重复SKU或资产编号会被拦截，不会覆盖原数据。"),
                 List.of("8", "规格和采购/领用耗用单位为选填；不填则沿用基础单位。1个采购或领用耗用单位=换算比例个基础单位；异名单位必须填比例，同名单位比例必须相同。"),
-                List.of("9", "例如基础单位支、采购单位箱、采购换算比例100；2箱期初库存请填200支，单支成本填0.5而非整箱50。旧V1模板仍可导入。")
+                List.of("9", "例如基础单位支、采购单位箱、采购换算比例100；2箱期初库存请填200支，单支成本填0.5而非整箱50。旧V1/V2模板仍可导入，缺少使用范围的物品标为待配置，不自动改成全店通用。"),
+                List.of("10", "适用部门必填：全店通用，或部门岗位参考表中的本门店有效部门名称/编码；多项用分号分隔，例如前厅部;客房部。名称重名时请填写编码。"),
+                List.of("11", "适用岗位选填：使用集团有效岗位标准名称/编码，多项用分号分隔；留空表示所选部门内全部岗位，不表示全店所有部门。岗位定义不以当前是否有人任职为条件。"),
+                List.of("12", "参考表仅供填写，不参与导入；系统以后台当前有效数据为准校验。此配置不拆分库存、不改变权限、审批或常用品清单；按范围快捷领用在后续接入。")
         ));
         sheets.put(ITEM_SHEET, List.of(ITEM_TEMPLATE_HEADERS));
         sheets.put(ASSET_SHEET, List.of(ASSET_HEADERS));
-        return new ImportFile("新店库存与固定资产导入模板_V2.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
+        List<List<String>> references = new ArrayList<>();
+        references.add(List.of("类型", "编码", "名称", "适用说明"));
+        options.departments().forEach(option -> references.add(List.of("部门", option.code(), option.name(), "当前门店有效部门")));
+        options.positions().forEach(option -> references.add(List.of("岗位", option.code(), option.name(), "集团有效岗位标准；与所选部门取交集")));
+        sheets.put("部门岗位参考", references);
+        return new ImportFile("新店库存与固定资产导入模板_V3.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
     }
 
     @Transactional
@@ -238,6 +250,16 @@ public class StoreResourceImportService {
         List<ImportError> conflicts = databaseConflicts(principal, hotelId, payload);
         if (!conflicts.isEmpty()) throw conflict("正式数据已变化，请重新上传并预检：" + conflicts.getFirst().message());
         requireAssignmentsStillValid(principal, hotelId, payload);
+        if (payload.items().stream().anyMatch(item -> item.usageScope() != null)) {
+            var options = usageScopes.options(principal.tenantId(), hotelId, true);
+            for (ImportedItem item : payload.items()) {
+                try { usageScopes.validate(item.usageScope(), options); }
+                catch (StoreItemUsageScopes.ScopeValidationException exception) {
+                    throw conflict("物品与期初库存第" + item.rowNumber() + "行" + exception.field()
+                            + "已变化，请重新上传并预检：" + exception.getMessage());
+                }
+            }
+        }
 
         BigDecimal openingQuantity = BigDecimal.ZERO;
         BigDecimal openingValue = BigDecimal.ZERO;
@@ -265,6 +287,7 @@ public class StoreResourceImportService {
                     values (:itemId, :tenantId, :hotelId, :sku, :name, :category, :unit,
                             :unitCost, :minimumQuantity, :specification, :purchaseUnit, :purchaseFactor, :issueUnit, :issueFactor, :actorId)
                     """, params);
+            usageScopes.save(principal.tenantId(), hotelId, itemId, item.usageScope());
             BigDecimal quantity = scale4(item.openingQuantity());
             BigDecimal value = quantity.multiply(scale4(item.unitCost())).setScale(4, RoundingMode.HALF_UP);
             jdbc.update("""
@@ -347,18 +370,23 @@ public class StoreResourceImportService {
 
     private Parsed parse(TenantPrincipal principal, UUID hotelId, XlsxWorkbook.WorkbookData source) {
         List<ImportError> errors = new ArrayList<>();
-        List<ImportedItem> items = parseItems(source.sheet(ITEM_SHEET), errors);
+        List<ImportedItem> items = parseItems(source.sheet(ITEM_SHEET), errors,
+                usageScopes.options(principal.tenantId(), hotelId, false));
         List<ImportedAssetDraft> assetDrafts = parseAssets(source.sheet(ASSET_SHEET), errors);
         List<ImportedAsset> assets = resolveResponsibleAssignments(principal, hotelId, assetDrafts, errors);
         return new Parsed(new ImportPayload(items, assets), errors);
     }
 
-    private List<ImportedItem> parseItems(XlsxWorkbook.SheetData sheet, List<ImportError> errors) {
+    private List<ImportedItem> parseItems(XlsxWorkbook.SheetData sheet, List<ImportError> errors,
+                                        StoreItemUsageScopes.Options options) {
         if (sheet == null) {
             errors.add(new ImportError(ITEM_SHEET, 1, "工作表", "缺少工作表：" + ITEM_SHEET, ""));
             return List.of();
         }
         Map<String, Integer> columns = columns(sheet, ITEM_HEADERS, errors);
+        boolean hasScope = columns.containsKey("适用部门") || columns.containsKey("适用岗位");
+        if (hasScope && (!columns.containsKey("适用部门") || !columns.containsKey("适用岗位")))
+            errors.add(new ImportError(ITEM_SHEET, 1, "使用范围", "新版模板必须保留适用部门和适用岗位两列；岗位内容可以留空", ""));
         if (sheet.rows().isEmpty()) return List.of();
         List<ImportedItem> result = new ArrayList<>();
         Set<String> codes = new HashSet<>();
@@ -402,9 +430,18 @@ public class StoreResourceImportService {
             if (sku != null && !codes.add(sku.toLowerCase(Locale.ROOT))) {
                 errors.add(new ImportError(ITEM_SHEET, rowNumber, "物品编码", "文件内物品编码重复", sku));
             }
+            StoreResourceModels.UsageScopeInput usageScope = null;
+            String departments = cell(row, columns, "适用部门"), positions = cell(row, columns, "适用岗位");
+            if (hasScope) {
+                try { usageScope = usageScopes.parse(departments, positions, options); }
+                catch (StoreItemUsageScopes.ScopeValidationException exception) {
+                    errors.add(new ImportError(ITEM_SHEET, rowNumber, exception.field(), exception.getMessage(),
+                            exception.field().equals("适用岗位") ? positions : departments));
+                }
+            }
             result.add(new ImportedItem(rowNumber, text(sku), text(name), text(category), text(unit),
                     value(unitCost), value(minimum), value(opening), specification,
-                    purchaseUnit, purchaseFactor, issueUnit, issueFactor));
+                    purchaseUnit, purchaseFactor, issueUnit, issueFactor, usageScope, departments, positions));
         }
         return List.copyOf(result);
     }
@@ -578,7 +615,11 @@ public class StoreResourceImportService {
         Map<String, Integer> result = new HashMap<>();
         if (!sheet.rows().isEmpty()) {
             List<String> headers = sheet.rows().getFirst();
-            for (int index = 0; index < headers.size(); index++) result.put(normalizeHeader(headers.get(index)), index);
+            for (int index = 0; index < headers.size(); index++) {
+                String key = normalizeHeader(headers.get(index));
+                if (!key.isEmpty() && result.putIfAbsent(key, index) != null)
+                    errors.add(new ImportError(sheet.name(), 1, headers.get(index), "列名重复，请只保留一列，避免忽略已填内容", ""));
+            }
         }
         for (String header : expected) {
             String key = normalizeHeader(header);
@@ -761,6 +802,9 @@ public class StoreResourceImportService {
         summary.put("openingQuantity", scale4(openingQuantity));
         summary.put("openingInventoryValue", scale4(openingValue));
         summary.put("assetOriginalValue", assetValue.setScale(2, RoundingMode.HALF_UP));
+        summary.put("unconfiguredUsageCount", payload.items().stream()
+                .filter(item -> item.usageScope() == null && text(item.usageDepartmentNames()).isBlank()
+                        && text(item.usagePositionNames()).isBlank()).count());
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("id", job.get("id"));
         result.put("fileName", job.get("original_name"));
@@ -860,8 +904,9 @@ public class StoreResourceImportService {
     }
 
     private String normalizeHeader(String value) {
-        return (value == null ? "" : value).trim()
+        String normalized = (value == null ? "" : value).trim()
                 .replaceAll("[\\s*＊()（）:_：-]", "").toLowerCase(Locale.ROOT);
+        return normalized.equals("适用岗位选填") ? "适用岗位" : normalized;
     }
 
     private BigDecimal value(BigDecimal value) {
@@ -911,7 +956,8 @@ public class StoreResourceImportService {
             int rowNumber, String sku, String name, String category, String unit,
             BigDecimal unitCost, BigDecimal minimumQuantity, BigDecimal openingQuantity,
             String specification, String purchaseUnit, BigDecimal purchaseFactor,
-            String issueUnit, BigDecimal issueFactor
+            String issueUnit, BigDecimal issueFactor, StoreResourceModels.UsageScopeInput usageScope,
+            String usageDepartmentNames, String usagePositionNames
     ) {
     }
 
