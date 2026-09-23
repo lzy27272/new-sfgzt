@@ -120,3 +120,10 @@ test('企微任务入口以一次性码建立内存会话并保留 Cookie 辅助
   assert.match(appSource, /const completeWecomTaskEntry = useCallback/)
   assert.match(appSource, /onAuthenticated=\{completeWecomTaskEntry\}/)
 })
+
+ test('学院企微直达链接只接受本人计划入口和单个合法计划编号', () => {
+ globalThis.window = { location: { origin: 'https://www.sfgzt.cn' } };
+ const id='123e4567-e89b-42d3-a456-426614174000';
+ assert.equal(safeTaskDeepLink('#/academy?tab=mine&id='+id), '#/academy?tab=mine&id='+id);
+ for(const route of ['#/academy?tab=team&id='+id,'#/academy?tab=mine&id=nope','#/academy?tab=mine&id='+id+'&id='+id,'#/academy?tab=mine&id='+id+'&next=/admin']) assert.throws(()=>safeTaskDeepLink(route));
+});

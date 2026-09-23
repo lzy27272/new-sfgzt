@@ -78,3 +78,12 @@ test('企微员工本人结果不跳转到无权限的治理页面', () => {
 test('未知通知不生成误导性的操作入口', () => {
   assert.equal(resolveNotificationNavigation({ type: 'SYSTEM_MESSAGE' }), undefined)
 })
+
+test('学院个人计划和管理提醒分别校验权限并进入对应页面', () => {
+ const personal={type:'ACADEMY_STAGE_AVAILABLE',sourceType:'ACADEMY_PLAN',sourceId:'plan-1'};
+ assert.deepEqual(resolveNotificationNavigation(personal,['academy.learn']),{view:'academy',params:{tab:'mine',id:'plan-1'},actionLabel:'查看成长计划'});
+ assert.equal(resolveNotificationNavigation(personal,['notification.read']),undefined);
+ const manager={type:'ACADEMY_MANAGER_OVERDUE',sourceType:'ACADEMY_PLAN',sourceId:'plan-1'};
+ assert.deepEqual(resolveNotificationNavigation(manager,['academy.team-read']),{view:'academy',params:{tab:'team'},actionLabel:'查看团队学习'});
+ assert.equal(resolveNotificationNavigation(manager,['academy.learn']),undefined);
+});

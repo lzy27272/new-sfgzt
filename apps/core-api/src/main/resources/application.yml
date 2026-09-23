@@ -17,8 +17,8 @@ spring:
     default-property-inclusion: non_null
   servlet:
     multipart:
-      max-file-size: ${ATTACHMENT_MAX_FILE_SIZE:20MB}
-      max-request-size: ${ATTACHMENT_MAX_REQUEST_SIZE:22MB}
+      max-file-size: ${ATTACHMENT_MAX_FILE_SIZE:200MB}
+      max-request-size: ${ATTACHMENT_MAX_REQUEST_SIZE:202MB}
 
 server:
   port: ${PORT:8080}
@@ -35,6 +35,11 @@ management:
         enabled: true
 
 app:
+  academy:
+    storage-root: ${ACADEMY_STORAGE_ROOT:${ATTACHMENT_STORAGE_ROOT:var/attachments}/academy}
+    worker-enabled: ${ACADEMY_WORKER_ENABLED:false}
+    tenant-ids: ${ACADEMY_TENANT_IDS:}
+    fixed-delay-ms: ${ACADEMY_FIXED_DELAY_MS:30000}
   finance:
     # Separate originals, but inside the mounted attachment volume by default. Never use operational retention rules here.
     attachments-root: ${FINANCE_ATTACHMENTS_ROOT:${ATTACHMENT_STORAGE_ROOT:var/attachments}/finance-originals}

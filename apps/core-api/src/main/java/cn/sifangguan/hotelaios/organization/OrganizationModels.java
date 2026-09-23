@@ -118,8 +118,12 @@ public final class OrganizationModels {
             String mobile,
             LocalDate hiredOn,
             String loginName,
-            String temporaryPassword
+            String temporaryPassword,
+            String employeeType
     ) {
+        public CreateEmployee(String employeeNo, String name, String mobile, LocalDate hiredOn, String loginName, String temporaryPassword) {
+            this(employeeNo, name, mobile, hiredOn, loginName, temporaryPassword, null);
+        }
     }
 
     public record UpdateEmployee(
@@ -129,8 +133,12 @@ public final class OrganizationModels {
             LocalDate hiredOn,
             @NotBlank String employmentStatus,
             String loginName,
-            String temporaryPassword
+            String temporaryPassword,
+            String employeeType
     ) {
+        public UpdateEmployee(String employeeNo, String name, String mobile, LocalDate hiredOn, String employmentStatus, String loginName, String temporaryPassword) {
+            this(employeeNo, name, mobile, hiredOn, employmentStatus, loginName, temporaryPassword, null);
+        }
     }
 
     public record CreatePositionAssignment(

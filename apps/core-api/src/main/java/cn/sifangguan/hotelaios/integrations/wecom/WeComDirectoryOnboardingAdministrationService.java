@@ -618,6 +618,7 @@ public class WeComDirectoryOnboardingAdministrationService {
 
         if (sourceIdentity == null) {
             try {
+                identity.addValue("employeeType", cn.sifangguan.hotelaios.organization.EmployeeType.validate(request.employeeType(), true));
                 jdbc.update("""
                         insert into user_account
                             (id, tenant_id, login_name, display_name, mobile, status,
@@ -628,9 +629,9 @@ public class WeComDirectoryOnboardingAdministrationService {
                 jdbc.update("""
                         insert into employee
                             (id, tenant_id, account_id, employee_no, name, mobile,
-                             employment_status, hired_on)
+                             employment_status, hired_on, employee_type, employee_type_updated_at, employee_type_updated_by)
                         values (:employeeId, :tenantId, :accountId, :employeeNo, :displayName, :mobile,
-                                'ACTIVE', current_date)
+                                'ACTIVE', current_date, :employeeType, now(), :actorId)
                         """, identity);
             } catch (DuplicateKeyException exception) {
                 if (isMobileConflict(exception)) {
@@ -759,6 +760,7 @@ public class WeComDirectoryOnboardingAdministrationService {
         Map<String, Object> audit = new LinkedHashMap<>();
         audit.put("accountId", accountId);
         audit.put("employeeId", employeeId);
+        if(sourceIdentity==null)audit.put("employeeType", request.employeeType());
         audit.put("assignmentId", assignmentId);
         audit.put("roleAssignmentId", roleAssignmentId);
         audit.put("bindingId", bindingId);

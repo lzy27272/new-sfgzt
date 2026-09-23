@@ -21,6 +21,7 @@ export const navigation: Array<{ id: AppRouteId; sectionId?: string; label: stri
   { id: 'daily-report-templates', label: '日报模板中心', icon: '▤', permissions: [permissionCodes.dailyReportTemplate.read, permissionCodes.dailyReportTemplate.edit, permissionCodes.dailyReportTemplate.publish] },
   { id: 'organization', label: '组织与权限', icon: '⚙', group: '系统配置', permissions: ['org.manage', 'position-profile.read'] },
   { id: 'store-resources', label: '库存与固定资产', icon: '库', group: '系统配置', permissions: [permissionCodes.storeResource.read] },
+  { id: 'academy', label: '学院中心', icon: '学', permissions: ['academy.learn','academy.manage','academy.team-read'] },
   { id: 'finance', label: '报销与费用', icon: '¥', group: '财务中心', permissions: ['finance.submit', 'finance.review', 'finance.read', 'finance.pay', 'finance.configure'] },
   { id: 'data-retention', label: '数据留存策略', icon: '◷', group: '系统配置', administratorOnly: true },
   { id: 'ai-data', label: 'AI 数据与复盘', icon: '◈', permissions: ['ui.module.ai-data'] },

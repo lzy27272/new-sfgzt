@@ -52,6 +52,7 @@ export function WecomDirectoryOnboardingAdministration({
   const [busy, setBusy] = useState(false)
   const [reviewOptions, setReviewOptions] = useState<DirectoryReviewOptions>()
   const [reviewAssignmentKey, setReviewAssignmentKey] = useState('')
+  const [employeeType,setEmployeeType] = useState('')
   const [reviewOptionsLoading, setReviewOptionsLoading] = useState(false)
   const [reviewOptionsError, setReviewOptionsError] = useState<string>()
 
@@ -86,7 +87,7 @@ export function WecomDirectoryOnboardingAdministration({
   }, [directoryEventId, directoryEvents, loading])
   useEffect(() => {
     setReviewOptions(undefined)
-    setReviewAssignmentKey('')
+    setReviewAssignmentKey(''); setEmployeeType('')
     setReviewOptionsError(undefined)
     setReviewOptionsLoading(false)
     if (!selected || selected.requestedPositionId || !canApprove
@@ -136,7 +137,7 @@ export function WecomDirectoryOnboardingAdministration({
         reviewAssignment ? {
           orgUnitId: reviewAssignment.orgUnitId,
           positionId: reviewAssignment.positionId,
-        } : undefined)
+        } : undefined, employeeType)
       setNotice(result.status === 'APPROVED'
         ? transfer ? '身份冲突已完成审核转移并启用，群推送开关未改变' : '入职申请已确认启用，群推送开关未改变'
         : result.message)
@@ -210,12 +211,12 @@ export function WecomDirectoryOnboardingAdministration({
     {selected && <div className="drawer-backdrop"><aside className="drawer onboarding-review-drawer"><header><div><span className="panel-kicker">EMPLOYEE REVIEW</span><h2>确认员工任职</h2></div><button className="close" onClick={() => { setSelected(undefined); onClearTarget?.() }}>×</button></header><div className="drawer-body">
       <div className="onboarding-review-person"><strong>{selected.displayName}</strong><span>企业微信身份已验证</span><code>{selected.maskedFingerprint}</code></div>
       <dl><div><dt>注册账号</dt><dd>{selected.requestedLoginName ?? '既有账号任职变更'}</dd></div><div><dt>申请组织</dt><dd>{selected.requestedHotelName ?? '未选择'}</dd></div><div><dt>所属部门</dt><dd>{selected.requestedDepartmentName ?? '未选择'}</dd></div><div><dt>申请岗位</dt><dd>{selected.requestedPositionName ?? (selected.requestedOrgUnitId ? '岗位待分配' : '未选择')}</dd></div><div><dt>当前状态</dt><dd>{labels[selected.status]}</dd></div></dl>
-      {needsReviewerAssignment && canApprove && <div className="onboarding-review-assignment"><label>审核分配岗位<select value={reviewAssignmentKey} disabled={reviewOptionsLoading} onChange={(event) => { setReviewAssignmentKey(event.target.value); setReviewOptionsError(undefined) }}><option value="">{reviewOptionsLoading ? '正在加载可分配岗位…' : '请选择具体岗位'}</option>{reviewOptions?.positions.map((position) => <option key={position.positionId} value={`${position.orgUnitId}:${position.positionId}`}>{position.name}</option>)}</select></label><small>仅显示当前账号在申请组织中可分配的已发布岗位。总部受保护岗位须由具备任职管理权限的管理员分配；普通审核员仍受原有权限限制。</small></div>}
+      {canApprove && (!selected.onboardingKind || selected.onboardingKind==='NEW_MEMBER') && ['PENDING_APPROVAL','CONFLICT'].includes(selected.status) && <label>新员工类型（必选）<select value={employeeType} onChange={event=>setEmployeeType(event.target.value)}><option value="">请选择</option><option value="INTERN">实习员工</option><option value="REGULAR">正式员工</option><option value="SECONDMENT">第三方委派（兼职）</option></select><small>仅实习员工自动领取新成长计划；已存在的员工保留原类型，可在员工配置中修改。</small></label>}{needsReviewerAssignment && canApprove && <div className="onboarding-review-assignment"><label>审核分配岗位<select value={reviewAssignmentKey} disabled={reviewOptionsLoading} onChange={(event) => { setReviewAssignmentKey(event.target.value); setReviewOptionsError(undefined) }}><option value="">{reviewOptionsLoading ? '正在加载可分配岗位…' : '请选择具体岗位'}</option>{reviewOptions?.positions.map((position) => <option key={position.positionId} value={`${position.orgUnitId}:${position.positionId}`}>{position.name}</option>)}</select></label><small>仅显示当前账号在申请组织中可分配的已发布岗位。总部受保护岗位须由具备任职管理权限的管理员分配；普通审核员仍受原有权限限制。</small></div>}
       {reviewOptionsError && <div className="inline-error">{reviewOptionsError}</div>}
       {selected.status === 'CONFLICT' && <div className="inline-error">该企业微信身份已绑定其他中台账号。仅可在填写原因并完成两次确认后转移；原账号会话会立即失效。</div>}
       {selected.suggestedAction && <div className={selected.retryable || selected.status === 'EXPIRED' ? 'inline-warning' : 'inline-error'}>{selected.suggestedAction}</div>}
       {!canApprove && ['PENDING_APPROVAL', 'CONFLICT'].includes(selected.status) && <div className="inline-warning">当前账号只有查看权限，请由行政人事或行政人事主管完成审核。</div>}
       <div className="inline-warning">确认后将原子创建或启用员工档案、账号、任职、岗位权限和企业微信绑定；不会开启群推送。</div>
-    </div><footer><button className="secondary" onClick={() => { setSelected(undefined); onClearTarget?.() }}>取消</button>{canManage && selected.retryable && <button className="primary" disabled={busy} onClick={() => void retry('retry')}>{busy ? '处理中…' : '技术重试'}</button>}{canManage && selected.canRegenerate && <button className="primary" disabled={busy} onClick={() => void retry('regenerate')}>{busy ? '处理中…' : '重新生成邀请'}</button>}{canApprove && ['PENDING_APPROVAL','CONFLICT'].includes(selected.status) && <button className="secondary" disabled={busy} onClick={() => void reject()}>拒绝</button>}{canApprove && ['PENDING_APPROVAL','CONFLICT'].includes(selected.status) && <button className="primary" disabled={busy || reviewOptionsLoading || (needsReviewerAssignment && !reviewAssignment)} onClick={() => void approve()}>{busy ? '处理中…' : selected.status === 'CONFLICT' ? '确认转移并启用' : needsReviewerAssignment ? '分配并启用' : '确认启用'}</button>}</footer></aside></div>}
+    </div><footer><button className="secondary" onClick={() => { setSelected(undefined); onClearTarget?.() }}>取消</button>{canManage && selected.retryable && <button className="primary" disabled={busy} onClick={() => void retry('retry')}>{busy ? '处理中…' : '技术重试'}</button>}{canManage && selected.canRegenerate && <button className="primary" disabled={busy} onClick={() => void retry('regenerate')}>{busy ? '处理中…' : '重新生成邀请'}</button>}{canApprove && ['PENDING_APPROVAL','CONFLICT'].includes(selected.status) && <button className="secondary" disabled={busy} onClick={() => void reject()}>拒绝</button>}{canApprove && ['PENDING_APPROVAL','CONFLICT'].includes(selected.status) && <button className="primary" disabled={busy || ((!selected.onboardingKind || selected.onboardingKind==='NEW_MEMBER') && !employeeType) || reviewOptionsLoading || (needsReviewerAssignment && !reviewAssignment)} onClick={() => void approve()}>{busy ? '处理中…' : selected.status === 'CONFLICT' ? '确认转移并启用' : needsReviewerAssignment ? '分配并启用' : '确认启用'}</button>}</footer></aside></div>}
   </section>
 }

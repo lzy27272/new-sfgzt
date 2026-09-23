@@ -794,7 +794,9 @@ public class OrganizationService {
         String visibility = visibility("o", principal, parameters);
         return jdbc.queryForList("""
                 select distinct e.id, e.account_id, u.login_name, u.status as account_status,
-                       e.employee_no, e.name, e.mobile, e.employment_status, e.hired_on,
+                       e.employee_no, e.name, e.mobile, e.employment_status, e.employee_type, e.employee_type_updated_at, e.hired_on,
+                       (select count(*) from academy_plan ap where ap.tenant_id=e.tenant_id and ap.employee_id=e.id and ap.state='ACTIVE') as academy_active_count,
+                       (select count(*) from academy_plan ap where ap.tenant_id=e.tenant_id and ap.employee_id=e.id and ap.state='COMPLETED') as academy_completed_count,
                        a.id as assignment_id, a.manager_assignment_id, a.is_primary,
                        a.assignment_type, a.status as assignment_status, a.valid_from, a.valid_to,
                        o.id as org_unit_id, o.name as org_unit_name,
@@ -833,7 +835,7 @@ public class OrganizationService {
         requireTenantScope(principal, "员工回收站只能由集团级管理员查看");
         return jdbc.queryForList("""
                 select e.id, e.account_id, u.login_name, e.employee_no, e.name, e.mobile,
-                       e.employment_status, e.hired_on, e.deleted_at,
+                       e.employment_status, e.employee_type, e.hired_on, e.deleted_at,
                        deleted_by.display_name as deleted_by_name,
                        latest.org_unit_id, latest.org_unit_name,
                        latest.position_id, latest.position_name
@@ -893,13 +895,15 @@ public class OrganizationService {
                     """, parameters);
         }
         jdbc.update("""
-                insert into employee (id, tenant_id, account_id, employee_no, name, mobile, hired_on)
-                values (:id, :tenantId, :accountId, :employeeNo, :name, :mobile, :hiredOn)
-                """, parameters);
+                insert into employee (id, tenant_id, account_id, employee_no, name, mobile, hired_on, employee_type, employee_type_updated_at, employee_type_updated_by)
+                values (:id, :tenantId, :accountId, :employeeNo, :name, :mobile, :hiredOn, :employeeType, now(), :actorId)
+                """, parameters.addValue("employeeType", EmployeeType.validate(request.employeeType(), true)).addValue("actorId", principal.actorId()));
+        auditWriter.record("EMPLOYEE_TYPE_SET", "EMPLOYEE", id, "{\"employeeType\":\"" + request.employeeType() + "\"}");
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("id", id);
         response.put("accountId", accountId);
         response.put("employeeNo", request.employeeNo());
+        response.put("employeeType", request.employeeType());
         response.put("name", request.name());
         response.put("loginName", loginName);
         return response;
@@ -913,6 +917,8 @@ public class OrganizationService {
         Map<String, Object> current = requireEmployee(principal, employeeId);
         requireUniqueCode("employee", principal, employeeId, request.employeeNo(), "员工编号已存在");
         String employmentStatus = lifecycleStatus(request.employmentStatus());
+        String employeeType = request.employeeType() == null ? (String) current.get("employee_type")
+                : EmployeeType.validate(request.employeeType(), true);
         UUID accountId = (UUID) current.get("account_id");
         String loginName = trimToNull(request.loginName());
         String temporaryPassword = request.temporaryPassword();
@@ -925,7 +931,8 @@ public class OrganizationService {
                 .addValue("name", request.name().trim())
                 .addValue("mobile", trimToNull(request.mobile()))
                 .addValue("hiredOn", request.hiredOn())
-                .addValue("employmentStatus", employmentStatus);
+                .addValue("employmentStatus", employmentStatus)
+                .addValue("employeeType", employeeType).addValue("typeActorId", principal.actorId());
         if (accountId == null && loginName != null) {
             passwordHasher.requirePassword(temporaryPassword);
             accountId = UUID.randomUUID();
@@ -970,6 +977,9 @@ public class OrganizationService {
                 update employee
                 set account_id = :accountId, employee_no = :employeeNo, name = :name,
                     mobile = :mobile, hired_on = :hiredOn, employment_status = :employmentStatus,
+                    employee_type_updated_at = case when employee_type is distinct from :employeeType then now() else employee_type_updated_at end,
+                    employee_type_updated_by = case when employee_type is distinct from :employeeType then :typeActorId else employee_type_updated_by end,
+                    employee_type = :employeeType,
                     updated_at = now()
                 where tenant_id = :tenantId and id = :id
                 """, parameters);
@@ -993,6 +1003,11 @@ public class OrganizationService {
         auditWriter.record("EMPLOYEE_UPDATED", "EMPLOYEE", employeeId,
                 "{\"status\":\"" + employmentStatus + "\",\"employeeNo\":\""
                         + jsonEscape(request.employeeNo().trim()) + "\"}");
+        if (!java.util.Objects.equals(current.get("employee_type"), employeeType)) {
+            auditWriter.record("EMPLOYEE_TYPE_CHANGED", "EMPLOYEE", employeeId,
+                    "{\"before\":\"" + java.util.Objects.toString(current.get("employee_type"), "未设置")
+                            + "\",\"after\":\"" + employeeType + "\"}");
+        }
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("id", employeeId);
         response.put("accountId", accountId);
@@ -1000,6 +1015,7 @@ public class OrganizationService {
         response.put("name", request.name().trim());
         response.put("loginName", loginName);
         response.put("employmentStatus", employmentStatus);
+        response.put("employeeType", employeeType);
         return response;
     }
 
@@ -1717,7 +1733,7 @@ public class OrganizationService {
 
     private Map<String, Object> requireEmployee(TenantPrincipal principal, UUID employeeId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
-                select id, account_id, employee_no, name, employment_status,
+                select id, account_id, employee_no, name, employment_status, employee_type,
                        deleted_at, permanently_deleted_at
                 from employee
                 where tenant_id = :tenantId and id = :id and deleted_at is null
@@ -1730,7 +1746,7 @@ public class OrganizationService {
 
     private Map<String, Object> requireDeletedEmployee(TenantPrincipal principal, UUID employeeId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
-                select id, account_id, employee_no, name, employment_status,
+                select id, account_id, employee_no, name, employment_status, employee_type,
                        deleted_at, permanently_deleted_at
                 from employee
                 where tenant_id = :tenantId and id = :id and deleted_at is not null

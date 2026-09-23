@@ -16,6 +16,7 @@ class WeComDeliveryWorkerTest {
         assertSafe("WORK_EXPECTATION", "#/my-work?expectationId=" + SOURCE_ID);
         assertSafe("DAILY_REPORT", "#/daily-reports/" + SOURCE_ID);
         assertSafe("WORK_RECORD", "#/workbench");
+        assertSafe("ACADEMY_PLAN", "#/academy?tab=mine&id=" + SOURCE_ID);
     }
 
     @Test
@@ -34,6 +35,12 @@ class WeComDeliveryWorkerTest {
 
     @Test
     void rejectsMissingIdsAndUnsupportedSources() {
+        assertThatThrownBy(() -> WeComDeliveryWorker.returnToFor("ACADEMY_PLAN", null)).isInstanceOf(IllegalArgumentException.class);
+        for (String target : new String[]{"#/academy?tab=team&id=" + SOURCE_ID,
+                "#/academy?tab=mine&id=invalid", "#/academy?tab=mine&id=" + SOURCE_ID + "&id=" + SOURCE_ID,
+                "#/academy?tab=mine&id=" + SOURCE_ID + "&next=/admin"}) {
+            assertThatThrownBy(() -> WeComOAuthService.validateReturnTo(target)).isInstanceOf(IllegalArgumentException.class);
+        }
         assertThatThrownBy(() -> WeComDeliveryWorker.returnToFor("DAILY_REPORT", null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("source id");

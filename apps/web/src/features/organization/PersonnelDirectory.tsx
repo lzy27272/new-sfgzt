@@ -4,7 +4,7 @@ import { localBusinessDate } from '../workbench/workBoardModel'
 import '../workbench/workBoard.css'
 
 export type PersonnelDirectoryState = {
-  selected?: string; search: string; history: boolean; department: string; position: string; expanded?: string; scopeKind: string
+  selected?: string; search: string; history: boolean; department: string; position: string; expanded?: string; scopeKind: string; employeeType?: string
 }
 export const initialPersonnelDirectory: PersonnelDirectoryState = {
   search: '', history: false, department: '', position: '', scopeKind: 'ALL',
@@ -30,6 +30,7 @@ export function PersonnelDirectory<T extends DirectoryEmployee>({ orgs, employee
   const currentGroups = useMemo(() => groupPersonnel(employees, orgs, selected, today), [employees, orgs, selected, today])
   const matchingGroups = groups.filter(rows => rows.some(row =>
     (!department || row.orgUnitId === department) && (!position || row.positionId === position))
+    && (!state.employeeType || (rows[0].employeeType || 'UNSET') === state.employeeType)
     && [rows[0].name, rows[0].loginName].some(value => value?.toLocaleLowerCase().includes(search.toLocaleLowerCase())))
   const scopeName = selected === 'unassigned' ? '待分配人员' : scopes.find(org => org.id === selected)?.name || '当前组织'
   const choose = (id: string) => setState({ ...initialPersonnelDirectory, selected: id })
@@ -58,14 +59,14 @@ export function PersonnelDirectory<T extends DirectoryEmployee>({ orgs, employee
         <input aria-label="搜索员工" placeholder="员工姓名 / 登录账号" value={search} onChange={event => setSearch(event.target.value)} />
         <select aria-label="人员部门筛选" value={department} onChange={event => setDepartment(event.target.value)}><option value="">全部部门</option>{departments.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select>
         <select aria-label="人员岗位筛选" value={position} onChange={event => setPosition(event.target.value)}><option value="">全部岗位</option>{positions.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select>
-        <label><input type="checkbox" checked={history} onChange={event => setHistory(event.target.checked)} /> 包含历史 / 未生效任职</label>
+        <select aria-label="员工类型筛选" value={state.employeeType || ''} onChange={event => setState(previous => ({ ...previous, employeeType: event.target.value }))}><option value="">全部员工类型</option><option value="INTERN">实习员工</option><option value="REGULAR">正式员工</option><option value="SECONDMENT">第三方委派（兼职）</option><option value="UNSET">未设置</option></select><label><input type="checkbox" checked={history} onChange={event => setHistory(event.target.checked)} /> 包含历史 / 未生效任职</label>
       </div>
       <div className="pd-employees">{matchingGroups.map(rows => {
         const employee = rows.find(row => row.primary && currentAssignment(row, today)) ?? rows[0]
         const isExpanded = expanded === employee.id
         return <article className="pd-employee" key={employee.id}>
           <div className="pd-employee-main">
-            <span><strong>{employee.name}</strong><small>账号：{employee.loginName || '未开通'}</small></span>
+            <span><strong>{employee.name}</strong><small>账号：{employee.loginName || '未开通'}</small><small>{({INTERN:'实习员工',REGULAR:'正式员工',SECONDMENT:'第三方委派（兼职）'} as Record<string,string>)[employee.employeeType || ''] || '类型未设置'}</small><small>学院：{employee.academyActiveCount ? employee.academyActiveCount+' 个计划进行中' : employee.academyCompletedCount ? employee.academyCompletedCount+' 个计划已完成' : '暂无已派计划'}</small></span>
             <span>{[...new Set(rows.map(row => row.positionName || '待分配'))].join('、')}<small>{rows.length} 项任职</small></span>
             <span className={'wb-badge ' + (employee.employmentStatus === 'ACTIVE' ? 'completed' : 'optional')}>{employee.employmentStatus === 'ACTIVE' ? '账号启用' : '账号停用'}</span>
             <div className="wb-actions"><button className="text-action" onClick={() => setExpanded(isExpanded ? undefined : employee.id)}>{isExpanded ? '收起任职' : '展开任职'}</button>

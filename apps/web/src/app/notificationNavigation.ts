@@ -19,6 +19,11 @@ export function resolveNotificationNavigation(
   const sourceType = normalized(notification.sourceType)
   const sourceId = notification.sourceId?.trim()
   const has = (...required: string[]) => grantedPermissions.includes('*') || required.some((permission) => grantedPermissions.includes(permission))
+  if (sourceType === 'ACADEMY_PLAN') {
+    if (['ACADEMY_CONFIGURATION','ACADEMY_ATTEMPTS_EXHAUSTED','ACADEMY_MANAGER_OVERDUE'].includes(type))
+      return has('academy.manage','academy.team-read') ? {view:'academy',params:{tab:'team'},actionLabel:'查看团队学习'} : undefined
+    return has('academy.learn') ? {view:'academy',params:{tab:'mine',id:sourceId},actionLabel:'查看成长计划'} : undefined
+  }
   const canGovernWecom = has('wecom-binding.read', 'wecom-binding.manage', 'wecom-binding.approve')
   const canGovernPositions = has('position-profile.read', 'position-profile.manage')
   const personalBindingResult = ['WECOM_BINDING_ACTIVE', 'WECOM_BINDING_REJECTED', 'WECOM_BINDING_SUSPENDED', 'WECOM_BINDING_RESUMED', 'WECOM_BINDING_REVOKED'].includes(type)

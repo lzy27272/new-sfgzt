@@ -76,6 +76,16 @@ public class EffectiveIdentityService {
         }
     }
 
+    /** Uses the same permission and scope resolution as a request, without poisoning notification transactions. */
+    @Transactional(readOnly = true)
+    public java.util.Optional<TenantPrincipal> inspectNotificationRecipient(UUID tenantId, UUID accountId, UUID assignmentId) {
+        try {
+            return java.util.Optional.of(resolveInternal(tenantId, accountId, UUID.randomUUID(), assignmentId, true));
+        } catch (IdentityAuthenticationException | BusinessIdentityException ex) {
+            return java.util.Optional.empty();
+        }
+    }
+
     private TenantPrincipal resolveInternal(
             UUID tenantId,
             UUID accountId,

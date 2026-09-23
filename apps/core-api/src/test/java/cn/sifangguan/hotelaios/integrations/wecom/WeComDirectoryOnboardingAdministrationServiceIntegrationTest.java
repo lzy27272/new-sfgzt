@@ -418,7 +418,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
             ApprovalResponse approved = inTransaction(() -> service.approve(
                     candidateId, new DecisionRequest(
                             submitted.rowVersion(), "hotel direct reviewed", false,
-                            SECOND_HOTEL, FRONT_POSITION)));
+                            SECOND_HOTEL, FRONT_POSITION, "REGULAR")));
             assertThat(approved.status()).isEqualTo("APPROVED");
             assertThat(uuidValue("""
                     select assignment.org_unit_id
@@ -507,7 +507,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         ApprovalResponse approved = inTransaction(() -> service.approve(
                 candidateId, new DecisionRequest(
                         submitted.rowVersion(), "group headquarters reviewed", false,
-                        GROUP_HEADQUARTERS, approvedPosition.positionId())));
+                        GROUP_HEADQUARTERS, approvedPosition.positionId(), "REGULAR")));
         assertThat(approved.status()).isEqualTo("APPROVED");
         assertThat(uuidValue("""
                 select assignment.org_unit_id
@@ -531,7 +531,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         useReviewerPermissions(Set.of("wecom-onboarding.review"));
         Counts before = identityCounts();
         ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
-                new DecisionRequest(0, "permission revoked", false, GROUP_HEADQUARTERS, positionId)));
+                new DecisionRequest(0, "permission revoked", false, GROUP_HEADQUARTERS, positionId, "REGULAR")));
 
         assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
         assertThat(response.accountId()).isNull();
@@ -563,7 +563,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 """, TENANT, positionId);
         ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
                 new DecisionRequest(0, "headquarters assignment reviewed", false,
-                        GROUP_HEADQUARTERS, positionId)));
+                        GROUP_HEADQUARTERS, positionId, "REGULAR")));
 
         assertThat(response.status()).isEqualTo("APPROVED");
         var scopeType = expectedGrant.get("authorization_scope_type");
@@ -592,7 +592,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
 
         Counts after = identityCounts();
         assertThat(inTransaction(() -> service.approve(candidateId,
-                new DecisionRequest(0, "repeated approval", false, GROUP_HEADQUARTERS, positionId)))
+                new DecisionRequest(0, "repeated approval", false, GROUP_HEADQUARTERS, positionId, "REGULAR")))
                 .accountId()).isEqualTo(response.accountId());
         assertThat(identityCounts()).isEqualTo(after);
     }
@@ -611,7 +611,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
 
         ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
                 new DecisionRequest(0, "forged protected assignment", false,
-                        GROUP_HEADQUARTERS, positionId)));
+                        GROUP_HEADQUARTERS, positionId, "REGULAR")));
 
         assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
         assertThat(response.accountId()).isNull();
@@ -625,7 +625,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         Counts before = identityCounts();
 
         ApprovalResponse response = inTransaction(() -> service.approve(candidateId,
-                new DecisionRequest(0, "employee selected a protected position", false)));
+                new DecisionRequest(0, "employee selected a protected position", false, null, null, "REGULAR")));
 
         assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
         assertThat(response.accountId()).isNull();
@@ -642,7 +642,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 .contains(positionId);
         assertThat(inTransaction(() -> service.approve(candidateId,
                 new DecisionRequest(0, "administrator assignment", false,
-                        GROUP_HEADQUARTERS, positionId))).status()).isEqualTo("APPROVED");
+                        GROUP_HEADQUARTERS, positionId, "REGULAR"))).status()).isEqualTo("APPROVED");
     }
 
     @Test
@@ -657,7 +657,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         assertThatThrownBy(() -> inTransaction(() -> service.reviewOptions(candidateId)))
                 .isInstanceOf(AccessDeniedException.class);
         assertThatThrownBy(() -> inTransaction(() -> service.approve(candidateId,
-                new DecisionRequest(0, "no review permission", false, GROUP_HEADQUARTERS, positionId))))
+                new DecisionRequest(0, "no review permission", false, GROUP_HEADQUARTERS, positionId, "REGULAR"))))
                 .isInstanceOf(AccessDeniedException.class);
         assertThat(identityCounts()).isEqualTo(before);
     }
@@ -674,7 +674,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         assertThatThrownBy(() -> inTransaction(() -> service.reviewOptions(candidateId)))
                 .isInstanceOf(AccessDeniedException.class);
         assertThatThrownBy(() -> inTransaction(() -> service.approve(candidateId,
-                new DecisionRequest(0, "outside scope", false, GROUP_HEADQUARTERS, positionId))))
+                new DecisionRequest(0, "outside scope", false, GROUP_HEADQUARTERS, positionId, "REGULAR"))))
                 .isInstanceOf(AccessDeniedException.class);
         assertThat(identityCounts()).isEqualTo(before);
     }
@@ -715,7 +715,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
             Counts before = identityCounts();
             ApprovalResponse response = service.approve(candidateId,
                     new DecisionRequest(0, "position became unavailable", false,
-                            GROUP_HEADQUARTERS, positionId));
+                            GROUP_HEADQUARTERS, positionId, "REGULAR"));
             assertThat(response.status()).isEqualTo("PENDING_APPROVAL");
             assertThat(response.accountId()).isNull();
             assertThat(identityCounts()).isEqualTo(before);
@@ -729,7 +729,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         Counts before = identityCounts();
         assertThat(inTransaction(() -> service.approve(headquartersCandidate,
                 new DecisionRequest(0, "store position at headquarters", false,
-                        GROUP_HEADQUARTERS, FRONT_POSITION))).status()).isEqualTo("PENDING_APPROVAL");
+                        GROUP_HEADQUARTERS, FRONT_POSITION, "REGULAR"))).status()).isEqualTo("PENDING_APPROVAL");
         assertThat(identityCounts()).isEqualTo(before);
 
         UUID storeCandidate = UUID.randomUUID();
@@ -741,7 +741,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 .doesNotContain(protectedStorePosition);
         assertThat(inTransaction(() -> service.approve(storeCandidate,
                 new DecisionRequest(0, "protected store role unchanged", false,
-                        FRONT_DEPARTMENT, protectedStorePosition))).status()).isEqualTo("PENDING_APPROVAL");
+                        FRONT_DEPARTMENT, protectedStorePosition, "REGULAR"))).status()).isEqualTo("PENDING_APPROVAL");
         assertThat(identityCounts()).isEqualTo(before);
     }
 
@@ -773,7 +773,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
 
         ApprovalResponse approved = inTransaction(() -> service.approve(
                 candidateId, new DecisionRequest(
-                        submitted.rowVersion(), "mobile reviewed", false)));
+                        submitted.rowVersion(), "mobile reviewed", false, null, null, "REGULAR")));
 
         assertThat(jdbc.queryForObject(
                 "select mobile from user_account where id = ?", String.class,
@@ -828,7 +828,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
             start.await(10, TimeUnit.SECONDS);
             try {
                 ApprovalResponse response = inTransaction(() -> service.approve(
-                        candidateId, new DecisionRequest(0, "confirmed transfer", true)));
+                        candidateId, new DecisionRequest(0, "confirmed transfer", true, null, null, "REGULAR")));
                 return new Attempt(response, null);
             } catch (Throwable failure) {
                 return new Attempt(null, failure);
@@ -910,7 +910,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 "CONFLICT", FRONT_ACCOUNT, FRONT_DEPARTMENT, FRONT_POSITION);
 
         ApprovalResponse transferred = inTransaction(() -> service.approve(
-                transferCandidateId, new DecisionRequest(0, "confirmed identity transfer", true)));
+                transferCandidateId, new DecisionRequest(0, "confirmed identity transfer", true, null, null, "REGULAR")));
         UUID currentAccountId = transferred.accountId();
         UUID currentBindingId = uuidValue(
                 "select binding_id from wecom_person_onboarding where id = ?", transferCandidateId);
@@ -944,7 +944,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 Long.class, assignmentCandidateId);
 
         ApprovalResponse reassigned = inTransaction(() -> service.approve(
-                assignmentCandidateId, new DecisionRequest(version, "assignment reviewed", false)));
+                assignmentCandidateId, new DecisionRequest(version, "assignment reviewed", false, null, null, "REGULAR")));
 
         assertThat(reassigned.accountId()).isEqualTo(currentAccountId);
         assertThat(jdbc.queryForMap("""
@@ -977,7 +977,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 "CONFLICT", FRONT_ACCOUNT, FRONT_DEPARTMENT, FRONT_POSITION);
 
         ApprovalResponse transferred = inTransaction(() -> service.approve(
-                transferCandidateId, new DecisionRequest(0, "confirmed identity transfer", true)));
+                transferCandidateId, new DecisionRequest(0, "confirmed identity transfer", true, null, null, "REGULAR")));
         UUID manuallyRevokedAccountId = transferred.accountId();
         UUID manuallyRevokedBindingId = uuidValue(
                 "select binding_id from wecom_person_onboarding where id = ?", transferCandidateId);
@@ -1027,7 +1027,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 "select row_version from wecom_person_onboarding where id = ?",
                 Long.class, freshCandidateId);
         ApprovalResponse approved = inTransaction(() -> service.approve(
-                freshCandidateId, new DecisionRequest(version, "fresh identity reviewed", false)));
+                freshCandidateId, new DecisionRequest(version, "fresh identity reviewed", false, null, null, "REGULAR")));
 
         assertThat(approved.accountId()).isNotIn(FRONT_ACCOUNT, manuallyRevokedAccountId);
         assertThat(jdbc.queryForObject("""
@@ -1152,7 +1152,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 .containsEntry("session_cleared", true)
                 .containsEntry("profile_cleared", true);
         assertThatThrownBy(() -> inTransaction(() -> service.approve(
-                oldCandidateId, new DecisionRequest(1, "must not approve", false))))
+                oldCandidateId, new DecisionRequest(1, "must not approve", false, null, null, "REGULAR"))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("当前状态不允许确认启用");
 
@@ -1243,7 +1243,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 Long.class, candidateId);
 
         ApprovalResponse approved = inTransaction(() -> service.approve(
-                candidateId, new DecisionRequest(version, "rename chain reviewed", false)));
+                candidateId, new DecisionRequest(version, "rename chain reviewed", false, null, null, "REGULAR")));
 
         assertThat(approved.accountId()).isEqualTo(accountId);
         assertThat(identityCounts().accounts()).isEqualTo(before.accounts());
@@ -1306,7 +1306,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 Long.class, candidateId);
 
         ApprovalResponse approved = inTransaction(() -> service.approve(
-                candidateId, new DecisionRequest(version, "assignment reviewed", false)));
+                candidateId, new DecisionRequest(version, "assignment reviewed", false, null, null, "REGULAR")));
 
         assertThat(approved.accountId()).isEqualTo(accountId);
         assertThat(identityCounts().accounts()).isEqualTo(before.accounts());
@@ -1347,7 +1347,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         Counts before = identityCounts();
 
         assertThatThrownBy(() -> inTransaction(() -> service.approve(
-                candidateId, new DecisionRequest(0, "must not approve", false))))
+                candidateId, new DecisionRequest(0, "must not approve", false, null, null, "REGULAR"))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("正在同步");
 
@@ -1388,7 +1388,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         Counts before = identityCounts();
 
         assertThatThrownBy(() -> inTransaction(() -> service.approve(
-                candidateId, new DecisionRequest(0, "   ", true))))
+                candidateId, new DecisionRequest(0, "   ", true, null, null, "REGULAR"))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("必须填写确认原因");
 
@@ -1428,7 +1428,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
 
         try {
             assertThatThrownBy(() -> inTransaction(() -> service.approve(
-                    candidateId, new DecisionRequest(0, "must roll back", false))))
+                    candidateId, new DecisionRequest(0, "must roll back", false, null, null, "REGULAR"))))
                     .isInstanceOf(DataAccessException.class)
                     .hasMessageContaining("forced approval rollback");
         } finally {
@@ -1478,7 +1478,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         Counts before = identityCounts();
 
         ApprovalResponse response = inTransaction(() -> service.approve(
-                candidateId, new DecisionRequest(0, "assignment approved", false)));
+                candidateId, new DecisionRequest(0, "assignment approved", false, null, null, "REGULAR")));
 
         assertThat(response.status()).isEqualTo("APPROVED");
         assertThat(response.accountId()).isEqualTo(accountId);
@@ -1728,7 +1728,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 where id = ?
                 """, reuseAt, reuseReceipt, replacementCandidate);
         ApprovalResponse replacement = inTransaction(() -> service.approve(
-                replacementCandidate, new DecisionRequest(0, "confirmed reused identity", true)));
+                replacementCandidate, new DecisionRequest(0, "confirmed reused identity", true, null, null, "REGULAR")));
         UUID replacementBinding = uuidValue(
                 "select binding_id from wecom_person_onboarding where id = ?", replacementCandidate);
         assertThat(replacement.accountId()).isNotEqualTo(sourceAccount);
@@ -1840,7 +1840,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 "select row_version from wecom_person_onboarding where id = ?", Long.class, candidateId);
 
         ApprovalResponse approved = inTransaction(() -> service.approve(
-                candidateId, new DecisionRequest(version, "reactivation reviewed", false)));
+                candidateId, new DecisionRequest(version, "reactivation reviewed", false, null, null, "REGULAR")));
 
         assertThat(approved.accountId()).isEqualTo(accountId);
         assertThat(approved.bindingStatus()).isEqualTo("SUSPENDED");
@@ -1889,7 +1889,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                 "select row_version from wecom_person_onboarding where id = ?", Long.class, candidateId);
 
         ApprovalResponse approved = inTransaction(() -> service.approve(
-                candidateId, new DecisionRequest(version, "assignment reviewed", false)));
+                candidateId, new DecisionRequest(version, "assignment reviewed", false, null, null, "REGULAR")));
 
         assertThat(approved.accountId()).isEqualTo(accountId);
         assertThat(approved.bindingStatus()).isEqualTo("SUSPENDED");

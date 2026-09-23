@@ -1,7 +1,7 @@
 import type { NavigationParams, RouteParams } from '../domain'
 import type { AppRouteId, AppSectionId } from './routeConfig'
 
-export type NavigationCenterId = 'workbench' | 'operations' | 'people' | 'performance' | 'finance' | 'configuration'
+export type NavigationCenterId = 'workbench' | 'operations' | 'people' | 'performance' | 'finance' | 'academy' | 'configuration'
 
 export type NavigationFeature = {
   id: AppRouteId
@@ -28,6 +28,7 @@ const centerDefinitions: readonly {
   { id: 'operations', label: '经营中心', modules: ['daily-operations', 'investments', 'store-resources', 'ai-data'] },
   { id: 'people', label: '人事中心', modules: ['organization', 'wecom-onboarding', 'wecom-bindings'] },
   { id: 'performance', label: '绩效中心', modules: ['kpi-center', 'evaluations'] },
+  { id: 'academy', label: '学院中心', modules: ['academy'] },
   { id: 'finance', label: '财务中心', modules: ['finance'] },
   { id: 'configuration', label: '配置中心', modules: ['templates', 'work-packages', 'daily-report-templates', 'rules', 'organization', 'wecom-webhooks', 'data-retention'] },
 ]
@@ -60,6 +61,7 @@ export function buildNavigationCenters(visibleFeatures: readonly NavigationFeatu
 
 /** Existing hash routes keep their identifiers; detail routes already resolve to these sections. */
 export function navigationCenterForSection(sectionId: AppSectionId, params: RouteParams = {}): NavigationCenterId {
+  if (sectionId === 'academy') return 'academy'
   if (sectionId === 'finance') return 'finance'
   if (sectionId === 'organization' && params.center === 'configuration') return 'configuration'
   if (['daily-operations', 'investments', 'store-resources', 'ai-data'].includes(sectionId)) return 'operations'

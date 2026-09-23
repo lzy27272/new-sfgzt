@@ -144,8 +144,12 @@ public final class WeComDirectoryOnboardingModels {
             @Size(max = 500) String reason,
             boolean transferExistingBinding,
             UUID orgUnitId,
-            UUID positionId
+            UUID positionId,
+            String employeeType
     ) {
+        public DecisionRequest(long expectedVersion, String reason, boolean transferExistingBinding, UUID orgUnitId, UUID positionId) {
+            this(expectedVersion, reason, transferExistingBinding, orgUnitId, positionId, null);
+        }
         public DecisionRequest(long expectedVersion, String reason) {
             this(expectedVersion, reason, false, null, null);
         }

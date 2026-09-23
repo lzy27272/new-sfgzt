@@ -36,6 +36,7 @@ export type DirectoryCandidate = {
   maskedFingerprint: string
   displayName: string
   requestedLoginName?: string
+  onboardingKind?: string
   requestedOrgUnitId?: string
   requestedHotelName?: string
   requestedDepartmentName?: string
@@ -172,6 +173,7 @@ export function approveDirectoryCandidate(
   reason?: string,
   transferExistingBinding = false,
   assignment?: { orgUnitId: string; positionId: string },
+  employeeType?: string,
 ) {
   return apiRequest<DirectoryApprovalResponse>(`${adminBase}/${candidate.id}/approve`, identity, {
     method: 'POST', body: JSON.stringify({
@@ -180,6 +182,7 @@ export function approveDirectoryCandidate(
       transferExistingBinding,
       orgUnitId: assignment?.orgUnitId || null,
       positionId: assignment?.positionId || null,
+      employeeType: employeeType || null,
     }),
   })
 }

@@ -147,6 +147,13 @@ public class WeComOAuthService {
         if (uri.isAbsolute() || uri.getRawFragment() != null) {
             throw new IllegalArgumentException("WeCom returnTo must target an allowed work item");
         }
+        if ("/academy".equals(uri.getPath())) {
+            var query=UriComponentsBuilder.fromUri(uri).build().getQueryParams();
+            if(!query.keySet().equals(Set.of("tab","id")) || query.get("tab").size()!=1
+                    || !"mine".equals(query.getFirst("tab")) || query.get("id").size()!=1)
+                throw new IllegalArgumentException("WeCom academy returnTo must include one plan id");
+            UUID.fromString(query.getFirst("id"));return value;
+        }
         if ("/workbench".equals(uri.getPath())) {
             if (uri.getRawQuery() != null) {
                 throw new IllegalArgumentException("WeCom workbench returnTo cannot contain query parameters");

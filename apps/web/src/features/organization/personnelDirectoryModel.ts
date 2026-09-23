@@ -1,9 +1,10 @@
 export type DirectoryOrg = { id: string; parentId?: string; name: string; unitType: string; status: string; city?: string }
 export type DirectoryEmployee = {
-  id: string; name: string; loginName?: string; employmentStatus: string; accountStatus?: string
+  id: string; name: string; loginName?: string; employmentStatus: string; employeeType?: string; accountStatus?: string
   orgUnitId?: string; orgUnitName?: string; positionId?: string; positionName?: string; assignmentId?: string
   assignmentStatus?: string; primary?: boolean; validFrom?: string; validTo?: string
   responsibleHotelNames?: string
+  academyActiveCount?: number; academyCompletedCount?: number
 }
 export function currentAssignment(item: DirectoryEmployee, today: string) {
   return Boolean(item.assignmentId && item.employmentStatus === 'ACTIVE'

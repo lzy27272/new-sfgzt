@@ -133,6 +133,7 @@ const WecomDirectoryOnboardingAdministration = lazy(() => import('./features/wec
 const DataRetentionAdministration = lazy(() => import('./features/dataRetention/DataRetentionAdministration').then((module) => ({ default: module.DataRetentionAdministration })))
 const AiDataFeature = lazy(() => import('./features/aiData/AiDataFeature'))
 const StoreResourceFeature = lazy(() => import('./features/storeResources/StoreResourceRoutes').then((module) => ({ default: module.StoreResourceRoutes })))
+const AcademyFeature = lazy(() => import('./features/academy/AcademyRoutes'))
 const FinanceFeature = lazy(() => import('./features/finance/FinanceRoutes'))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
@@ -2017,6 +2018,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       case 'templates': legacyPage = <EnterpriseTemplateCenter identity={activeIdentity} permissions={activePermissions} />; break
       case 'organization': legacyPage = <OrganizationCenter identity={activeIdentity} permissions={activePermissions} routeParams={routeParams} />; break
       case 'store-resources': legacyPage = <StoreResourceFeature identity={activeIdentity} grantedPermissions={activePermissions} params={routeParams} go={navigate} />; break
+      case 'academy': legacyPage = <AcademyFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'finance': legacyPage = <FinanceFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'data-retention': legacyPage = <DataRetentionAdministration identity={activeIdentity} />; break
       case 'ai-data': legacyPage = <AiDataFeature key={activeIdentity.key} identity={activeIdentity} />; break

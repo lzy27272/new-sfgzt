@@ -14,7 +14,7 @@ test('assignment entry is consolidated into employee edit', () => {
 
 test('employee edit can save profile only or create a complete assignment', () => {
   assert.match(source, /const assignmentDraftStarted = Boolean/)
-  assert.match(source, /saveDisabled=\{Boolean\(editingId\) && \(assignmentDraftInvalid \|\| Boolean\(editingAssignmentId\)\)\}/)
+  assert.match(source, /saveDisabled=\{!employeeForm\.employeeType \|\| \(Boolean\(editingId\) && \(assignmentDraftInvalid \|\| Boolean\(editingAssignmentId\)\)\)\}/)
   assert.match(source, /if \(assignmentDraftStarted\) await apiRequest\(`\/org\/employees\/\$\{editingId\}\/assignments`/)
   assert.match(source, /item\.id !== editingId && item\.assignmentId/)
 })

@@ -76,7 +76,7 @@ class OrganizationMaintenanceIntegrationTest {
                  "permissionCodes":["org.read"],"authorizationScopeType":"SELF","wecomSelfSelectable":false}
                 """)).path("id").asText());
         UUID employeeId = UUID.fromString(json(postJson("/api/v1/org/employees", CEO, """
-                {"employeeNo":"TMP-EMP-%s","name":"临时测试员工","mobile":"13900000000","hiredOn":"2026-07-19"}
+                {"employeeType":"REGULAR","employeeNo":"TMP-EMP-%s","name":"临时测试员工","mobile":"13900000000","hiredOn":"2026-07-19"}
                 """.formatted(suffix))).path("id").asText());
 
         putJson("/api/v1/org/units/" + orgId, CEO, """
@@ -87,7 +87,7 @@ class OrganizationMaintenanceIntegrationTest {
                  "applicableHotelIds":[],"expectedVersion":0}
                 """, 200);
         putJson("/api/v1/org/employees/" + employeeId, CEO, """
-                {"employeeNo":"TMP-EMP-%s","name":"临时测试员工已修改","mobile":"13900000001","hiredOn":"2026-07-19","employmentStatus":"INACTIVE"}
+                {"employeeType":"REGULAR","employeeNo":"TMP-EMP-%s","name":"临时测试员工已修改","mobile":"13900000001","hiredOn":"2026-07-19","employmentStatus":"INACTIVE"}
                 """.formatted(suffix), 200);
 
         deleteJson("/api/v1/org/units/" + orgId, CEO, 204);
@@ -122,7 +122,7 @@ class OrganizationMaintenanceIntegrationTest {
                 {"expectedProfileVersion":0,"expectedPositionVersion":0}
                 """);
         JsonNode employee = json(postJson("/api/v1/org/employees", CEO, """
-                {"employeeNo":"HIS-EMP-%s","name":"历史测试员工","mobile":"13900000002","hiredOn":"2026-07-19","loginName":"history.%s","temporaryPassword":"TempPass!2026"}
+                {"employeeType":"REGULAR","employeeNo":"HIS-EMP-%s","name":"历史测试员工","mobile":"13900000002","hiredOn":"2026-07-19","loginName":"history.%s","temporaryPassword":"TempPass!2026"}
                 """.formatted(suffix, suffix.toLowerCase())));
         UUID employeeId = UUID.fromString(employee.path("id").asText());
         UUID accountId = UUID.fromString(employee.path("accountId").asText());
@@ -153,7 +153,7 @@ class OrganizationMaintenanceIntegrationTest {
         deleteJson("/api/v1/org/positions/" + positionId + "?expectedVersion=1", CEO, 204);
 
         putJson("/api/v1/org/employees/" + employeeId, CEO, """
-                {"employeeNo":"HIS-EMP-%s","name":"历史测试员工","mobile":"13900000002","hiredOn":"2026-07-19","employmentStatus":"INACTIVE","loginName":"history.%s"}
+                {"employeeType":"REGULAR","employeeNo":"HIS-EMP-%s","name":"历史测试员工","mobile":"13900000002","hiredOn":"2026-07-19","employmentStatus":"INACTIVE","loginName":"history.%s"}
                 """.formatted(suffix, suffix.toLowerCase()), 200);
         assertThat(jdbc.queryForObject("select status from user_account where id = ?", String.class, accountId))
                 .isEqualTo("INACTIVE");
@@ -193,10 +193,10 @@ class OrganizationMaintenanceIntegrationTest {
     void administratorCanMoveAllInactiveEmployeesToRecycleBin() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8).toUpperCase();
         UUID employeeId = UUID.fromString(json(postJson("/api/v1/org/employees", CEO, """
-                {"employeeNo":"BULK-EMP-%s","name":"批量删除测试员工","hiredOn":"2026-07-19"}
+                {"employeeType":"REGULAR","employeeNo":"BULK-EMP-%s","name":"批量删除测试员工","hiredOn":"2026-07-19"}
                 """.formatted(suffix))).path("id").asText());
         putJson("/api/v1/org/employees/" + employeeId, CEO, """
-                {"employeeNo":"BULK-EMP-%s","name":"批量删除测试员工","hiredOn":"2026-07-19","employmentStatus":"INACTIVE"}
+                {"employeeType":"REGULAR","employeeNo":"BULK-EMP-%s","name":"批量删除测试员工","hiredOn":"2026-07-19","employmentStatus":"INACTIVE"}
                 """.formatted(suffix), 200);
 
         JsonNode response = json(postJson("/api/v1/org/employees/actions/delete-inactive", CEO, "{}"));
@@ -223,7 +223,7 @@ class OrganizationMaintenanceIntegrationTest {
         postJson("/api/v1/org/positions/" + secondPositionId + "/profile/publish", CEO,
                 "{\"expectedProfileVersion\":0,\"expectedPositionVersion\":0}");
         JsonNode employee = json(postJson("/api/v1/org/employees", CEO, """
-                {"employeeNo":"ASSIGN-EDIT-%s","name":"任职编辑测试员工","hiredOn":"%s",
+                {"employeeType":"REGULAR","employeeNo":"ASSIGN-EDIT-%s","name":"任职编辑测试员工","hiredOn":"%s",
                  "loginName":"assignment.edit.%s","temporaryPassword":"TempPass!2026"}
                 """.formatted(suffix, LocalDate.now(), suffix.toLowerCase())));
         UUID employeeId = UUID.fromString(employee.path("id").asText());
@@ -428,7 +428,7 @@ class OrganizationMaintenanceIntegrationTest {
                 """, UUID.class, UUID.fromString(TENANT));
         String suffix = UUID.randomUUID().toString().substring(0, 8).toLowerCase();
         UUID employeeId = UUID.fromString(json(postJson("/api/v1/org/employees", CEO, """
-                {"employeeNo":"OP-AUTO-%s","name":"日清自动分配测试员工","hiredOn":"%s",
+                {"employeeType":"REGULAR","employeeNo":"OP-AUTO-%s","name":"日清自动分配测试员工","hiredOn":"%s",
                  "loginName":"op.auto.%s","temporaryPassword":"TempPass!2026"}
                 """.formatted(suffix.toUpperCase(), LocalDate.now(), suffix))).path("id").asText());
 

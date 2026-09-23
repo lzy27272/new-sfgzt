@@ -139,6 +139,14 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where n.tenant_id = :tenantId
                       and ((n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type = 'ACADEMY_PLAN' and exists (
+                               select 1 from academy_plan ap join employee_position_assignment aa on aa.tenant_id=ap.tenant_id and aa.id=ap.assignment_id
+                               join employee ae on ae.tenant_id=ap.tenant_id and ae.id=ap.employee_id
+                               join user_account au on au.tenant_id=ae.tenant_id and au.id=ae.account_id
+                               where ap.tenant_id=n.tenant_id and ap.id=n.source_id and ap.account_id=n.recipient_account_id and ae.account_id=ap.account_id and aa.employee_id=ap.employee_id
+                                 and ap.state in ('ACTIVE','COMPLETED') and aa.status='ACTIVE' and aa.valid_from<=current_date
+                                 and (aa.valid_to is null or aa.valid_to>=current_date) and ae.employment_status='ACTIVE'
+                                 and ae.deleted_at is null and au.status='ACTIVE'))
                            or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
                                and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
                                and exists (select 1 from work_package_item item
@@ -242,6 +250,14 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where d.tenant_id = :tenantId and d.channel = 'WECHAT'
                       and ((n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type = 'ACADEMY_PLAN' and exists (
+                               select 1 from academy_plan ap join employee_position_assignment aa on aa.tenant_id=ap.tenant_id and aa.id=ap.assignment_id
+                               join employee ae on ae.tenant_id=ap.tenant_id and ae.id=ap.employee_id
+                               join user_account au on au.tenant_id=ae.tenant_id and au.id=ae.account_id
+                               where ap.tenant_id=n.tenant_id and ap.id=n.source_id and ap.account_id=n.recipient_account_id and ae.account_id=ap.account_id and aa.employee_id=ap.employee_id
+                                 and ap.state in ('ACTIVE','COMPLETED') and aa.status='ACTIVE' and aa.valid_from<=current_date
+                                 and (aa.valid_to is null or aa.valid_to>=current_date) and ae.employment_status='ACTIVE'
+                                 and ae.deleted_at is null and au.status='ACTIVE'))
                            or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
                                and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
                                and exists (select 1 from work_package_item item
@@ -342,6 +358,7 @@ public class WeComDeliveryWorker {
             return "#/workbench";
         }
         return switch (sourceType) {
+            case "ACADEMY_PLAN" -> "#/academy?tab=mine&id=" + sourceId;
             case "TASK" -> "#/tasks?view=mine&taskId=" + sourceId;
             case "WORK_EXPECTATION" -> "#/my-work?expectationId=" + sourceId;
             case "DAILY_REPORT" -> "#/daily-reports/" + sourceId;
