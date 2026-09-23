@@ -16,6 +16,7 @@ class WeComDeliveryWorkerTest {
         assertSafe("WORK_EXPECTATION", "#/my-work?expectationId=" + SOURCE_ID);
         assertSafe("DAILY_REPORT", "#/daily-reports/" + SOURCE_ID);
         assertSafe("WORK_RECORD", "#/workbench");
+        assertSafe("PROCUREMENT", "#/procurement?orderId=" + SOURCE_ID);
     }
 
     @Test
@@ -49,6 +50,16 @@ class WeComDeliveryWorkerTest {
         assertThat(WeComDeliveryWorker.useGroupChat("WORK_EXPECTATION", "chat-1")).isFalse();
         assertThat(WeComDeliveryWorker.useGroupChat("DAILY_REPORT", "chat-1")).isFalse();
         assertThat(WeComDeliveryWorker.useGroupChat("WORK_RECORD", "chat-1")).isFalse();
+        assertThat(WeComDeliveryWorker.useGroupChat("PROCUREMENT", "chat-1")).isFalse();
+    }
+
+    @Test
+    void procurementDeepLinksRejectExtraOrDuplicateParameters() {
+        for (String path : new String[]{"#/procurement", "#/procurement?orderId=bad",
+                "#/procurement?orderId="+SOURCE_ID+"&orderId="+SOURCE_ID,
+                "#/procurement?orderId="+SOURCE_ID+"&redirect=https://example.com"}) {
+            assertThatThrownBy(() -> WeComOAuthService.validateReturnTo(path)).isInstanceOf(IllegalArgumentException.class);
+        }
     }
 
     private static void assertSafe(String sourceType, String expected) {

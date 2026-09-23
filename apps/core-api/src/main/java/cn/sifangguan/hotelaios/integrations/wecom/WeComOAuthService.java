@@ -164,6 +164,14 @@ public class WeComOAuthService {
             UUID.fromString(reportId);
             return value;
         }
+        if ("/procurement".equals(uri.getPath())) {
+            var query = UriComponentsBuilder.fromUri(uri).build().getQueryParams();
+            if (!query.keySet().equals(Set.of("orderId")) || query.get("orderId").size() != 1) {
+                throw new IllegalArgumentException("采购入口必须包含一个 orderId");
+            }
+            UUID.fromString(query.getFirst("orderId"));
+            return value;
+        }
         if ("/my-work".equals(uri.getPath())) {
             if (uri.getRawQuery() == null) {
                 throw new IllegalArgumentException("WeCom returnTo must include one expectationId");

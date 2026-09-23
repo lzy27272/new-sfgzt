@@ -362,7 +362,7 @@ export function applyRoleDefaultsForFallback<T extends { id: AppRouteId }>(
   const policy = resolveRolePresentationPolicy(roleCodeOrAlias)
   const allowed = DEFAULT_MODULE_SETS.get(policy.key)
   if (!allowed) return [...permissionVisibleItems]
-  return permissionVisibleItems.filter((item) => allowed.has(item.id))
+  return permissionVisibleItems.filter((item) => allowed.has(desktopModuleForRoute(item.id)))
 }
 
 /**
@@ -384,11 +384,13 @@ export function applyPublishedModuleVisibility<T extends { id: AppRouteId }>(
   if (!enabledModules.size) {
     return applyRoleDefaultsForFallback(permissionVisibleItems, roleCodeOrAlias)
   }
-  return permissionVisibleItems.filter((item) => enabledModules.has(item.id))
+  return permissionVisibleItems.filter((item) => enabledModules.has(desktopModuleForRoute(item.id)))
 }
 
 /** Normalize a page-level route to the desktop module that owns it. */
 export function desktopModuleForRoute(route: AppRouteId): AppRouteId {
+  // Procurement is a workbench subfeature, not a separately published top-level module.
+  if (route === 'procurement') return 'workbench'
   if (
     route === 'daily-reports-team'
     || route === 'daily-report-detail'

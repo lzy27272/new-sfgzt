@@ -47,7 +47,7 @@ const movementLabels: Record<string, string> = {
   RETURN: '退回', DAMAGE: '损坏', ADJUSTMENT: '库存调整', TRANSFER_IN: '调入', TRANSFER_OUT: '调出',
 }
 const movementSourceLabels: Record<string, string> = {
-  MANUAL: '手工登记', WORK_RECORD: '工作记录联动', HANDOVER: '异动移交', IMPORT: '表格导入', LAUNDRY: '洗涤报损及冲销',
+  MANUAL: '手工登记', WORK_RECORD: '工作记录联动', HANDOVER: '异动移交', IMPORT: '表格导入', LAUNDRY: '洗涤报损及冲销', PROCUREMENT: '采购收货复核入库',
 }
 const terminalHandoverStatuses = new Set(['COMPLETED', 'REJECTED', 'CANCELLED'])
 
@@ -90,7 +90,7 @@ export function StoreResourceRoutes({ identity, grantedPermissions, params, go }
     const activeItemIds = new Set(activeItems.map((item) => item.id))
     return {
       itemCount: activeItems.length,
-      lowStockCount: balances.data.filter((balance) => activeItemIds.has(balance.itemId) && balance.quantity < balance.minimumQuantity).length,
+      lowStockCount: balances.data.filter((balance) => activeItemIds.has(balance.itemId) && balance.quantity <= balance.minimumQuantity).length,
       assetCount: assets.data.filter((asset) => asset.status !== 'RETIRED').length,
       pendingHandoverCount: handovers.data.filter((handover) => !terminalHandoverStatuses.has(handover.status)).length,
       inventoryValue: balances.data.reduce((total, balance) => total + balance.inventoryValue, 0),
@@ -111,8 +111,9 @@ export function StoreResourceRoutes({ identity, grantedPermissions, params, go }
     <AsyncState loading={hotels.loading} error={hotels.error} empty={!hotels.loading && !hotels.error && !hotels.data.length} onRetry={hotels.reload} emptyTitle="当前权限范围没有门店" emptyDescription="请由管理员为当前任职授权门店范围和门店资源读取权限。" />
     {!hotels.loading && !hotels.error && params.hotelId && !selectedHotelId && <div className={styles.error} role="alert">该门店不存在、已停用或不在当前任职的授权范围内，请选择可访问门店。</div>}
     {!!selectedHotelId && <>
+      {(grantedPermissions.includes('*') || grantedPermissions.some(p => ['procurement.read', 'procurement.request', 'procurement.configure'].includes(p))) && <div className={styles.scopeBar}><div><strong>采购与收货</strong><p>低库存补货、主动采购、收货复核与库存联动</p></div><button className="primary" onClick={() => go('procurement', { hotelId: selectedHotelId })}>进入采购与收货</button></div>}
       {showImport && hasPermission(grantedPermissions, permissions.storeResource.importPreview) && <StoreResourceImportPanel key={`${identity.key}:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} canApply={hasPermission(grantedPermissions, permissions.storeResource.importApply)} onApplied={() => success('新店物品、期初库存和固定资产已一次性导入', [items.reload, balances.reload, movements.reload, assets.reload])} onError={setCommandError} />}
-      <section className={styles.metrics}><Metric label="物品种类" value={summary.itemCount} note="当前启用配置" /><Metric label="低库存" value={summary.lowStockCount} note="低于最低库存" warning={summary.lowStockCount > 0} /><Metric label="固定资产" value={summary.assetCount} note="当前门店资产" /><Metric label="待办移交" value={summary.pendingHandoverCount} note={`库存金额 ${money(summary.inventoryValue)}`} warning={summary.pendingHandoverCount > 0} /></section>
+      <section className={styles.metrics}><Metric label="物品种类" value={summary.itemCount} note="当前启用配置" /><Metric label="低库存" value={summary.lowStockCount} note="达到或低于最低库存" warning={summary.lowStockCount > 0} /><Metric label="固定资产" value={summary.assetCount} note="当前门店资产" /><Metric label="待办移交" value={summary.pendingHandoverCount} note={`库存金额 ${money(summary.inventoryValue)}`} warning={summary.pendingHandoverCount > 0} /></section>
       <nav className={styles.tabs} aria-label="门店资源功能">{tabs.map((tab) => <button type="button" key={tab.id} className={selectedTab === tab.id ? styles.active : ''} onClick={() => go('store-resources', { hotelId: selectedHotelId, tab: tab.id })}><strong>{tab.label}</strong><small>{tab.description}</small></button>)}</nav>
       {message && <div className={styles.success} role="status">{message}</div>}{commandError && <div className={styles.error} role="alert">{commandError}</div>}
       {selectedTab === 'usage' && <WorkUsagePanel key={`${identity.key}:${selectedHotelId}`} identity={identity} hotelId={selectedHotelId} canConfigure={hasPermission(grantedPermissions, permissions.storeResource.itemManage)} canReverse={hasPermission(grantedPermissions, permissions.storeResource.movementCreate)} go={go} onStockChanged={async () => { await Promise.all([items.reload(), balances.reload(), movements.reload()]) }} />}

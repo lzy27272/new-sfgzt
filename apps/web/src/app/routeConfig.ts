@@ -67,6 +67,7 @@ const legacyViews: readonly ViewId[] = [
   'organization',
   'store-resources',
   'finance',
+  'procurement',
   'data-retention',
   'ai-data',
   'wecom-webhooks',
