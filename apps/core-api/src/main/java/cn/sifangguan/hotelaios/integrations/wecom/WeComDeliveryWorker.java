@@ -139,6 +139,10 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where n.tenant_id = :tenantId
                       and ((n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type = 'PROCUREMENT' and exists(select 1 from procurement_order po
+                                join user_account ua on ua.tenant_id=po.tenant_id and ua.id=n.recipient_account_id and ua.status='ACTIVE'
+                                where po.tenant_id=n.tenant_id and po.id=n.source_id
+                                  and (n.notification_type<>'PROCUREMENT_OVERDUE_30_DAYS' or po.status<>'COMPLETED')))
                            or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
                                and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
                                and exists (select 1 from work_package_item item
@@ -242,6 +246,10 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where d.tenant_id = :tenantId and d.channel = 'WECHAT'
                       and ((n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type = 'PROCUREMENT' and exists(select 1 from procurement_order po
+                                join user_account ua on ua.tenant_id=po.tenant_id and ua.id=n.recipient_account_id and ua.status='ACTIVE'
+                                where po.tenant_id=n.tenant_id and po.id=n.source_id
+                                  and (n.notification_type<>'PROCUREMENT_OVERDUE_30_DAYS' or po.status<>'COMPLETED')))
                            or (n.source_type = 'WORK_EXPECTATION' and expectation.id is not null
                                and expectation.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')
                                and exists (select 1 from work_package_item item
@@ -349,6 +357,7 @@ public class WeComDeliveryWorker {
             // Keep review reminders usable without widening that security boundary here; the
             // reviewer lands on the authenticated workbench and can open 团队工作 from there.
             case "WORK_RECORD" -> "#/workbench";
+            case "PROCUREMENT" -> "#/procurement?orderId=" + sourceId;
             default -> throw new IllegalArgumentException("Unsupported WeCom notification source type");
         };
     }

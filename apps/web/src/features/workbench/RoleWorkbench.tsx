@@ -10,6 +10,8 @@ import { useResource } from '../../useResource'
 import { resolveTaskDispatchMode } from '../tasks/taskDispatchAccess'
 import { OwnDailyReportShortcut, TeamDailyReportShortcut } from './DailyReportShortcuts'
 import { DailyReportTodo } from './DailyReportTodo'
+import { ProcurementTodo } from '../procurement/ProcurementTodo'
+import { canProcure } from '../procurement/model'
 import { ManagerCycles, cycleType } from './ManagerCycles'
 import { WorkBoardPanel, WorkDateToolbar, WorkQueueAlerts, useWorkBoard } from './WorkBoard'
 import { boardLabels, emptyMetric, personalWorkLabel, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
@@ -92,6 +94,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
         {canReadNotices && <button className="secondary" onClick={() => go('notifications')}>消息提醒{unreadNotices.length ? ' ' + unreadNotices.length : ''}</button>}
       </div></header>
     {navigation}
+    {canProcure(permissions) && <ProcurementTodo key={identity.key} identity={identity} go={go} />}
     {managerCycles && <ManagerCycles key={identity.key} identity={identity} routeParams={routeParams} go={go} />}
     {!cycleOnly && <>
     {dailyReportsAvailable && Boolean(identity.businessActorAssignmentId) && allows(permissions, 'daily-report.read') && <DailyReportTodo key={identity.key} identity={identity} go={go} />}

@@ -531,6 +531,11 @@ public class AttachmentService {
         }
     }
 
+    /** Shared content validation only; consumers must separately enforce ownership and run malware scanning. */
+    public ValidatedUpload prepareUpload(MultipartFile file) {
+        return validatedFile(file, normalizeOriginalName(file.getOriginalFilename()));
+    }
+
     private ValidatedUpload validatedFile(MultipartFile file, String originalName) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("请选择需要上传的附件");
@@ -996,7 +1001,7 @@ public class AttachmentService {
     ) {
     }
 
-    private record ValidatedUpload(
+    public record ValidatedUpload(
             byte[] content,
             String mediaType,
             String sourceSha256,

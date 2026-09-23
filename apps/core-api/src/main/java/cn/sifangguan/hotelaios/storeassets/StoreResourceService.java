@@ -103,7 +103,7 @@ public class StoreResourceService {
                       on balance.tenant_id = item.tenant_id and balance.hotel_org_unit_id = item.hotel_org_unit_id
                      and balance.item_id = item.id
                     where item.tenant_id = :tenantId and item.hotel_org_unit_id = :hotelId
-                      and item.status = 'ACTIVE' and balance.quantity < item.minimum_quantity) as low_stock_count,
+                      and item.status = 'ACTIVE' and balance.quantity <= item.minimum_quantity) as low_stock_count,
                   (select count(*) from store_fixed_asset asset
                     where asset.tenant_id = :tenantId and asset.hotel_org_unit_id = :hotelId
                       and asset.status <> 'RETIRED') as asset_count,
@@ -132,7 +132,9 @@ public class StoreResourceService {
                         or exists (select 1 from store_work_usage_line usage_line
                           where usage_line.tenant_id=item.tenant_id and usage_line.item_id=item.id)
                         or exists (select 1 from store_laundry_rate rate
-                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)) as base_unit_locked,
+                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)
+                        or exists (select 1 from procurement_line purchase
+                          where purchase.tenant_id=item.tenant_id and purchase.item_id=item.id)) as base_unit_locked,
                        item.status, item.row_version,
                        coalesce(balance.quantity, 0) as current_quantity,
                        coalesce(balance.inventory_value, 0) as inventory_value,
@@ -425,6 +427,21 @@ public class StoreResourceService {
         var units = new StoreItemUnits(unit, unit, BigDecimal.ONE, unit, BigDecimal.ONE);
         return postMovementFact(principal, hotelId, request, item, request.movementType(), delta, units,
                 unit, BigDecimal.ONE, delta, key, sha256(key), "LAUNDRY", receiptId, reversal ? originalValue : null);
+    }
+
+    /** Internal entry point: caller holds the procurement receipt/order locks and authorizes its configured reviewer. */
+    Map<String, Object> postProcurementReceipt(TenantPrincipal principal, UUID hotelId, UUID receiptId,
+            UUID itemId, String baseUnit, BigDecimal quantity, BigDecimal receivedValue) {
+        var item = lockItem(principal, hotelId, itemId);
+        if (!"ACTIVE".equals(item.get("status")) || !baseUnit.equals(item.get("unit"))) {
+            throw conflict("采购物品已停用或基础单位发生变化，请核对后再复核入库");
+        }
+        String key = "procurement:" + receiptId + ":" + itemId;
+        var request = new StoreResourceModels.CreateMovementRequest(itemId, "RECEIPT", quantity,
+                receivedValue.divide(quantity, 4, RoundingMode.HALF_UP), "采购收货复核入库", null, baseUnit, null);
+        var units = new StoreItemUnits(baseUnit, baseUnit, BigDecimal.ONE, baseUnit, BigDecimal.ONE);
+        return postMovementFact(principal, hotelId, request, item, "RECEIPT", quantity, units,
+                baseUnit, BigDecimal.ONE, quantity, key, sha256(key), "PROCUREMENT", receiptId, receivedValue);
     }
 
     private Map<String, Object> postMovementFact(TenantPrincipal principal, UUID hotelId,
@@ -1095,7 +1112,9 @@ public class StoreResourceService {
                         or exists (select 1 from store_work_usage_line usage_line
                           where usage_line.tenant_id=item.tenant_id and usage_line.item_id=item.id)
                         or exists (select 1 from store_laundry_rate rate
-                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)) as base_unit_locked,
+                          where rate.tenant_id=item.tenant_id and rate.item_id=item.id)
+                        or exists (select 1 from procurement_line purchase
+                          where purchase.tenant_id=item.tenant_id and purchase.item_id=item.id)) as base_unit_locked,
                        item.status, item.row_version,
                        coalesce(balance.quantity, 0) as current_quantity,
                        coalesce(balance.inventory_value, 0) as inventory_value,
