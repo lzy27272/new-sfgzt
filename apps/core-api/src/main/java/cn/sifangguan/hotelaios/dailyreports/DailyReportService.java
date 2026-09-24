@@ -66,6 +66,7 @@ public class DailyReportService {
     private final ObjectMapper objectMapper;
     private final DailyReportRoutineProjectionService routineProjection;
     private final DailyReportWorkEntryService workEntry;
+    private final DailyActivityService activities;
 
     public DailyReportService(
             NamedParameterJdbcTemplate jdbc,
@@ -79,7 +80,8 @@ public class DailyReportService {
             DailyReportTemplateService templateService,
             ObjectMapper objectMapper,
             DailyReportRoutineProjectionService routineProjection,
-            DailyReportWorkEntryService workEntry
+            DailyReportWorkEntryService workEntry,
+            DailyActivityService activities
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -93,6 +95,7 @@ public class DailyReportService {
         this.objectMapper = objectMapper;
         this.routineProjection = routineProjection;
         this.workEntry = workEntry;
+        this.activities = activities;
     }
 
     @Transactional(readOnly = true)
@@ -367,6 +370,9 @@ public class DailyReportService {
         snapshot.set("items", itemSnapshot);
         if (request.inventoryQuantities() != null) snapshot.set("inventoryQuantities", request.inventoryQuantities());
         if (request.roomCounts() != null) snapshot.set("roomCounts", request.roomCounts());
+        if (request.housekeepingActivities() != null) {
+            snapshot.set("housekeepingActivities", activities.normalize(reportId, request.housekeepingActivities(), false));
+        }
         if (request.plannedHygiene() != null) {
             if (!workEntry.supportsPlannedHygiene(reportId)) {
                 throw new IllegalArgumentException("计划卫生只适用于客房服务员日报");
@@ -416,6 +422,7 @@ public class DailyReportService {
         if (reservation.replayed()) return replay(reservation);
         ObjectNode snapshot = parseObject(revision.payloadSnapshot(), "payload_snapshot");
         ValidationOutcome validation = validateSubmission(principal, request.revisionId(), itemPolicies(snapshot));
+        activities.submit(reportId, request.revisionId(), snapshot.get("housekeepingActivities"));
         workEntry.submit(reportId, snapshot);
         // Work submission can enrich this draft. Freeze the enriched facts, not the pre-submission copy.
         routineProjection.projectReport(reportId, request.revisionId());

@@ -139,6 +139,17 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where n.tenant_id = :tenantId
                       and ((n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type = 'LOST_PROPERTY' and exists (
+                               select 1 from lost_property_case lp
+                               join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
+                               join employee le on le.tenant_id=la.tenant_id and le.id=la.employee_id
+                               join user_account lu on lu.tenant_id=le.tenant_id and lu.id=le.account_id
+                               where lp.tenant_id=n.tenant_id and lp.id=n.source_id and lp.state='PENDING'
+                                 and n.recipient_assignment_id=la.id and le.account_id=n.recipient_account_id
+                                 and n.idempotency_key='lost-review:' || lp.id::text || ':' || lp.submission_no::text
+                                 and la.status='ACTIVE' and la.valid_from<=current_date and (la.valid_to is null or la.valid_to>=current_date)
+                                 and le.employment_status='ACTIVE' and lu.status='ACTIVE'
+                           ))
                            or (n.source_type = 'ACADEMY_PLAN' and exists (
                                select 1 from academy_plan ap join employee_position_assignment aa on aa.tenant_id=ap.tenant_id and aa.id=ap.assignment_id
                                join employee ae on ae.tenant_id=ap.tenant_id and ae.id=ap.employee_id
@@ -254,6 +265,17 @@ public class WeComDeliveryWorker {
                     ) chat on true
                     where d.tenant_id = :tenantId and d.channel = 'WECHAT'
                       and ((n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type = 'LOST_PROPERTY' and exists (
+                               select 1 from lost_property_case lp
+                               join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
+                               join employee le on le.tenant_id=la.tenant_id and le.id=la.employee_id
+                               join user_account lu on lu.tenant_id=le.tenant_id and lu.id=le.account_id
+                               where lp.tenant_id=n.tenant_id and lp.id=n.source_id and lp.state='PENDING'
+                                 and n.recipient_assignment_id=la.id and le.account_id=n.recipient_account_id
+                                 and n.idempotency_key='lost-review:' || lp.id::text || ':' || lp.submission_no::text
+                                 and la.status='ACTIVE' and la.valid_from<=current_date and (la.valid_to is null or la.valid_to>=current_date)
+                                 and le.employment_status='ACTIVE' and lu.status='ACTIVE'
+                           ))
                            or (n.source_type = 'ACADEMY_PLAN' and exists (
                                select 1 from academy_plan ap join employee_position_assignment aa on aa.tenant_id=ap.tenant_id and aa.id=ap.assignment_id
                                join employee ae on ae.tenant_id=ap.tenant_id and ae.id=ap.employee_id
@@ -375,6 +397,7 @@ public class WeComDeliveryWorker {
             // reviewer lands on the authenticated workbench and can open 团队工作 from there.
             case "WORK_RECORD" -> "#/workbench";
             case "PROCUREMENT" -> "#/procurement?orderId=" + sourceId;
+            case "LOST_PROPERTY" -> "#/lost-properties?id=" + sourceId;
             default -> throw new IllegalArgumentException("Unsupported WeCom notification source type");
         };
     }

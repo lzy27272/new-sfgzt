@@ -120,6 +120,11 @@ export function safeTaskDeepLink(returnTo: string | undefined): string {
     return `#/daily-reports/${reportMatch[1]}`
   }
 
+  if (target.pathname === '/lost-properties') {
+    const ids = target.searchParams.getAll('id')
+    if (target.hash || [...target.searchParams.keys()].length !== 1 || ids.length !== 1 || !TASK_ID_PATTERN.test(ids[0])) throw new Error('企微遗留物审核目标参数无效，系统已拒绝跳转。')
+    return '#/lost-properties?id=' + ids[0]
+  }
   if (target.pathname === '/academy') {
     const ids=target.searchParams.getAll('id'), tabs=target.searchParams.getAll('tab')
     if(target.hash || [...target.searchParams.keys()].length!==2 || tabs.length!==1 || tabs[0]!=='mine' || ids.length!==1 || !TASK_ID_PATTERN.test(ids[0])) throw new Error('企微学院目标参数无效，系统已拒绝跳转。')

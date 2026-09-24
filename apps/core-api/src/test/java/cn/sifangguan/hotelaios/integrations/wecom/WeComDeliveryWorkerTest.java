@@ -18,6 +18,7 @@ class WeComDeliveryWorkerTest {
         assertSafe("WORK_RECORD", "#/workbench");
         assertSafe("ACADEMY_PLAN", "#/academy?tab=mine&id=" + SOURCE_ID);
         assertSafe("PROCUREMENT", "#/procurement?orderId=" + SOURCE_ID);
+        assertSafe("LOST_PROPERTY", "#/lost-properties?id=" + SOURCE_ID);
     }
 
     @Test
@@ -58,6 +59,7 @@ class WeComDeliveryWorkerTest {
         assertThat(WeComDeliveryWorker.useGroupChat("DAILY_REPORT", "chat-1")).isFalse();
         assertThat(WeComDeliveryWorker.useGroupChat("WORK_RECORD", "chat-1")).isFalse();
         assertThat(WeComDeliveryWorker.useGroupChat("PROCUREMENT", "chat-1")).isFalse();
+        assertThat(WeComDeliveryWorker.useGroupChat("LOST_PROPERTY", "chat-1")).isFalse();
     }
 
     @Test

@@ -28,6 +28,9 @@ public final class WorkEntryPolicy {
         String code = itemCode == null ? "" : itemCode.toUpperCase(Locale.ROOT).replaceFirst("_FACT$", "");
         return OCCURRENCE_ITEMS.contains(code);
     }
+    public static boolean mergedIntoDailyReport(String itemCode) {
+        return "HKA_GUEST_SERVICE_EVENT".equals(itemCode) || "HKA_LOST_PROPERTY".equals(itemCode);
+    }
 
     public static boolean genericQuestion(String key, String title) {
         return GENERIC_KEYS.contains(key) || GENERIC_TITLES.contains(title);

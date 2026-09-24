@@ -66,9 +66,10 @@ class StoreItemUsageScopeIntegrationTest {
         assertThat(response(get("/api/v1/store-resources/hotels/" + OTHER_HOTEL + "/usage-scope-options"), 200)
                 .path("departments").isEmpty()).isTrue();
         var download = mvc.perform(admin(get(API + "/imports/template"))).andExpect(status().isOk()).andReturn().getResponse();
-        assertThat(download.getHeader("Content-Disposition")).contains("V3.xlsx");
+        assertThat(download.getHeader("Content-Disposition")).contains("V4.xlsx");
         var book = workbook.read(download.getContentAsByteArray());
-        assertThat(book.sheet("物品与期初库存").rows().getFirst()).contains("适用部门*", "适用岗位", "采购换算比例");
+        assertThat(book.sheet("物品与期初库存").rows().getFirst()).contains("使用部门*", "适用岗位", "采购换算比例");
+        assertThat(book.sheet("固定资产").rows().getFirst()).contains("使用部门*", "适用岗位");
         assertThat(book.sheet("部门岗位参考").rows().toString()).contains("HZ-FRONT", "HZ-HOUSEKEEPING", "FRONT_DESK");
         assertThat(book.sheet("填写说明").rows().toString()).contains("旧V1/V2", "不拆分库存", "所选部门内全部岗位");
     }
@@ -231,6 +232,51 @@ class StoreItemUsageScopeIntegrationTest {
         }
         assertThatThrownBy(() -> jdbc.update("insert into store_item_usage_department values (?::uuid,?::uuid,?::uuid,?::uuid)", TENANT, OTHER_HOTEL, id, HOUSEKEEPING))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+    }
+
+    @Test void scopeOnlyImportUpdatesBothSheetsWithoutChangingInventoryCostOrCustodian() throws Exception {
+        ObjectNode input=itemInput();
+        String item=response(post(API+"/items").contentType("application/json").content(input.toString()),201).path("id").asText();
+        String code="ASSET-"+UUID.randomUUID();
+        var assetBody=mapper.valueToTree(Map.of("assetCode",code,"name","吸尘器","category","设备","unit","台","originalValue",980,
+                "responsibleAssignmentId","19200000-0000-0000-0000-000000000002","status","ACTIVE"));
+        String asset=response(post(API+"/assets").contentType("application/json").content(assetBody.toString()),201).path("id").asText();
+        var beforeItem=jdbc.queryForMap("select * from store_resource_item where id=?::uuid",item);
+        var beforeAsset=jdbc.queryForMap("select * from store_fixed_asset where id=?::uuid",asset);
+        var sheets=new LinkedHashMap<String,List<List<String>>>();
+        sheets.put("物品与期初库存",List.of(List.of("物品编码*","使用部门*","适用岗位"),List.of(input.path("sku").asText(),"前厅部","前台员工")));
+        sheets.put("固定资产",List.of(List.of("资产编号*","使用部门*","适用岗位"),List.of(code,"客房部","不限岗位")));
+        var file=upload(sheets);var job=response(multipart(API+"/imports/preview").file(file).param("scopeOnly","true"),201);
+        assertThat(job.path("status").asText()).isEqualTo("READY");
+        assertThat(job.path("scopeOnly").asBoolean()).isTrue();
+        String jobId=job.path("id").asText();apply(jobId,200);apply(jobId,200);
+        var afterItem=jdbc.queryForMap("select * from store_resource_item where id=?::uuid",item);
+        var afterAsset=jdbc.queryForMap("select * from store_fixed_asset where id=?::uuid",asset);
+        for(String key:List.of("unit_cost","minimum_quantity","unit","sku"))assertThat(afterItem.get(key)).isEqualTo(beforeItem.get(key));
+        for(String key:List.of("original_value","responsible_assignment_id","status","asset_code"))assertThat(afterAsset.get(key)).isEqualTo(beforeAsset.get(key));
+        assertThat(((Number)afterAsset.get("row_version")).longValue()).isEqualTo(((Number)beforeAsset.get("row_version")).longValue()+1);
+        assertThat(afterItem.get("usage_scope_mode")).isEqualTo("DEPARTMENTS");
+        assertThat(afterAsset.get("usage_scope_mode")).isEqualTo("DEPARTMENTS");
+        assertThat(jdbc.queryForObject("select count(*) from store_asset_usage_department where asset_id=?::uuid and department_id=?::uuid",Integer.class,asset,HOUSEKEEPING)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from store_asset_usage_position where asset_id=?::uuid",Integer.class,asset)).isZero();
+        assertThat(response(get(API+"/assets"),200).toString()).contains("客房部");
+    }
+
+    @Test void scopeOnlyRejectsBlankScopeAndStaleVersionsWithoutPartialWrites() throws Exception {
+        ObjectNode first=itemInput(),second=itemInput();
+        String firstId=response(post(API+"/items").contentType("application/json").content(first.toString()),201).path("id").asText();
+        String secondId=response(post(API+"/items").contentType("application/json").content(second.toString()),201).path("id").asText();
+        var sheets=new LinkedHashMap<String,List<List<String>>>();
+        sheets.put("物品与期初库存",List.of(List.of("物品编码*","使用部门*","适用岗位"),List.of(first.path("sku").asText(),"","")));
+        sheets.put("固定资产",List.of(List.of("资产编号*","使用部门*","适用岗位")));
+        assertThat(response(multipart(API+"/imports/preview").file(upload(sheets)).param("scopeOnly","true"),201).path("status").asText()).isEqualTo("INVALID");
+        sheets.put("物品与期初库存",List.of(List.of("物品编码*","使用部门*","适用岗位"),List.of(first.path("sku").asText(),"全店通用",""),List.of(second.path("sku").asText(),"前厅部","前台员工")));
+        var job=response(multipart(API+"/imports/preview").file(upload(sheets)).param("scopeOnly","true"),201);
+        assertThat(job.path("status").asText()).isEqualTo("READY");
+        jdbc.update("update store_resource_item set row_version=row_version+1 where id=?::uuid",secondId);
+        apply(job.path("id").asText(),409);
+        assertThat(jdbc.queryForObject("select usage_scope_mode from store_resource_item where id=?::uuid",String.class,firstId)).isEqualTo("LEGACY");
+        assertThat(jdbc.queryForObject("select count(*) from store_item_usage_department where item_id=?::uuid",Integer.class,firstId)).isZero();
     }
 
     private ObjectNode itemInput() {

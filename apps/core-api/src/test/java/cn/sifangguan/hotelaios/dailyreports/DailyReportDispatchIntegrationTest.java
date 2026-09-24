@@ -79,6 +79,11 @@ class DailyReportDispatchIntegrationTest {
         assertThat(count("select count(*) from daily_report where position_assignment_id=? and business_date=?",assignment,day)).isZero();
         service.processTenantAsSystem(TENANT,100,UUID.randomUUID(),opens);
         assertThat(count("select count(*) from daily_report where position_assignment_id=? and business_date=?",assignment,day)).isEqualTo(1);
+        assertThat(count("""
+                select count(*) from notification n join daily_report d on d.tenant_id=n.tenant_id and d.id=n.source_id
+                where d.position_assignment_id=? and d.business_date=? and n.notification_type='DAILY_REPORT_READY'
+                  and n.title='今日日报与遗留物待填报' and n.content like '%服务案例和遗留物一并填写%'
+                """,assignment,day)).isEqualTo(1);
         assertThat(jdbc.queryForObject("""
                 select (report_deadline_at at time zone 'Asia/Shanghai')::time=time '18:00'
                 from daily_report where position_assignment_id=? and business_date=?
