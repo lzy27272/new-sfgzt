@@ -2112,7 +2112,9 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       {authMode !== 'dev-header' && <button className="logout-button" onClick={onLogout}>退出</button>}
     </header>
       {demoFallbackEnabled && <div className="demo-warning">已显式启用演示回退：仅当真实 API 请求失败时展示演示数据；API 返回空结果时仍显示空状态。</div>}
-      <div className="canvas">{view !== 'workbench' && <CenterFeatureNavigation center={activeCenter} sectionId={sectionId} go={navigate} resolveTarget={navigationTarget} unreadCount={unreadCount} />}{page}</div>
+      <div className="canvas">{view !== 'workbench' && <CenterFeatureNavigation center={activeCenter} sectionId={sectionId} go={navigate} resolveTarget={navigationTarget} unreadCount={unreadCount} />}{page}
+        {icpRecordNumber && <footer className="mobile-icp-footer"><a className="icp-record" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a></footer>}
+      </div>
       <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} mobile />
       {changingPassword && <ChangePasswordDialog identity={activeIdentity} onClose={() => setChangingPassword(false)} onChanged={() => { setChangingPassword(false); onLogout?.() }} />}
     </main>
