@@ -655,11 +655,80 @@ class StoreWorkUsageIntegrationTest {
     }
 
     private String item(String category,String base,String unit,int factor,int qty,double cost) throws Exception {
-        String id=call(post("/api/v1/store-resources/hotels/"+H+"/items"),ADMIN,Map.of("sku",UUID.randomUUID().toString(),"name","耗用测试物品","category",category,"unit",base,"unitCost",cost,"minimumQuantity",0,"issueUnit",unit,"issueFactor",factor),201).path("id").asText();
+        String id=call(post("/api/v1/store-resources/hotels/"+H+"/items"),ADMIN,Map.of("sku",UUID.randomUUID().toString(),"name","耗用测试物品","category",category,"unit",base,"unitCost",cost,"minimumQuantity",0,"issueUnit",unit,"issueFactor",factor,"usageScope",Map.of("mode","ALL_DEPARTMENTS","departmentIds",List.of(),"positionIds",List.of())),201).path("id").asText();
         if(qty>0)receipt(id,qty,cost); return id;
     }
     private void receipt(String id,int qty,double cost) throws Exception {
         call(post("/api/v1/store-resources/hotels/"+H+"/movements").header("Idempotency-Key",UUID.randomUUID().toString()),ADMIN,Map.of("itemId",id,"movementType","RECEIPT","quantity",qty,"unitCost",cost,"reason","测试入库"),201);
+    }
+
+    @Test void employeeCatalogueEnforcesDepartmentAndPositionAndFiltersQuickList() throws Exception {
+        String position=jdbc.queryForObject("select position_id::text from employee_position_assignment where id=?::uuid",String.class,EA);
+        String otherPosition=jdbc.queryForObject("select position_id::text from employee_position_assignment where id=?::uuid",String.class,GMA);
+        String shared=item("CONSUMABLE","支","支",1,0,1), department=item("CONSUMABLE","支","支",1,0,1), own=item("CONSUMABLE","支","支",1,0,1);
+        String other=item("CONSUMABLE","支","支",1,0,1), legacy=item("CONSUMABLE","支","支",1,0,1), wrongDepartment=item("CONSUMABLE","支","支",1,0,1);
+        jdbc.update("update store_resource_item set usage_scope_mode='DEPARTMENTS' where id in (?::uuid,?::uuid)",department,wrongDepartment);
+        jdbc.update("insert into store_item_usage_department(tenant_id,hotel_org_unit_id,item_id,department_id) values(?::uuid,?::uuid,?::uuid,?::uuid)",T,H,department,D);
+        jdbc.update("insert into store_item_usage_department(tenant_id,hotel_org_unit_id,item_id,department_id) values(?::uuid,?::uuid,?::uuid,?::uuid)",T,H,wrongDepartment,"12000000-0000-0000-0000-000000000006");
+        for (String id:List.of(own,wrongDepartment)) jdbc.update("insert into store_item_usage_position(tenant_id,hotel_org_unit_id,item_id,position_id) values(?::uuid,?::uuid,?::uuid,?::uuid)",T,H,id,position);
+        jdbc.update("insert into store_item_usage_position(tenant_id,hotel_org_unit_id,item_id,position_id) values(?::uuid,?::uuid,?::uuid,?::uuid)",T,H,other,otherPosition);
+        jdbc.update("update store_resource_item set usage_scope_mode='LEGACY' where id=?::uuid",legacy);
+        // Even a second active role belonging to the same employee must not widen the current role.
+        UUID extra=UUID.randomUUID();
+        jdbc.update("insert into employee_position_assignment(id,tenant_id,employee_id,org_unit_id,position_id,valid_from,status) values(?,?::uuid,?::uuid,?::uuid,?::uuid,current_date,'ACTIVE')",extra,T,EMPLOYEE,H,otherPosition);
+        try {
+            String endpoint="/api/v1/store-resources/hotels/"+H+"/usage-quick-lists/"+position;
+            var before=call(get(endpoint),ADMIN,null,200);
+            call(put(endpoint),ADMIN,Map.of("itemIds",List.of(shared,department,own,other,legacy,wrongDepartment),"expectedVersion",before.path("row_version").asLong()),200);
+            for (String code:List.of("HKA_ITEM_ISSUE","HKA_DAILY_REPORT","NSA_DAILY_HANDOVER")) {
+                var catalog=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",H).param("itemCode",code),EMP,null,200);
+                Set<String> ids=new HashSet<>(); catalog.path("items").forEach(item->ids.add(item.path("id").asText()));
+                assertThat(ids).contains(shared,department,own).doesNotContain(other,legacy,wrongDepartment);
+                assertThat(catalog.path("department_configured").asBoolean()).isTrue();
+                assertThat(catalog.path("unconfigured_item_count").asInt()).isPositive();
+                assertThat(catalog.toString()).doesNotContain("unit_cost","inventory_value","current_quantity");
+                if (!code.equals("HKA_ITEM_ISSUE")) assertThat(catalog.path("quick_list").path("item_ids")).isEqualTo(mapper.valueToTree(List.of(shared,department,own)));
+                for(JsonNode item:catalog.path("items")) {
+                    if(item.path("id").asText().equals(own))assertThat(item.path("usage_scope_kind").asText()).isEqualTo("POSITION");
+                    if(item.path("id").asText().equals(department))assertThat(item.path("usage_scope_kind").asText()).isEqualTo("DEPARTMENT");
+                    if(item.path("id").asText().equals(shared))assertThat(item.path("usage_scope_kind").asText()).isEqualTo("SHARED");
+                }
+            }
+            // Caller-supplied hotel/department and broad administrative permissions cannot impersonate an assignment.
+            call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",H),ADMIN,null,403);
+            jdbc.update("update employee_position_assignment set org_unit_id=?::uuid where id=?::uuid",H,EA);
+            try {
+                var catalog=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",D),EMP,null,200);
+                assertThat(catalog.path("department_configured").asBoolean()).isFalse();
+                assertThat(catalog.path("items").toString()).doesNotContain(department).contains(shared,own);
+            } finally { jdbc.update("update employee_position_assignment set org_unit_id=?::uuid where id=?::uuid",D,EA); }
+        } finally { jdbc.update("update employee_position_assignment set status='INACTIVE' where id=?",extra); }
+    }
+
+    @Test void forgedAndReconfiguredUsageLinesAreRejectedIncludingZerosWithoutPosting() throws Exception {
+        usageItemCode="NSA_DAILY_HANDOVER"; setup();
+        String allowed=item("CONSUMABLE","支","支",1,10,2), denied=item("CONSUMABLE","支","支",1,10,2);
+        String record=submit(List.of(line(allowed,"3","支",0),line(denied,"2","支",0)),true,201).path("id").asText();
+        jdbc.update("update store_resource_item set usage_scope_mode='LEGACY' where id=?::uuid",denied);
+        call(post("/api/v1/work-data/records/"+record+"/actions/submit"),EMP,Map.of("expectedVersion",0),400);
+        assertThat(jdbc.queryForObject("select status from work_record where id=?::uuid",String.class,record)).isEqualTo("DRAFT");
+        assertThat(jdbc.queryForObject("select payload::text from work_record where id=?::uuid",String.class,record)).contains(denied,"\"2\"");
+        assertThat(jdbc.queryForObject("select count(*) from store_work_usage where work_record_id=?::uuid",Integer.class,record)).isZero();
+        balance(allowed,"10","20"); balance(denied,"10","20");
+        for (String quantity:List.of("0","")) {
+            var input=Map.of("schemaVersion",2,"remainingUnusedConfirmed",true,"lines",List.of(line(denied,quantity,"支",0)));
+            call(post("/api/v1/work-data/records"),EMP,recordBody(input,false),400);
+        }
+    }
+
+    @Test void issueSubmissionCannotBypassPositionScope() throws Exception {
+        usageItemCode="HKA_ITEM_ISSUE"; setup();
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        String otherPosition=jdbc.queryForObject("select position_id::text from employee_position_assignment where id=?::uuid",String.class,GMA);
+        jdbc.update("insert into store_item_usage_position(tenant_id,hotel_org_unit_id,item_id,position_id) values(?::uuid,?::uuid,?::uuid,?::uuid)",T,H,item,otherPosition);
+        submit(List.of(line(item,"2","支",0)),false,400);
+        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isZero();
+        balance(item,"10","20");
     }
     private Map<String,Object> line(String id,String quantity,String unit,int v) { return Map.of("itemId",id,"quantity",quantity,"unit",unit,"expectedItemVersion",v); }
     private JsonNode submit(List<Map<String,Object>> lines,boolean draft,int status) throws Exception {

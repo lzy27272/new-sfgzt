@@ -1,6 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { focusedWorkFields, isOccurrenceEntry, isGenericWorkQuestion, matchesTaskAssignee, workPolicyValue } from '../src/app/workEntryPolicy.ts'
+import { allowsGuestServiceAlbumUpload, focusedWorkFields, isOccurrenceEntry, isGenericWorkQuestion, matchesTaskAssignee, workPolicyValue } from '../src/app/workEntryPolicy.ts'
+
+test('housekeeping guest service photos can be selected later without changing other work evidence', () => {
+  const requirement = { checkpointCode: 'guest_service_photo' }
+  assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', requirement), true)
+  assert.equal(allowsGuestServiceAlbumUpload('hka_guest_service_event_fact', requirement), true)
+  assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', { ...requirement, captureSource: 'FILE_PICKER' }), true)
+  for (const code of [undefined, 'HKA_CART_PREPARATION', 'HKA_COMPLAINT_EVENT', 'GM_PUBLIC_AREA_CHECK']) {
+    assert.equal(allowsGuestServiceAlbumUpload(code, requirement), false)
+  }
+  assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', { checkpointCode: 'other_photo' }), false)
+  for (const captureSource of ['CAMERA', 'UNKNOWN']) {
+    assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', { ...requirement, captureSource }), false)
+  }
+})
 
 test('role work forms remove generic questions but keep actual business facts', () => {
   const fields = { workSummary: { title: '工作结果' }, issueFound: { title: '是否有异常' },

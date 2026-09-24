@@ -19,6 +19,14 @@ const item = { id: 'soap', name: '清洁液', category: 'CLEANING_SUPPLY', unit:
 const catalogue = { hotelOrgUnitId: 'hotel-a', enabled: true, rowVersion: 0, reviewerAvailable: true, reviewerName: '王店助', reviewerPositionName: '店助', items: [item] }
 const input = { schemaVersion: 1, noUsage: false, lines: [{ itemId: 'soap', quantity: '0.15', unit: '升', expectedItemVersion: 2 }] }
 
+test('unrecognized issue draft is retained with disabled inputs instead of being reset by search', () => {
+  const value={旧物品数量:'7'}
+  const html=renderToStaticMarkup(React.createElement(WorkUsageFields,{catalogue:{...catalogue,mode:'ISSUE'},value,onChange(){throw new Error('must not overwrite unknown draft')},onRefresh(){}}))
+  assert.match(html,/已保留原内容/)
+  assert.match(html,/<fieldset disabled=""/)
+  assert.deepEqual(value,{旧物品数量:'7'})
+})
+
 test('daily report accepts typed use while issuing stock remains a separate non-consumption task', () => {
   assert.equal(usage.supportsWorkUsage({ itemCode: 'HKA_USAGE_RETURN' }), true)
   assert.equal(usage.supportsWorkUsage({ itemCode: 'NSA_DAILY_HANDOVER' }), true)

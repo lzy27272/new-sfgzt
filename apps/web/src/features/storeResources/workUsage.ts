@@ -3,9 +3,10 @@ import { featureApiMutation, featureApiRequest } from '../shared/featureApi'
 import { baseQuantityPreview } from './unitConversion'
 
 export type UsageConfig = { hotelOrgUnitId: string; enabled: boolean; rowVersion: number; reviewerAssignmentId?: string; reviewerName?: string; reviewerPositionName?: string; reviewerAvailable: boolean }
-export type UsageItem = { id: string; name: string; sku?: string; category: string; specification: string; unit: string; issueUnit: string; issueFactor: number; rowVersion: number }
+export type UsageScopeKind = 'POSITION' | 'DEPARTMENT' | 'SHARED'
+export type UsageItem = { id: string; name: string; sku?: string; category: string; specification: string; unit: string; issueUnit: string; issueFactor: number; rowVersion: number; usageScopeKind?: UsageScopeKind }
 export type UsageQuickList = { positionId: string; rowVersion: number; configured: boolean; itemIds: string[] }
-export type UsageCatalogue = UsageConfig & { items: UsageItem[]; referenceUsage?: UsageDetail; mode?: 'ISSUE' | 'USAGE'; quickList?: UsageQuickList }
+export type UsageCatalogue = UsageConfig & { items: UsageItem[]; referenceUsage?: UsageDetail; mode?: 'ISSUE' | 'USAGE'; quickList?: UsageQuickList; departmentConfigured?: boolean; unconfiguredItemCount?: number }
 export type UsageInputLine = { itemId: string; quantity: string; unit: string; expectedItemVersion: number }
 export type UsageInput = { schemaVersion: 1; noUsage: boolean; lines: UsageInputLine[] }
 export type UsageLine = { itemId: string; itemName: string; category: string; baseUnit: string; inputUnit: string; inputQuantity: number; conversionFactor: number; baseQuantity: number }

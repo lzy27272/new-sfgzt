@@ -36,13 +36,15 @@ public class StoreWorkUsageService {
     private final AuditWriter audit;
     private final ObjectMapper mapper;
     private final DailyReportRoutineProjectionService projection;
+    private final StoreEmployeeItemScope itemScope;
 
     public StoreWorkUsageService(NamedParameterJdbcTemplate jdbc, TenantDatabaseContext databaseContext,
             AccessPolicy access, EffectiveIdentityService identities, StoreResourceService stock,
-            AuditWriter audit, ObjectMapper mapper, DailyReportRoutineProjectionService projection) {
+            AuditWriter audit, ObjectMapper mapper, DailyReportRoutineProjectionService projection, StoreEmployeeItemScope itemScope) {
         this.jdbc = jdbc; this.databaseContext = databaseContext; this.access = access;
         this.identities = identities; this.stock = stock; this.audit = audit; this.mapper = mapper;
         this.projection = projection;
+        this.itemScope = itemScope;
     }
 
     @Transactional(readOnly = true)
@@ -72,34 +74,35 @@ public class StoreWorkUsageService {
         TenantPrincipal p = prepare(access.principal().hasPermission("work-record.submit") ? "work-record.submit" : "work-record.review");
         if (!p.hasPermission("work-record.submit")) access.requirePermission("store-resource.read");
         UUID hotelId = hotelFor(p, orgUnitId);
-        if (!p.hasTenantScope() && !p.orgScopes().contains(hotelId)) {
-            Integer member = jdbc.queryForObject("""
-                    select count(*) from employee_position_assignment a
-                    join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
-                    join org_unit_closure c on c.tenant_id=a.tenant_id and c.descendant_id=a.org_unit_id
-                    where a.tenant_id=:tenantId and a.id=:assignmentId and e.account_id=:actorId
-                      and c.ancestor_id=:hotelId and a.status='ACTIVE' and e.employment_status='ACTIVE'
-                      and a.valid_from<=current_date and (a.valid_to is null or a.valid_to>=current_date)
-                    """, base(p).addValue("hotelId", hotelId).addValue("assignmentId", p.businessActorAssignmentId())
-                    .addValue("actorId", p.actorId()), Integer.class);
-            if (member == null || member == 0) throw new AccessDeniedException("只能填写本人任职门店的物品数量");
-        }
+        var assignment = itemScope.assignment(p, hotelId, p.businessActorAssignmentId(), true);
         Map<String, Object> config = configuration(p, hotelId);
         Map<String, Object> result = new LinkedHashMap<>(config);
         boolean issue = ISSUE_ITEMS.contains(Objects.toString(itemCode, ""));
         result.put("mode", issue ? "ISSUE" : "USAGE");
         if (issue) result.put("enabled", true);
         // Employees must not receive financial values or unrestricted inventory balances.
-        result.put("items", jdbc.queryForList("""
-                select id, sku, name, category, specification, unit, issue_unit, issue_factor, row_version
-                from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
-                  and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN')
-                order by category,name,id
-                """, base(p).addValue("hotelId", hotelId)));
+        var items = jdbc.queryForList("""
+                select i.id,i.sku,i.name,i.category,i.specification,i.unit,i.issue_unit,i.issue_factor,i.row_version,
+                  case when exists(select 1 from store_item_usage_position pos where pos.tenant_id=i.tenant_id and pos.item_id=i.id)
+                    then 'POSITION' when i.usage_scope_mode='DEPARTMENTS' then 'DEPARTMENT' else 'SHARED' end as usage_scope_kind
+                from store_resource_item i where i.tenant_id=:tenantId and i.hotel_org_unit_id=:hotelId
+                  and i.status='ACTIVE' and i.employee_usage_enabled and i.category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') and
+                """ + StoreEmployeeItemScope.ELIGIBLE + " order by case i.category when 'LINEN' then 0 when 'CONSUMABLE' then 1 else 2 end,i.name,i.id",
+                itemScope.parameters(p, hotelId, assignment));
+        result.put("items", items);
+        result.put("department_configured", assignment.get("department_configured"));
+        result.put("unconfigured_item_count", jdbc.queryForObject("""
+                select count(*) from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
+                  and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') and usage_scope_mode='LEGACY'
+                """, base(p).addValue("hotelId",hotelId), Integer.class));
         if (!issue) {
-            List<UUID> positions = jdbc.queryForList("select position_id from employee_position_assignment where tenant_id=:tenantId and id=:assignmentId",
-                    base(p).addValue("assignmentId", p.businessActorAssignmentId()), UUID.class);
-            if (!positions.isEmpty()) result.put("quick_list", quickList(p, hotelId, positions.getFirst()));
+            var quick = new LinkedHashMap<>(quickList(p, hotelId, (UUID)assignment.get("position_id")));
+            Set<UUID> eligible = new HashSet<>(items.stream().map(row -> (UUID)row.get("id")).toList());
+            List<?> configuredIds = (List<?>)quick.get("item_ids");
+            quick.put("item_ids", Boolean.TRUE.equals(quick.get("configured"))
+                    ? configuredIds.stream().filter(eligible::contains).toList()
+                    : items.stream().limit(100).map(row -> row.get("id")).toList());
+            result.put("quick_list", quick);
         }
         if (businessDate != null && SHARED_ITEMS.contains(Objects.toString(itemCode, ""))) {
             List<UUID> employees = jdbc.queryForList("select employee_id from employee_position_assignment where tenant_id=:tenantId and id=:assignmentId",
@@ -262,7 +265,7 @@ public class StoreWorkUsageService {
     public void registerSubmitted(UUID recordId) {
         TenantPrincipal p = access.principal();
         Map<String, Object> record = jdbc.queryForMap("""
-                select r.target_org_unit_id,r.work_expectation_id,r.employee_id,r.business_date,r.payload::text,r.status,i.item_code,i.submission_policy::text
+                select r.target_org_unit_id,r.work_expectation_id,r.employee_id,r.position_assignment_id,r.business_date,r.payload::text,r.status,i.item_code,i.submission_policy::text
                 from work_record r left join work_package_item i on i.tenant_id=r.tenant_id and i.id=r.work_package_item_id
                 where r.tenant_id=:tenantId and r.id=:recordId
                 """, base(p).addValue("recordId", recordId));
@@ -302,7 +305,8 @@ public class StoreWorkUsageService {
             if (typed) throw conflict("门店尚未配置耗用审核人，请联系管理员配置后提交");
             return; // Legacy pilot stores retain their existing reporting flow until enabled.
         }
-        if (input.path("schemaVersion").asInt() == 2) input = normalizeDailyUsage(p, hotelId, input);
+        var assignment = itemScope.assignment(p, hotelId, (UUID)record.get("position_assignment_id"), false);
+        if (input.path("schemaVersion").asInt() == 2) input = normalizeDailyUsage(p, hotelId, assignment, input);
         if (!typed || !input.path("noUsage").isBoolean() || !input.path("lines").isArray()) {
             throw new IllegalArgumentException("请按门店物品清单填写实际耗用数量，或明确勾选本次无耗用");
         }
@@ -334,6 +338,7 @@ public class StoreWorkUsageService {
                       and id=:itemId and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for update
                     """, base(p).addValue("hotelId", hotelId).addValue("itemId", itemId));
             if (items.isEmpty()) throw new IllegalArgumentException("所选物品已停用或不属于本门店，请刷新物品清单");
+            itemScope.requireEligible(p, hotelId, assignment, itemId);
             Map<String, Object> item = items.getFirst();
             long itemVersion = ((Number) item.get("row_version")).longValue();
             if (!line.path("expectedItemVersion").isIntegralNumber()
@@ -363,7 +368,7 @@ public class StoreWorkUsageService {
         notifyReviewer(p, recordId, reviewerId);
     }
 
-    private JsonNode normalizeDailyUsage(TenantPrincipal p, UUID hotelId, JsonNode input) {
+    private JsonNode normalizeDailyUsage(TenantPrincipal p, UUID hotelId, Map<String,Object> assignment, JsonNode input) {
         JsonNode normalized = DailyUsageInput.normalize(input);
         // Check even zero/blank rows: old units, disabled and foreign items are never silently discarded.
         List<JsonNode> lines = new ArrayList<>();
@@ -376,6 +381,7 @@ public class StoreWorkUsageService {
                       and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for update
                     """,base(p).addValue("hotelId",hotelId).addValue("itemId",UUID.fromString(line.path("itemId").asText())));
             if (items.isEmpty()) throw conflict("清单中有已停用或不属于本门店的物品，请刷新后核对");
+            itemScope.requireEligible(p, hotelId, assignment, UUID.fromString(line.path("itemId").asText()));
             var item = items.getFirst();
             if (!line.path("expectedItemVersion").isIntegralNumber() || !line.path("expectedItemVersion").canConvertToLong()
                     || line.path("expectedItemVersion").asLong(-1) != ((Number)item.get("row_version")).longValue())
@@ -400,15 +406,20 @@ public class StoreWorkUsageService {
         if (lines.size() > 100 || (input.path("noUsage").asBoolean() ? !lines.isEmpty() : lines.isEmpty()))
             throw new IllegalArgumentException("领用登记应包含1至100种物品，无领用时不能填写数量");
         UUID hotelId = hotelFor(p, (UUID) record.get("target_org_unit_id"));
+        var assignment = itemScope.assignment(p, hotelId, (UUID)record.get("position_assignment_id"), false);
         Set<UUID> seen = new HashSet<>();
-        for (JsonNode line : lines) {
+        List<JsonNode> ordered = new ArrayList<>();
+        lines.forEach(ordered::add);
+        ordered.sort(Comparator.comparing(line -> UUID.fromString(line.path("itemId").asText()).toString()));
+        for (JsonNode line : ordered) {
             UUID itemId = UUID.fromString(line.path("itemId").asText());
             if (!seen.add(itemId)) throw new IllegalArgumentException("同一种物品不能重复填报");
             List<Map<String, Object>> items = jdbc.queryForList("""
                     select * from store_resource_item where tenant_id=:tenantId and hotel_org_unit_id=:hotelId
-                      and id=:itemId and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN')
+                      and id=:itemId and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for share
                     """, base(p).addValue("hotelId", hotelId).addValue("itemId", itemId));
             if (items.isEmpty()) throw new IllegalArgumentException("所选物品不可用或不属于本门店");
+            itemScope.requireEligible(p, hotelId, assignment, itemId);
             Map<String, Object> item = items.getFirst();
             if (!line.path("expectedItemVersion").isIntegralNumber()
                     || line.path("expectedItemVersion").asLong(-1) != ((Number) item.get("row_version")).longValue())

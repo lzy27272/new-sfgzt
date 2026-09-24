@@ -16,7 +16,7 @@ export function usageScopeValidation(scope: ItemUsageScope, options: UsageScopeO
 }
 
 export function usageScopeSummary(scope?: ItemUsageScope, options?: UsageScopeOptions): { departments: string; positions: string } {
-  if (!scope || scope.mode === 'LEGACY') return { departments: '使用范围待配置', positions: '保留原有领用及常用品行为' }
+  if (!scope || scope.mode === 'LEGACY') return { departments: '使用范围待配置', positions: '补齐范围后员工可选择' }
   const names = (ids: string[], current: UsageScopeOption[], saved: UsageScopeOption[]) => ids.map(id => current.find(o => o.id === id)?.name ?? saved.find(o => o.id === id)?.name ?? '未找到的配置项').join('、')
   return {
     departments: scope.mode === 'ALL_DEPARTMENTS' ? '全店通用' : names(scope.departmentIds, options?.departments ?? [], scope.departments ?? []) || '尚未选择部门',

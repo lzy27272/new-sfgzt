@@ -172,7 +172,7 @@
 .itemPicker > footer { border-top: 1px solid #dce6ed; padding-bottom: max(22px, env(safe-area-inset-bottom)); }
 .itemPicker > footer > span { margin-right: auto; }
 .pickerBody { overflow: auto; padding: 20px 22px; flex: 1; min-height: 0; }
-.pickerSearch { display: grid; gap: 8px; }
+.pickerSearch { display: grid; gap: 8px; position: sticky; top: 0; z-index: 1; background: #fff; padding-block: 8px; }
 .pickerSearch input { width: 100%; min-width: 0; border: 1px solid #cddde8; border-radius: 10px; min-height: 44px; padding: 10px 12px; font-size: 16px; }
 .pickerCategories { display: flex; margin: 20px 0 0; border-bottom: 1px solid #dce6ed; }
 .pickerCategories button { flex: 1; padding: 14px 4px; background: transparent; border: 0; border-bottom: 3px solid transparent; color: #61798b; cursor: pointer; }

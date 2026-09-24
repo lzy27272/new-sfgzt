@@ -15,6 +15,15 @@ export function isGenericWorkQuestion(code: string, title?: string): boolean {
 
 export function isOccurrenceEntry(code?: string): boolean { return occurrenceCodes.has((code ?? '').toUpperCase().replace(/_FACT$/, '')) }
 
+export function allowsGuestServiceAlbumUpload(
+  itemCode: string | undefined,
+  requirement: { checkpointCode: string; captureSource?: string },
+): boolean {
+  return (itemCode ?? '').toUpperCase().replace(/_FACT$/, '') === 'HKA_GUEST_SERVICE_EVENT'
+    && requirement.checkpointCode === 'guest_service_photo'
+    && (!requirement.captureSource || requirement.captureSource === 'FILE_PICKER')
+}
+
 export function workPolicyValue(payload: Record<string, unknown>, field: string): unknown {
   if (field === 'issueFound' || field === 'hasException') {
     const details = typeof payload.issueSummary === 'string' ? payload.issueSummary.trim() : ''

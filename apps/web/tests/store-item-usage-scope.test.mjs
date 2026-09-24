@@ -7,7 +7,7 @@ const options = { departments: [{ id: 'd1', code: 'FRONT', name: '前厅部' }, 
 const specific = { mode: 'DEPARTMENTS', departmentIds: ['d2'], positionIds: [], departments: [options.departments[1]] }
 
 test('usage scope distinguishes old unconfigured items from explicitly all-store items', () => {
-  assert.deepEqual(usageScopeSummary(), { departments: '使用范围待配置', positions: '保留原有领用及常用品行为' })
+  assert.deepEqual(usageScopeSummary(), { departments: '使用范围待配置', positions: '补齐范围后员工可选择' })
   assert.equal(usageScopeSummary({ mode: 'LEGACY', departmentIds: [], positionIds: [] }).departments, '使用范围待配置')
   assert.equal(usageScopeSummary({ mode: 'ALL_DEPARTMENTS', departmentIds: [], positionIds: [] }).departments, '全店通用')
   assert.equal(usageScopeSummary(specific).departments, '客房部')

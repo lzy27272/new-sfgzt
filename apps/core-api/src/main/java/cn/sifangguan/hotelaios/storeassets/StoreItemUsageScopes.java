@@ -8,7 +8,7 @@ import java.util.*;
 
 import static cn.sifangguan.hotelaios.storeassets.StoreResourceModels.UsageScopeInput;
 
-/** Metadata for future usage selection; never grants access or partitions the stock ledger. */
+/** Selection scope enforced at employee entry/submission; never grants access or partitions the stock ledger. */
 @Component
 public class StoreItemUsageScopes {
     private final NamedParameterJdbcTemplate jdbc;

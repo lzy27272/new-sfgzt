@@ -23,6 +23,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -241,6 +242,29 @@ class WorkDataEvidencePolicyTest {
         assertThat(WorkDataService.mediaTypeAllowed(
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", documents)).isTrue();
         assertThat(WorkDataService.mediaTypeAllowed("image/png", documents)).isFalse();
+    }
+
+    @Test
+    void serviceAlbumEvidenceSatisfiesUnrestrictedPhotoPolicyButNotExplicitCameraPolicy() throws Exception {
+        String requirement="\"checkpointCode\":\"guest_service_photo\",\"label\":\"服务照片\",\"minimum\":1,\"allowedKinds\":[\"IMAGE\"]";
+        String policy="{\"attachmentRequired\":true,\"evidenceRequirements\":[{"+requirement+"}]}";
+        WorkDataService service=serviceWithPolicies(policy,"{}","{}");
+        var jdbc=(NamedParameterJdbcTemplate)ReflectionTestUtils.getField(service,"jdbc");
+        when(jdbc.queryForObject(contains("select count(*) from attachment"),any(MapSqlParameterSource.class),eq(Integer.class))).thenReturn(1);
+        when(jdbc.queryForList(contains("from attachment"),any(MapSqlParameterSource.class))).thenAnswer(invocation -> {
+            var parameters=invocation.getArgument(1,MapSqlParameterSource.class);
+            assertThat(parameters.getValue("checkpointCode")).isEqualTo("guest_service_photo");
+            // Stored photo is FILE_PICKER without a client capture timestamp. SQL must not require CAMERA.
+            return "CAMERA".equals(parameters.getValue("captureSource")) ? List.of() : List.of(Map.of("media_type","image/jpeg","evidence_metadata","{}"));
+        });
+        TenantPrincipal principal=new TenantPrincipal(UUID.randomUUID(),UUID.randomUUID(),"TEST",Set.of(),UUID.randomUUID());
+        UUID item=UUID.randomUUID(),record=UUID.randomUUID(),hotel=UUID.randomUUID();
+        JsonNode payload=json("{\"roomNumber\":\"1208\",\"serviceContent\":\"补送浴巾\"}");
+        assertThatCode(()->ReflectionTestUtils.invokeMethod(service,"validateSubmissionPolicy",principal,item,record,payload,hotel,null,null,null)).doesNotThrowAnyException();
+        when(jdbc.queryForMap(contains("select submission_policy::text"),any(MapSqlParameterSource.class)))
+            .thenReturn(Map.of("submission_policy","{\"attachmentRequired\":true,\"evidenceRequirements\":[{"+requirement+",\"captureSource\":\"CAMERA\"}]}","applicability_policy","{}","execution_policy","{}"));
+        assertThatThrownBy(()->ReflectionTestUtils.invokeMethod(service,"validateSubmissionPolicy",principal,item,record,payload,hotel,null,null,null))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("服务照片至少需要1份");
     }
 
     private JsonNode json(String value) throws Exception {
