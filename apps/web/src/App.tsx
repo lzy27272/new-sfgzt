@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, demoFallbackEnabled, establishFederatedSession, hasAccessToken, login, logout } from './api/client'
-import { allowsGuestServiceAlbumUpload, focusedWorkFields, isOccurrenceEntry, workPolicyValue } from './app/workEntryPolicy'
+import { allowsGuestServiceAlbumUpload, evidenceCaptureSourceMatches, focusedWorkFields, isOccurrenceEntry, workPolicyValue } from './app/workEntryPolicy'
 import { consumeLogoutEntry } from './app/logoutEntry'
 import { useScopedResource } from './shared/useScopedResource'
 import { WorkUsageFields } from './features/storeResources/WorkUsageFields'
@@ -932,11 +932,11 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
         for (const value of normalizedValues) {
           const stored = existing?.status === 'DRAFT'
             ? existing.attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode
-              && (!requirement.captureSource || entry.captureSource === requirement.captureSource)
+              && evidenceCaptureSourceMatches(entry.captureSource, requirement.captureSource)
               && normalizedInstanceKey(entry.evidenceInstanceKey ?? '') === value).length
             : 0
           const pending = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode
-            && (!requirement.captureSource || entry.captureSource === requirement.captureSource)
+            && evidenceCaptureSourceMatches(entry.captureSource, requirement.captureSource)
             && normalizedInstanceKey(entry.evidenceInstanceKey ?? '') === value).length
           if (stored + pending < minimumPerInstance) {
             throw new Error(`${requirement.label}·${value}至少需要 ${minimumPerInstance} 张现场照片。`)
@@ -946,10 +946,10 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
       }
       const stored = existing?.status === 'DRAFT'
         ? existing.attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode
-          && (!requirement.captureSource || entry.captureSource === requirement.captureSource)).length
+          && evidenceCaptureSourceMatches(entry.captureSource, requirement.captureSource)).length
         : 0
       const pending = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode
-        && (!requirement.captureSource || entry.captureSource === requirement.captureSource)).length
+        && evidenceCaptureSourceMatches(entry.captureSource, requirement.captureSource)).length
       const minimum = requirementMinimum(requirement)
       if (stored + pending < minimum) throw new Error(`${requirement.label}至少需要 ${minimum} 张${allowsGuestServiceAlbumUpload(item.itemCode, requirement) ? '照片，可从相册选择后上传' : '现场照片'}。`)
     }

@@ -805,7 +805,8 @@ public class WorkDataService {
                     where tenant_id = :tenantId and work_record_id = :recordId
                       and scan_status <> 'REJECTED'
                       and (:checkpointCode = '' or checkpoint_code = :checkpointCode)
-                      and (:captureSource = '' or capture_source = :captureSource)
+                      and (:captureSource = '' or capture_source = :captureSource
+                           or (:captureSource = 'CAMERA_OR_FILE' and capture_source in ('CAMERA', 'FILE_PICKER')))
                     """, base(principal).addValue("recordId", workRecordId)
                     .addValue("checkpointCode", checkpointCode)
                     .addValue("captureSource", captureSource));

@@ -1,18 +1,29 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { allowsGuestServiceAlbumUpload, focusedWorkFields, isOccurrenceEntry, isGenericWorkQuestion, matchesTaskAssignee, workPolicyValue } from '../src/app/workEntryPolicy.ts'
+import { allowsGuestServiceAlbumUpload, evidenceCaptureSourceMatches, focusedWorkFields, isOccurrenceEntry, isGenericWorkQuestion, matchesTaskAssignee, workPolicyValue } from '../src/app/workEntryPolicy.ts'
 
 test('housekeeping guest service photos can be selected later without changing other work evidence', () => {
   const requirement = { checkpointCode: 'guest_service_photo' }
   assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', requirement), true)
   assert.equal(allowsGuestServiceAlbumUpload('hka_guest_service_event_fact', requirement), true)
   assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', { ...requirement, captureSource: 'FILE_PICKER' }), true)
+  assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', { ...requirement, captureSource: 'CAMERA_OR_FILE' }), true)
   for (const code of [undefined, 'HKA_CART_PREPARATION', 'HKA_COMPLAINT_EVENT', 'GM_PUBLIC_AREA_CHECK']) {
     assert.equal(allowsGuestServiceAlbumUpload(code, requirement), false)
   }
   assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', { checkpointCode: 'other_photo' }), false)
   for (const captureSource of ['CAMERA', 'UNKNOWN']) {
     assert.equal(allowsGuestServiceAlbumUpload('HKA_GUEST_SERVICE_EVENT', { ...requirement, captureSource }), false)
+  }
+})
+
+test('camera-or-file is a choice of evidence sources, not a stored source or a camera-only requirement', () => {
+  for (const actual of ['CAMERA', 'FILE_PICKER', 'SYSTEM', undefined]) {
+    assert.equal(evidenceCaptureSourceMatches(actual, 'CAMERA_OR_FILE'), actual === 'CAMERA' || actual === 'FILE_PICKER')
+    assert.equal(evidenceCaptureSourceMatches(actual, 'CAMERA'), actual === 'CAMERA')
+    assert.equal(evidenceCaptureSourceMatches(actual, 'FILE_PICKER'), actual === 'FILE_PICKER')
+    assert.equal(evidenceCaptureSourceMatches(actual, undefined), true)
+    assert.equal(evidenceCaptureSourceMatches(actual, 'UNKNOWN'), false)
   }
 })
 

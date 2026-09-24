@@ -21,7 +21,13 @@ export function allowsGuestServiceAlbumUpload(
 ): boolean {
   return (itemCode ?? '').toUpperCase().replace(/_FACT$/, '') === 'HKA_GUEST_SERVICE_EVENT'
     && requirement.checkpointCode === 'guest_service_photo'
-    && (!requirement.captureSource || requirement.captureSource === 'FILE_PICKER')
+    && (!requirement.captureSource || ['FILE_PICKER', 'CAMERA_OR_FILE'].includes(requirement.captureSource))
+}
+
+export function evidenceCaptureSourceMatches(actual: string | undefined, required?: string): boolean {
+  if (!required) return true
+  if (required === 'CAMERA_OR_FILE') return actual === 'CAMERA' || actual === 'FILE_PICKER'
+  return actual === required
 }
 
 export function workPolicyValue(payload: Record<string, unknown>, field: string): unknown {
