@@ -10,7 +10,7 @@ const loginSource = appSource.slice(
 )
 
 test('account login uses the simplified dedicated surface without changing auth behavior', () => {
-  assert.match(loginSource, /className="login-auth-screen"/)
+  assert.match(loginSource, /className=\{`login-auth-screen\$\{/)
   assert.match(loginSource, /className="login-auth-layout"/)
   assert.match(loginSource, /aria-label="中台账号登录"/u)
   assert.match(loginSource, /autoComplete="username"/)
@@ -29,11 +29,12 @@ test('login layout has explicit desktop and mobile contracts', () => {
   assert.match(styleSource, /\.login-auth-card input\s*\{[^}]*font-size: 14px;/s)
   assert.match(styleSource, /\.login-auth-screen\s*\{[^}]*background: #f4f7f9;/s)
   assert.match(styleSource, /\.login-auth-screen\s*\{[^}]*min-height: 100vh;[^}]*min-height: 100dvh;/s)
-  assert.match(styleSource, /\.login-auth-icp\s*\{[^}]*color: #52697b;[^}]*font-size: 11px;/s)
+  assert.match(styleSource, /\.icp-record\s*\{[^}]*color: #334f64;[^}]*font-size: 15px;/s)
+  assert.match(loginSource, /<\/div>\s*<IcpFooter recordNumber=\{icpRecordNumber\} \/>\s*<\/main>/)
 })
 
 test('WeCom enrollment surfaces remain on their existing login-screen contract', () => {
-  assert.match(appSource, /className="login-auth-screen"/)
+  assert.match(appSource, /className=\{`login-auth-screen\$\{/)
   assert.doesNotMatch(loginSource, /className="login-screen"/)
   assert.match(styleSource, /\.login-screen\s*\{/)
 })

@@ -3,6 +3,7 @@ import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, dem
 import { allowsGuestServiceAlbumUpload, evidenceCaptureSourceMatches, focusedWorkFields, isOccurrenceEntry, workPolicyValue } from './app/workEntryPolicy'
 import { consumeLogoutEntry } from './app/logoutEntry'
 import { useScopedResource } from './shared/useScopedResource'
+import { IcpFooter } from './shared/IcpFooter'
 import { WorkUsageFields } from './features/storeResources/WorkUsageFields'
 import { UsageEvidenceSummary } from './features/storeResources/WorkUsagePanel'
 import { loadUsageCatalogue, supportsWorkUsage, usageInput, usagePayload, usageValidation, type UsageCatalogue } from './features/storeResources/workUsage'
@@ -1745,7 +1746,7 @@ function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => v
       setError(reason instanceof Error ? reason.message : '登录失败')
     } finally { setBusy(false) }
   }
-  return <main className="login-auth-screen">
+  return <main className={`login-auth-screen${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <div className="login-auth-layout">
       <section className="login-auth-brand" aria-label={product.name}>
         <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
@@ -1762,9 +1763,9 @@ function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => v
           {onWecomLogin && <button className="secondary" type="button" disabled={busy} onClick={onWecomLogin}>改用企业微信登录</button>}
           <small>内部测试系统 · 关键操作均记录账号、组织和时间</small>
         </form>
-        {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
       </section>
     </div>
+    <IcpFooter recordNumber={icpRecordNumber} />
   </main>
 }
 
@@ -1773,7 +1774,7 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
   onRetry: () => void
   onReturnToLogin?: () => void
 }) {
-  return <main className="login-auth-screen">
+  return <main className={`login-auth-screen${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <div className="login-auth-layout">
       <section className="login-auth-brand" aria-label={product.name}>
         <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
@@ -1789,9 +1790,9 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
           </>}
           {onReturnToLogin && <button type="button" className="secondary" onClick={onReturnToLogin}>使用账号密码登录</button>}
         </div>
-        {icpRecordNumber && <a className="icp-record login-auth-icp" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}
       </section>
     </div>
+    <IcpFooter recordNumber={icpRecordNumber} />
   </main>
 }
 
@@ -2106,10 +2107,10 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     return <SessionBootstrapPage error={me.error} onRetry={me.reload} onReturnToLogin={onLogout} />
   }
 
-  return <div className="shell">
+  return <div className={`shell${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <aside className="sidebar"><div className="brand-mark"><div>四</div><span><strong>{product.name}</strong><small>{product.edition} · {product.editionLabel}</small></span></div>
       <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} />
-      <div className="sidebar-footer"><span>{product.version}</span><small>标准 → 工作 → 任务 → 执行 → 验收</small>{icpRecordNumber && <a className="icp-record" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{icpRecordNumber}</a>}</div>
+      <div className="sidebar-footer"><span>{product.version}</span><small>标准 → 工作 → 任务 → 执行 → 验收</small></div>
     </aside>
     <main><header className="topbar"><div className="mobile-top-brand" aria-label={product.name}><span>四</span></div><div className={`connection ${me.error ? 'offline' : pilotDemoMode ? 'demo' : ''}`}><span className="live-dot" />{pilotDemoMode ? 'Pilot 演示数据' : me.error ? '身份接口异常' : '服务端权限已解析'}<small>{pilotDemoMode ? '仅用于界面与流程走查，不代表真实业务数据或权限' : authMode === 'dev-header' ? '本地验收账号 · 权限由数据库决定' : 'JWT/SSO 会话身份'}</small></div><span className="pilot-badge">{product.editionLabel}</span>
       {authMode === 'dev-header' && <label className="context-select account-context"><span>验收账号</span><select value={identity.key} onChange={(event) => changeRole(event.target.value)}>{roleContexts.map((role) => <option value={role.key} key={role.key}>{role.label} · {role.userName}</option>)}</select></label>}
@@ -2126,6 +2127,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} mobile />
       {changingPassword && <ChangePasswordDialog identity={activeIdentity} onClose={() => setChangingPassword(false)} onChanged={() => { setChangingPassword(false); onLogout?.() }} />}
     </main>
+    <IcpFooter recordNumber={icpRecordNumber} />
   </div>
 }
 
