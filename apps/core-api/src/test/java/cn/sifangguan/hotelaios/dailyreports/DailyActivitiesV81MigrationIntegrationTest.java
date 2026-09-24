@@ -65,6 +65,9 @@ class DailyActivitiesV81MigrationIntegrationTest {
             String draftSnapshot=snapshot(jdbc,"position_function_profile_version",draft);
             jdbc.execute("create role custody_migration_owner nologin nosuperuser nobypassrls");
             jdbc.execute("create role hotel_ai_os_app nologin nosuperuser nobypassrls");
+            // Mirror broad production defaults: explicit GRANT alone does not
+            // remove privileges inherited when the migration creates a table.
+            jdbc.execute("alter default privileges for role custody_migration_owner in schema public grant all on tables to hotel_ai_os_app");
             jdbc.execute("grant usage,create on schema public to custody_migration_owner");
             jdbc.execute("grant all on all tables in schema public to custody_migration_owner");
             jdbc.execute("grant usage,select on all sequences in schema public to custody_migration_owner");
@@ -86,6 +89,9 @@ class DailyActivitiesV81MigrationIntegrationTest {
                 assertThat(jdbc.queryForObject("select relrowsecurity and relforcerowsecurity from pg_class where oid=?::regclass",Boolean.class,table)).isTrue();
             assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app','daily_activity_photo','UPDATE')",Boolean.class)).isFalse();
             assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app','lost_property_case','UPDATE')",Boolean.class)).isTrue();
+            for(String table:List.of("lost_property_case","lost_property_event","daily_activity_photo"))
+                for(String privilege:List.of("DELETE","TRUNCATE","REFERENCES","TRIGGER"))
+                    assertThat(jdbc.queryForObject("select has_table_privilege('hotel_ai_os_app',?,?)",Boolean.class,table,privilege)).isFalse();
         }
     }
     private UUID expectation(JdbcTemplate jdbc,UUID version,UUID allocation,UUID assignment,String code,int days,String state) {

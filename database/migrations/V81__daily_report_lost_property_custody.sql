@@ -58,6 +58,9 @@ DO $$ DECLARE t TEXT; BEGIN
   EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY',t);
   EXECUTE format('CREATE POLICY tenant_isolation ON %I USING(tenant_id=nullif(current_setting(''app.tenant_id'',true),'''')::uuid) WITH CHECK(tenant_id=nullif(current_setting(''app.tenant_id'',true),'''')::uuid)',t);
   IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='hotel_ai_os_app') THEN
+   -- Production owners may have broad default table grants. Reset these before
+   -- assigning custody privileges so DELETE/TRUNCATE cannot survive implicitly.
+   EXECUTE format('REVOKE ALL PRIVILEGES ON %I FROM hotel_ai_os_app',t);
    EXECUTE format('GRANT SELECT,INSERT,UPDATE ON %I TO hotel_ai_os_app',t);
   END IF;
  END LOOP;
