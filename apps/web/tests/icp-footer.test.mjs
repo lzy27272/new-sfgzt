@@ -92,5 +92,6 @@ test('the footer is full-width, readable and reserves space for content and mobi
   assert.match(styles, /\.has-icp-footer \.mc-save-bar \{ bottom: var\(--page-bottom-reserve\)/)
   const procurementStyles = readFileSync(new URL('../src/features/procurement/procurement.module.css', import.meta.url), 'utf8')
   assert.match(procurementStyles, /bottom:calc\(8px \+ var\(--page-bottom-reserve,0px\)\)/)
+  assert.match(procurementStyles, /@media\(max-width:760px\)[^@]*bottom:calc\(8px \+ var\(--page-bottom-reserve,calc\(72px \+ env\(safe-area-inset-bottom\)\)\)\)/)
   assert.match(styles, /\.icp-record:focus-visible \{ outline: 2px/)
 })

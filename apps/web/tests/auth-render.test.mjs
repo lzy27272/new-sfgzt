@@ -83,6 +83,9 @@ test('an unauthenticated Pilot entry renders account login instead of a cached w
   const markup = renderToStaticMarkup(React.createElement(App))
 
   assert.match(markup, /账号登录/u)
+  assert.match(markup, /class="login-auth-screen has-icp-footer"/)
+  assert.equal((markup.match(/<footer class="site-icp-footer"/g) ?? []).length, 1)
+  assert.match(markup, /<\/section><\/div><footer class="site-icp-footer"/)
   assert.doesNotMatch(markup, /class="shell(?:\s[^"]*)?"/)
 })
 
@@ -92,6 +95,8 @@ test('a federated session hides the cached workbench while identity is resolving
   const markup = renderToStaticMarkup(React.createElement(App))
 
   assert.match(markup, /正在验证登录状态/u)
+  assert.equal((markup.match(/<footer class="site-icp-footer"/g) ?? []).length, 1)
+  assert.match(markup, /<\/section><\/div><footer class="site-icp-footer"/)
   assert.doesNotMatch(markup, /前台员工工作台/u)
   assert.doesNotMatch(markup, /class="shell(?:\s[^"]*)?"/)
   assert.match(markup, /使用账号密码登录/u)
