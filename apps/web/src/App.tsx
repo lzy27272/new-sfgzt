@@ -2100,7 +2100,11 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   return <div className={`shell${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <aside className="sidebar"><div className="brand-mark"><div>四</div><span><strong>{product.name}</strong><small>{product.edition} · {product.editionLabel}</small></span></div>
       <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} />
-      <div className="sidebar-footer"><span>{product.version}</span><small>标准 → 工作 → 任务 → 执行 → 验收</small></div>
+      <div className="sidebar-footer">
+        <span>{product.version}</span>
+        <small>标准 → 工作 → 任务 → 执行 → 验收</small>
+        <IcpFooter recordNumber={icpRecordNumber} placement="sidebar" />
+      </div>
     </aside>
     <main><header className="topbar"><div className="mobile-top-brand" aria-label={product.name}><span>四</span></div><div className={`connection ${me.error ? 'offline' : pilotDemoMode ? 'demo' : ''}`}><span className="live-dot" />{pilotDemoMode ? 'Pilot 演示数据' : me.error ? '身份接口异常' : '服务端权限已解析'}<small>{pilotDemoMode ? '仅用于界面与流程走查，不代表真实业务数据或权限' : authMode === 'dev-header' ? '本地验收账号 · 权限由数据库决定' : 'JWT/SSO 会话身份'}</small></div><span className="pilot-badge">{product.editionLabel}</span>
       {authMode === 'dev-header' && <label className="context-select account-context"><span>验收账号</span><select value={identity.key} onChange={(event) => changeRole(event.target.value)}>{roleContexts.map((role) => <option value={role.key} key={role.key}>{role.label} · {role.userName}</option>)}</select></label>}
@@ -2117,7 +2121,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} mobile />
       {changingPassword && <ChangePasswordDialog identity={activeIdentity} onClose={() => setChangingPassword(false)} onChanged={() => { setChangingPassword(false); onLogout?.() }} />}
     </main>
-    <IcpFooter recordNumber={icpRecordNumber} />
+    <IcpFooter recordNumber={icpRecordNumber} placement="mobile" />
   </div>
 }
 

@@ -29,7 +29,7 @@ test('login layout has explicit desktop and mobile contracts', () => {
   assert.match(styleSource, /\.login-auth-card input\s*\{[^}]*font-size: 14px;/s)
   assert.match(styleSource, /\.login-auth-screen\s*\{[^}]*background: #f4f7f9;/s)
   assert.match(styleSource, /\.login-auth-screen\s*\{[^}]*min-height: 100vh;[^}]*min-height: 100dvh;/s)
-  assert.match(styleSource, /\.icp-record\s*\{[^}]*color: #334f64;[^}]*font-size: 15px;/s)
+  assert.match(styleSource, /\.icp-record\s*\{[^}]*color: #334f64;[^}]*font-size: 12px;[^}]*font-weight: 400;/s)
   assert.match(loginSource, /<\/div>\s*<IcpFooter recordNumber=\{icpRecordNumber\} \/>\s*<\/main>/)
 })
 

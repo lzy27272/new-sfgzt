@@ -1,7 +1,10 @@
-export function IcpFooter({ recordNumber }: { recordNumber: string }) {
+export function IcpFooter({ recordNumber, placement = 'page' }: {
+  recordNumber: string
+  placement?: 'page' | 'sidebar' | 'mobile'
+}) {
   if (!recordNumber.trim()) return null
 
-  return <footer className="site-icp-footer" aria-label="网站备案信息">
-    <a className="icp-record" href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">{recordNumber}</a>
+  return <footer className={`site-icp-footer${placement === 'page' ? '' : ` site-icp-footer--${placement}`}`} aria-label="网站备案信息">
+    <span className="icp-record">{recordNumber}</span>
   </footer>
 }
