@@ -1,4 +1,4 @@
-import type { UsageItem } from './workUsage.ts'
+import type { UsageItem, UsageInputLine } from './workUsage.ts'
 
 export const issueRanges = { MINE: '我的范围', DEPARTMENT: '跨部门领用', HOTEL: '全店物资' } as const
 export type IssueRange = keyof typeof issueRanges
@@ -8,5 +8,13 @@ export function matchesIssueRange(item: UsageItem, range: IssueRange, department
   return item.applicableToAssignment !== false // Compatible with an older, own-scope-only response.
 }
 export function issueDepartmentLabel(item: UsageItem, departments: Array<{ id: string; name: string }> = []) {
-  return item.usageScopeMode === 'ALL_DEPARTMENTS' ? '全店通用' : (item.departmentIds ?? []).map(id => departments.find(d => d.id === id)?.name ?? '原配置部门').join('、') || '本岗位适用'
+  return item.usageScopeMode === 'ALL_DEPARTMENTS' ? '门店通用' : (item.departmentIds ?? []).map(id => departments.find(d => d.id === id)?.name ?? '原配置部门').join('、') || '本岗位适用'
+}
+
+// Keep the original version snapshot; clearing a quantity removes only that item.
+export function setIssueQuantity(lines: UsageInputLine[], item: UsageItem, quantity: string): UsageInputLine[] {
+  if (!quantity.trim()) return lines.filter(line => line.itemId !== item.id)
+  if (lines.some(line => line.itemId === item.id)) return lines.map(line => line.itemId === item.id ? { ...line, quantity } : line)
+  if (lines.length >= 100) return lines
+  return [...lines, { itemId: item.id, quantity, unit: item.issueUnit, expectedItemVersion: item.rowVersion }]
 }

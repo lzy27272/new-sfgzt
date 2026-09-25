@@ -44,7 +44,7 @@ import java.util.UUID;
 public class StoreResourceImportService {
     private static final String IMPORT_TYPE = "STORE_RESOURCE_INITIALIZATION";
     private static final String SCOPE_IMPORT_TYPE = "STORE_RESOURCE_USAGE_SCOPE";
-    private static final int TEMPLATE_VERSION = 5;
+    private static final int TEMPLATE_VERSION = 6;
     private static final String ITEM_SHEET = "物品与期初库存";
     private static final String ASSET_SHEET = "固定资产";
     private static final String XLSX_MEDIA_TYPE =
@@ -105,8 +105,8 @@ public class StoreResourceImportService {
                 List.of("6", "资产状态可填：在用、维修中、损坏、盘亏、已退役；留空默认为在用。"),
                 List.of("7", scopeOnly ? "本模板仅更新使用范围：按已有物品编码/资产编号匹配，不新增主档，不改变数量、成本、流水或责任人。上传时请选择仅更新使用范围。" : "本模板为新增模式：门店内重复物品编码或资产编号会被拦截。已有物品请改选仅更新使用范围后下载专用模板。"),
                 List.of("8", "规格和采购/领用耗用单位为选填；不填则沿用基础单位。1个采购或领用耗用单位=换算比例个基础单位；异名单位必须填比例，同名单位比例必须相同。"),
-                List.of("9", "例如基础单位支、采购单位箱、采购换算比例100；2箱期初库存请填200支，单支成本填0.5而非整箱50。旧V1/V2模板仍可导入，缺少使用范围的物品标为待配置，补齐后员工才能领用及填报，不自动改成全店通用。"),
-                List.of("10", "使用部门（兼容旧列名适用部门）：明确填写的部门优先。留空时按本门店编号规则识别QT-前厅部、KF-客房部、WX-维修部；未知编号或无法唯一匹配时须手工填写。多部门用分号分隔，可填全店通用。资产使用部门与责任人分开。"),
+                List.of("9", "例如基础单位支、采购单位箱、采购换算比例100；2箱期初库存请填200支，单支成本填0.5而非整箱50。旧V1/V2模板仍可导入；缺少使用范围时按编号识别，未匹配的配置为全店通用，仅限本门店。"),
+                List.of("10", "使用部门（兼容旧列名适用部门）：明确填写的部门与岗位优先。留空时按本门店编号规则识别QT-前厅部、KF-客房部、WX-维修部；未知编号、部门缺失或无法唯一匹配时配置为全店通用。多部门用分号分隔。资产使用部门与责任人分开。"),
                 List.of("11", "适用岗位选填：使用集团有效岗位标准名称/编码，多项用分号分隔；留空表示所选部门内全部岗位，不表示全店所有部门。岗位定义不以当前是否有人任职为条件。"),
                 List.of("12", "参考表仅供填写，系统按后台当前有效数据校验。部门和岗位取交集；员工按当前任职过滤物品。此配置不拆分库存、不授予新权限。岗位也可填写不限岗位。")
         ));
@@ -119,7 +119,7 @@ public class StoreResourceImportService {
         options.departments().forEach(option -> references.add(List.of("部门", option.code(), option.name(), "当前门店有效部门")));
         options.positions().forEach(option -> references.add(List.of("岗位", option.code(), option.name(), "集团有效岗位标准；与所选部门取交集")));
         sheets.put("部门岗位参考", references);
-        return new ImportFile(scopeOnly ? "库存资产使用范围更新模板_V5.xlsx" : "库存与固定资产导入模板_V5.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
+        return new ImportFile(scopeOnly ? "库存资产使用范围更新模板_V6.xlsx" : "库存与固定资产导入模板_V6.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
     }
 
     @Transactional
@@ -259,6 +259,10 @@ public class StoreResourceImportService {
         }
         ImportPayload payload = readPayload(job.get("parsed_payload"));
         if(payload.scopeOnly()) return applyScopeUpdate(principal,hotelId,jobId,job,payload,idempotencyKey);
+        // Never silently apply different metadata than an old preview showed.
+        if(payload.items().stream().anyMatch(item -> item.usageScope()==null)
+                || payload.assets().stream().anyMatch(asset -> asset.usageScope()==null))
+            throw conflict("此预检缺少使用范围，请重新上传预检；系统将按编号识别，未匹配项配置为全店通用");
         List<ImportError> conflicts = databaseConflicts(principal, hotelId, payload);
         if (!conflicts.isEmpty()) throw conflict("正式数据已变化，请重新上传并预检：" + conflicts.getFirst().message());
         requireAssignmentsStillValid(principal, hotelId, payload);
@@ -618,10 +622,11 @@ public class StoreResourceImportService {
     }
 
     private String inferredDepartmentName(String explicit, String code, StoreItemUsageScopes.Options options) {
-        if(!explicit.isBlank() || options.prefixConfig()==null) return explicit;
+        if(!explicit.isBlank()) return explicit;
+        if(options.prefixConfig()==null) return "全店通用";
         UUID id=StoreItemUsageScopes.inferredDepartment(code,options.prefixConfig());
         // A unique department code also disambiguates stores with duplicate display names.
-        return options.departments().stream().filter(d->d.id().equals(id)).map(StoreItemUsageScopes.Option::code).findFirst().orElse(explicit);
+        return options.departments().stream().filter(d->d.id().equals(id)).map(StoreItemUsageScopes.Option::code).findFirst().orElse("全店通用");
     }
 
     private List<ImportedAsset> resolveResponsibleAssignments(

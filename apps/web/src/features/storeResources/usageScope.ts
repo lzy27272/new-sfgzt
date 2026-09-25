@@ -12,7 +12,8 @@ export type ItemUsageScope = {
 export function inferUsageScope(code: string, options: UsageScopeOptions): ItemUsageScope | undefined {
   const normalized = code.trim().toUpperCase()
   const rule = options.prefixConfig?.rules.find(row => normalized.startsWith(`${row.prefix}-`))
-  if (!rule?.departmentId || !options.departments.some(d => d.id === rule.departmentId)) return
+  if (!options.prefixConfig) return // Wait for the current store's rules.
+  if (!rule?.departmentId || !options.departments.some(d => d.id === rule.departmentId)) return { mode: 'ALL_DEPARTMENTS', departmentIds: [], positionIds: [] }
   return { mode: 'DEPARTMENTS', departmentIds: [rule.departmentId], positionIds: [] }
 }
 

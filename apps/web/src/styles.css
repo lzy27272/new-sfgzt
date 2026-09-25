@@ -1177,3 +1177,20 @@ dd { margin: 5px 0 0; color: #334f64; font-size: 10px; }
   .workbench-summary-table { overflow-x: auto; }
   .workbench-summary-table > div { min-width: 460px; }
 }
+.work-record-supplements, .work-record-supplements > .supplement-fields { display: contents; }
+.issue-work-record-modal { width: min(600px, 100%); height: min(880px, 92dvh); max-height: 92dvh; overflow: hidden; display: flex; flex-direction: column; }
+.issue-work-record-modal > header { flex: none; min-height: 62px; padding: 12px 18px; background: #10384e; color: white; }
+.issue-work-record-modal > header .panel-kicker { display: none; }
+.issue-work-record-modal > header h2 { color: white; margin: 0; font-size: 20px; }
+.issue-work-record-modal > header .close { background: transparent; color: white; }
+.issue-work-record-modal > .form-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; gap: 0; }
+.issue-work-record-modal .work-usage-slot { flex: 1; min-height: 0; }
+.issue-supplements { flex: none; max-height: 28vh; overflow-y: auto; border-top: 1px solid #dce7ee; padding: 0 16px; font-size: 12px; background: #f8fafc; }
+.issue-supplements > summary { cursor: pointer; padding: 10px 0; color: #50758c; }
+.issue-supplements .supplement-fields { display: grid; gap: 12px; padding-bottom: 12px; }
+.issue-work-record-modal .work-record-feedback { flex: none; max-height: 76px; overflow-y: auto; }
+.issue-work-record-modal .work-record-feedback:empty { display: none; }
+.issue-work-record-modal .work-record-feedback > div { margin: 0; padding: 7px 16px; border-radius: 0; font-size: 12px; }
+.issue-work-record-modal > footer { flex: none; display: flex; padding: 12px 16px max(12px, env(safe-area-inset-bottom)); background: white; border-top: 1px solid #dce7ee; gap: 8px; }
+.issue-work-record-modal > footer button { min-height: 44px; flex: 1; font-size: 14px; padding: 8px; }
+@media (max-width: 600px) { .modal-backdrop:has(> .issue-work-record-modal) { padding: 8px; } .issue-work-record-modal { height: 94dvh; max-height: 94dvh; border-radius: 16px; } }

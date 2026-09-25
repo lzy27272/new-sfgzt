@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { issueRanges, matchesIssueRange, issueDepartmentLabel } from '../src/features/storeResources/issueSelection.ts'
+import { issueRanges, matchesIssueRange, issueDepartmentLabel, setIssueQuantity } from '../src/features/storeResources/issueSelection.ts'
 import { inferUsageScope } from '../src/features/storeResources/usageScope.ts'
 import { appendUsageItems, filterUsageItems } from '../src/features/storeResources/itemSelection.ts'
 
@@ -25,10 +25,26 @@ test('filtering and searching preserve previously entered quantities across rang
   assert.equal(next[0].quantity, '2'); assert.equal(next[1].quantity, '1')
   assert.deepEqual(lines, [{itemId:'mine',quantity:'2',unit:'支',expectedItemVersion:0}])
 })
-test('prefix inference uses current store mappings only and leaves unknown codes unconfigured', () => {
+test('prefix inference uses current store mappings and defaults unmatched codes to store common', () => {
   const options = {departments:[{id:'hk',code:'HK',name:'客房部'}],positions:[],prefixConfig:{rowVersion:0,rules:[{prefix:'KF',defaultName:'客房部',departmentId:'hk'},{prefix:'QT',defaultName:'前厅部',departmentId:'foreign'}]}}
   assert.deepEqual(inferUsageScope(' kf-S001 ',options), {mode:'DEPARTMENTS',departmentIds:['hk'],positionIds:[]})
-  assert.equal(inferUsageScope('QT-S001',options),undefined)
-  assert.equal(inferUsageScope('UNKNOWN',options),undefined)
-  assert.equal(inferUsageScope('KFA-S001',options),undefined)
+  for (const code of ['QT-S001', 'UNKNOWN', 'KFA-S001']) assert.deepEqual(inferUsageScope(code,options), {mode:'ALL_DEPARTMENTS',departmentIds:[],positionIds:[]})
+  assert.equal(inferUsageScope('UNKNOWN',{departments:[],positions:[]}),undefined)
+})
+
+test('inline quantities survive filters, preserve version conflicts, and clear without blank selections', () => {
+  const initial = setIssueQuantity([], own, '2')
+  const selected = setIssueQuantity(initial, cross, '3')
+  assert.equal(selected.length, 2)
+  assert.equal(setIssueQuantity(selected, {...cross,rowVersion:4},'12')[1].expectedItemVersion, 3)
+  assert.deepEqual(setIssueQuantity(selected, own, ''), [selected[1]])
+  assert.deepEqual(initial, [{itemId:'mine',quantity:'2',unit:'支',expectedItemVersion:0}])
+  assert.equal(setIssueQuantity(Array.from({length:100},(_,i)=>({itemId:String(i),quantity:'1',unit:'支',expectedItemVersion:0})), own,'1').length,100)
+})
+
+test('all matching store rows are returned without a search and beyond the previous 50-item limit', () => {
+  const all = Array.from({length:183},(_,i)=>({...own,id:String(i),name:'牙刷'+i}))
+  assert.equal(filterUsageItems(all,'','ALL').length,183)
+  assert.equal(filterUsageItems(all,'牙刷182','ALL')[0].id,'182')
+  assert.equal(issueDepartmentLabel({...own,usageScopeMode:'ALL_DEPARTMENTS',departmentIds:[]}), '门店通用')
 })

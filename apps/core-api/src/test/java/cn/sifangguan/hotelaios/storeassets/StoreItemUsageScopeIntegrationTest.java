@@ -66,7 +66,7 @@ class StoreItemUsageScopeIntegrationTest {
         assertThat(response(get("/api/v1/store-resources/hotels/" + OTHER_HOTEL + "/usage-scope-options"), 200)
                 .path("departments").isEmpty()).isTrue();
         var download = mvc.perform(admin(get(API + "/imports/template"))).andExpect(status().isOk()).andReturn().getResponse();
-        assertThat(download.getHeader("Content-Disposition")).contains("V5.xlsx");
+        assertThat(download.getHeader("Content-Disposition")).contains("V6.xlsx");
         var book = workbook.read(download.getContentAsByteArray());
         assertThat(book.sheet("物品与期初库存").rows().getFirst()).contains("使用部门*", "适用岗位", "采购换算比例");
         assertThat(book.sheet("固定资产").rows().getFirst()).contains("使用部门*", "适用岗位");
@@ -116,13 +116,15 @@ class StoreItemUsageScopeIntegrationTest {
         apply(job.path("id").asText(),200);
         assertThat(jdbc.queryForObject("select count(*) from store_item_usage_position p join store_resource_item i on i.id=p.item_id where i.sku=?",Integer.class,sku.toUpperCase(Locale.ROOT))).isOne();
         var unknown=preview(file(List.of(row("XX-"+UUID.randomUUID(),"","")),true));
-        assertThat(unknown.path("status").asText()).isEqualTo("INVALID");
+        assertThat(unknown.path("status").asText()).isEqualTo("READY");
+        assertThat(unknown.path("preview").path("items").get(0).path("usageScope").path("mode").asText()).isEqualTo("ALL_DEPARTMENTS");
+        apply(unknown.path("id").asText(),200);
     }
 
     @Test void prefixBackfillIsPreviewedVersionedIdempotentAndMetadataOnly() throws Exception {
         var created=response(post(API+"/items").contentType("application/json").content(itemInput().toString()),201);
         String id=created.path("id").asText();
-        jdbc.update("update store_resource_item set sku=? where id=?::uuid","QT-"+UUID.randomUUID(),id);
+        jdbc.update("update store_resource_item set sku=?,usage_scope_mode='LEGACY' where id=?::uuid","QT-"+UUID.randomUUID(),id);
         jdbc.update("insert into store_item_usage_position values(?::uuid,?::uuid,?::uuid,?::uuid)",TENANT,HOTEL,id,POSITION);
         var preview=response(get(API+"/department-prefix"),200);
         JsonNode row=null;for(JsonNode entry:preview.path("rows")) if(entry.path("id").asText().equals(id))row=entry;
@@ -142,6 +144,29 @@ class StoreItemUsageScopeIntegrationTest {
         response(put(API+"/department-prefix").contentType("application/json").content(wrong.toString()),400);
     }
 
+    @Test void unmatchedLegacyPreviewCanFillCommonButCannotAcceptAForgedDepartment() throws Exception {
+        var created=response(post(API+"/items").contentType("application/json").content(itemInput().toString()),201);
+        String id=created.path("id").asText();
+        assertThat(created.path("usage_scope").path("mode").asText()).isEqualTo("ALL_DEPARTMENTS");
+        jdbc.update("update store_resource_item set usage_scope_mode='LEGACY' where id=?::uuid",id);
+        var preview=response(get(API+"/department-prefix"),200);
+        JsonNode row=null; for(JsonNode entry:preview.path("rows")) if(entry.path("id").asText().equals(id)) row=entry;
+        assertThat(row.path("action").asText()).isEqualTo("FILL");
+        assertThat(row.path("inferred_scope_mode").asText()).isEqualTo("ALL_DEPARTMENTS");
+        var selection=mapper.createObjectNode().put("type","ITEM").put("id",id).put("expectedVersion",0).put("departmentId",FRONT);
+        var body=mapper.createObjectNode().put("configVersion",preview.path("config").path("rowVersion").asLong());
+        body.putArray("selections").add(selection);
+        response(post(API+"/department-prefix/apply").header("Idempotency-Key",UUID.randomUUID().toString()).contentType("application/json").content(body.toString()),409);
+        selection.putNull("departmentId");
+        String key=UUID.randomUUID().toString();
+        response(post(API+"/department-prefix/apply").header("Idempotency-Key",key).contentType("application/json").content(body.toString()),200);
+        response(post(API+"/department-prefix/apply").header("Idempotency-Key",key).contentType("application/json").content(body.toString()),200);
+        assertThat(jdbc.queryForObject("select usage_scope_mode from store_resource_item where id=?::uuid",String.class,id)).isEqualTo("ALL_DEPARTMENTS");
+        assertThat(jdbc.queryForObject("select row_version from store_resource_item where id=?::uuid",Integer.class,id)).isOne();
+        assertThat(jdbc.queryForObject("select count(*) from store_item_usage_department where item_id=?::uuid",Integer.class,id)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from audit_log where action='STORE_DEPARTMENT_PREFIX_FILLED' and resource_id=?::uuid",Integer.class,id)).isOne();
+    }
+
     @Test void savedRulesAreStoreLocalAndStaleBackfillsCannotOverwriteNewerRules() throws Exception {
         var original=response(get(API+"/department-prefix"),200).path("config");
         long previous=original.path("rowVersion").asLong();
@@ -157,7 +182,7 @@ class StoreItemUsageScopeIntegrationTest {
             assertThat(foreign.path("config").path("rowVersion").asLong()).isEqualTo(-1);
             var assetBody=mapper.createObjectNode().put("assetCode","ASSET-"+UUID.randomUUID()).put("name","旧资产").put("category","设备").put("unit","台").put("originalValue",980).put("responsibleAssignmentId","19200000-0000-0000-0000-000000000002");
             String asset=response(post(API+"/assets").contentType("application/json").content(assetBody.toString()),201).path("id").asText();
-            jdbc.update("update store_fixed_asset set asset_code=? where id=?::uuid","QT-"+UUID.randomUUID(),asset);
+            jdbc.update("update store_fixed_asset set asset_code=?,usage_scope_mode='LEGACY' where id=?::uuid","QT-"+UUID.randomUUID(),asset);
             var before=jdbc.queryForMap("select * from store_fixed_asset where id=?::uuid",asset);
             var inputBody=mapper.createObjectNode().put("configVersion",previous);
             inputBody.set("selections",mapper.valueToTree(List.of(Map.of("type","ASSET","id",asset,"expectedVersion",0,"departmentId",HOUSEKEEPING))));
@@ -232,24 +257,30 @@ class StoreItemUsageScopeIntegrationTest {
         }
     }
 
-    @Test void legacyImportAndPreUpgradeSavedPreviewStayLegacyNotAllDepartments() throws Exception {
-        var job = preview(file(List.of(row("LEGACY-" + UUID.randomUUID(), "", "").subList(0, 7)), false));
+    @Test void legacyTemplatesDefaultCommonButStalePreUpgradePreviewsRequireRepreview() throws Exception {
+        var legacyFile = file(List.of(row("LEGACY-" + UUID.randomUUID(), "", "").subList(0, 7)), false);
+        var job = preview(legacyFile);
         assertThat(job.path("status").asText()).isEqualTo("READY");
-        assertThat(job.path("summary").path("unconfiguredUsageCount").asInt()).isOne();
+        assertThat(job.path("summary").path("unconfiguredUsageCount").asInt()).isZero();
         String id = job.path("id").asText();
         jdbc.update("""
                 update tabular_import_job set parsed_payload=jsonb_set(parsed_payload,'{items,0}',
                 (parsed_payload #> '{items,0}') - 'usageScope' - 'usageDepartmentNames' - 'usagePositionNames'), template_version=1 where id=?::uuid
                 """, id);
+        apply(id, 409);
+        assertThat(jdbc.queryForObject("select count(*) from tabular_import_result_link where job_id=?::uuid", Integer.class, id)).isZero();
+        var refreshed = preview(legacyFile);
+        assertThat(refreshed.path("id").asText()).isEqualTo(id);
+        assertThat(refreshed.path("preview").path("items").get(0).path("usageScope").path("mode").asText()).isEqualTo("ALL_DEPARTMENTS");
         apply(id, 200);
-        assertThat(jdbc.queryForObject("select usage_scope_mode from store_resource_item where id in (select resource_id from tabular_import_result_link where job_id=?::uuid and resource_type='STORE_RESOURCE_ITEM')", String.class, id)).isEqualTo("LEGACY");
+        assertThat(jdbc.queryForObject("select usage_scope_mode from store_resource_item where id in (select resource_id from tabular_import_result_link where job_id=?::uuid and resource_type='STORE_RESOURCE_ITEM')", String.class, id)).isEqualTo("ALL_DEPARTMENTS");
         var oldClient = response(post(API + "/items").contentType("application/json").content(itemInput().toString()), 201);
-        assertThat(oldClient.path("usage_scope").path("mode").asText()).isEqualTo("LEGACY");
+        assertThat(oldClient.path("usage_scope").path("mode").asText()).isEqualTo("ALL_DEPARTMENTS");
     }
 
-    @Test void malformedV3ColumnsAndBlankRequiredScopeCannotMasqueradeAsLegacy() throws Exception {
+    @Test void malformedV3ColumnsAreRejectedAndBlankNewScopeUsesCommonDefault() throws Exception {
         var blank = preview(file(List.of(row("BAD-" + UUID.randomUUID(), "", "")), true));
-        assertThat(blank.path("status").asText()).isEqualTo("INVALID");
+        assertThat(blank.path("status").asText()).isEqualTo("READY");
         var sheet = new LinkedHashMap<String, List<List<String>>>();
         sheet.put("物品与期初库存", List.of(List.of("物品编码*","物品名称*","分类*","计量单位*","单位成本*","最低库存*","期初数量*","适用岗位"),
                 List.of("BAD-" + UUID.randomUUID(), "物品", "耗品", "支", "2", "0", "0", "前台员工")));
@@ -343,7 +374,7 @@ class StoreItemUsageScopeIntegrationTest {
         assertThat(job.path("status").asText()).isEqualTo("READY");
         jdbc.update("update store_resource_item set row_version=row_version+1 where id=?::uuid",secondId);
         apply(job.path("id").asText(),409);
-        assertThat(jdbc.queryForObject("select usage_scope_mode from store_resource_item where id=?::uuid",String.class,firstId)).isEqualTo("LEGACY");
+        assertThat(jdbc.queryForObject("select usage_scope_mode from store_resource_item where id=?::uuid",String.class,firstId)).isEqualTo("ALL_DEPARTMENTS");
         assertThat(jdbc.queryForObject("select count(*) from store_item_usage_department where item_id=?::uuid",Integer.class,firstId)).isZero();
     }
 
