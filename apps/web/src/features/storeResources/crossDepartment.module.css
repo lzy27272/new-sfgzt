@@ -1,0 +1,38 @@
+.issue { min-width: 0; color: #173d52; }
+.issue h3 { margin: 0 0 12px; }
+.issue p, .panel p { color: #6c8291; line-height: 1.6; }
+.issue fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
+.sticky { position: sticky; top: 78px; z-index: 4; background: #f7fafc; border: 1px solid #d9e5ed; border-radius: 14px; padding: 14px; box-shadow: 0 3px 9px #173d520b; }
+:global(.modal-content) .sticky { top: 8px; }
+:global(.drawer) .sticky { top: 82px; }
+.ranges { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 5px; margin-bottom: 12px; }
+.ranges button { font: inherit; font-size: 14px; min-height: 44px; padding: 8px 2px; border: 1px solid #d9e5ed; border-radius: 10px; background: white; color: #496a7d; white-space: nowrap; }
+.ranges button[aria-pressed=true] { color: #1478d4; background: #edf6ff; border-color: #70b7ee; font-weight: 700; }
+.sticky label { display: block; font-size: 13px; margin: 8px 0; }
+.sticky input, .sticky select, .item input, .panel select { width: 100%; box-sizing: border-box; min-width: 0; font-size: 16px; min-height: 44px; border: 1px solid #d2e0e9; border-radius: 10px; background: white; color: #173d52; padding: 10px; margin-top: 5px; }
+.sticky small, .item small { color: #6c8291; }
+.results { max-height: 220px; overflow-y: auto; }
+.results button { width: 100%; text-align: left; background: white; border: 0; border-bottom: 1px solid #e4edf2; padding: 14px 6px; font: inherit; color: #173d52; }
+.results span { color: #1478d4; }
+.item { display: grid; grid-template-columns: minmax(0,1fr) 104px; gap: 12px; padding: 18px 4px; border-bottom: 1px solid #e1eaf0; align-items: center; }
+.item small { display: block; margin-top: 5px; overflow-wrap: anywhere; }
+.item label { font-size: 12px; }
+.summary { background: #f1f7fc; padding: 16px; border-radius: 12px; margin: 20px 0; }
+.summary h4 { margin: 0; }
+.summary div { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; }
+.panel { background: white; border: 1px solid #dce7ee; border-radius: 20px; padding: 28px; color: #173d52; min-width: 0; }
+.panel h2 { margin-top: 0; }
+.table { overflow-x: auto; margin: 20px 0; }
+.table table { border-collapse: collapse; width: 100%; min-width: 680px; }
+.table th, .table td { padding: 15px 16px; text-align: left; border-bottom: 1px solid #e1eaf0; }
+.table th { background: #f4f8fb; font-weight: 600; color: #688394; }
+.table td small { display: block; color: #81929c; }
+.table input[type=checkbox] { width: 20px; height: 20px; }
+.rules { max-width: 840px; }
+.rules table { min-width: 470px; }
+.rules select { max-width: 320px; }
+.actions { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; align-items: center; }
+.note { padding: 15px 18px; background: #eef6fb; border-radius: 10px; }
+.success { background: #eaf8f2; padding: 15px; color: #187457; border-radius: 10px; }
+.error { background: #fff0f0; color: #ad4444; padding: 15px; border-radius: 10px; }
+@media(max-width:600px) { .panel { padding: 18px; } .sticky { top: 70px; padding: 10px; } .ranges button { font-size: 13px; } }

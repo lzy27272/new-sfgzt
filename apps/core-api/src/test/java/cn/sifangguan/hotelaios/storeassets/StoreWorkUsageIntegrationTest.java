@@ -836,7 +836,12 @@ class StoreWorkUsageIntegrationTest {
             for (String code:List.of("HKA_ITEM_ISSUE","HKA_DAILY_REPORT","NSA_DAILY_HANDOVER")) {
                 var catalog=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",H).param("itemCode",code),EMP,null,200);
                 Set<String> ids=new HashSet<>(); catalog.path("items").forEach(item->ids.add(item.path("id").asText()));
-                assertThat(ids).contains(shared,department,own).doesNotContain(other,legacy,wrongDepartment);
+                assertThat(ids).contains(shared,department,own).doesNotContain(legacy);
+                if(code.equals("HKA_ITEM_ISSUE")) {
+                    assertThat(ids).contains(other,wrongDepartment);
+                    for(JsonNode item:catalog.path("items")) if(Set.of(other,wrongDepartment).contains(item.path("id").asText()))
+                        assertThat(item.path("applicable_to_assignment").asBoolean()).isFalse();
+                } else assertThat(ids).doesNotContain(other,wrongDepartment);
                 assertThat(catalog.path("department_configured").asBoolean()).isTrue();
                 assertThat(catalog.path("unconfigured_item_count").asInt()).isPositive();
                 assertThat(catalog.toString()).doesNotContain("unit_cost","inventory_value","current_quantity");
@@ -874,13 +879,45 @@ class StoreWorkUsageIntegrationTest {
         }
     }
 
-    @Test void issueSubmissionCannotBypassPositionScope() throws Exception {
+    @Test void crossDepartmentIssueCanBeSubmittedButDoesNotPostStockOrCost() throws Exception {
         usageItemCode="HKA_ITEM_ISSUE"; setup();
         String item=item("CONSUMABLE","支","支",1,10,2);
         String otherPosition=jdbc.queryForObject("select position_id::text from employee_position_assignment where id=?::uuid",String.class,GMA);
         jdbc.update("insert into store_item_usage_position(tenant_id,hotel_org_unit_id,item_id,position_id) values(?::uuid,?::uuid,?::uuid,?::uuid)",T,H,item,otherPosition);
-        submit(List.of(line(item,"2","支",0)),false,400);
-        assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isZero();
+        String issued=submit(List.of(line(item,"2","支",0)),false,201).path("id").asText();
+        assertThat(movements(issued)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from store_cost_entry where source_parent_id=?::uuid",Integer.class,issued)).isZero();
+        balance(item,"10","20");
+        usageItemCode="NSA_DAILY_HANDOVER"; setup();
+        String catalogue="/api/v1/store-resources/usage-catalog";
+        var current=call(get(catalogue).param("orgUnitId",H).param("itemCode",usageItemCode).param("businessDate",LocalDate.now().toString()),EMP,null,200);
+        assertThat(current.path("items").toString()).contains(item,"issued_today");
+        assertThat(call(get(catalogue).param("orgUnitId",H).param("itemCode",usageItemCode).param("businessDate",LocalDate.now().minusDays(1).toString()),EMP,null,200).path("items").toString()).doesNotContain(item);
+        var body=recordBody(Map.of("schemaVersion",2,"remainingUnusedConfirmed",true,"lines",List.of(line(item,"0.5","支",0))),false);
+        String usage=call(post("/api/v1/work-data/records"),EMP,body,201).path("id").asText();
+        balance(item,"10","20");
+        review(usage,GM,"APPROVED",0,200); review(usage,GM,"APPROVED",0,200);
+        balance(item,"9.5","19"); assertThat(movements(usage)).isOne();
+    }
+
+    @Test void draftsRejectedIssuesAndOtherAssignmentsDoNotAuthorizeDailyUse() throws Exception {
+        usageItemCode="HKA_ITEM_ISSUE"; setup();
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        jdbc.update("update store_resource_item set usage_scope_mode='DEPARTMENTS' where id=?::uuid",item);
+        jdbc.update("insert into store_item_usage_department values(?::uuid,?::uuid,?::uuid,?::uuid)",T,H,item,"12000000-0000-0000-0000-000000000006");
+        String issued=submit(List.of(line(item,"2","支",0)),true,201).path("id").asText();
+        usageItemCode="NSA_DAILY_HANDOVER"; setup();
+        submit(List.of(line(item,"1","支",0)),false,400);
+        call(post("/api/v1/work-data/records/"+issued+"/actions/submit"),EMP,Map.of("expectedVersion",0),200);
+        // A different assignment cannot inherit the employee's declaration.
+        var other=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",H)
+                .param("businessDate",LocalDate.now().toString()).param("itemCode",usageItemCode),GM,null,200);
+        assertThat(other.path("items").toString()).doesNotContain(item);
+        UUID previousManager=jdbc.queryForObject("select manager_assignment_id from employee_position_assignment where id=?::uuid",UUID.class,EA);
+        jdbc.update("update employee_position_assignment set manager_assignment_id=?::uuid where id=?::uuid",GMA,EA);
+        try { review(issued,GM,"REJECTED",1,200); }
+        finally { jdbc.update("update employee_position_assignment set manager_assignment_id=? where id=?::uuid",previousManager,EA); }
+        submit(List.of(line(item,"1","支",0)),false,400);
         balance(item,"10","20");
     }
     private Map<String,Object> line(String id,String quantity,String unit,int v) { return Map.of("itemId",id,"quantity",quantity,"unit",unit,"expectedItemVersion",v); }

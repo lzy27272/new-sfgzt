@@ -105,7 +105,7 @@ async function downloadStoreResourceImportFile(identity: RoleContext, path: stri
 }
 
 export async function downloadStoreResourceImportTemplate(identity: RoleContext, hotelId: string, scopeOnly = false) {
-  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template?scopeOnly=${scopeOnly}`, scopeOnly ? '库存资产使用范围更新模板_V4.xlsx' : '库存与固定资产导入模板_V4.xlsx')
+  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template?scopeOnly=${scopeOnly}`, scopeOnly ? '库存资产使用范围更新模板_V5.xlsx' : '库存与固定资产导入模板_V5.xlsx')
 }
 
 export async function downloadStoreResourceImportErrors(identity: RoleContext, hotelId: string, jobId: string) {

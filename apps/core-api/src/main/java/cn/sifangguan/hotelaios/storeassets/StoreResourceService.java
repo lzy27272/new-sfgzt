@@ -155,15 +155,17 @@ public class StoreResourceService {
 
     @Transactional(readOnly = true)
     public StoreItemUsageScopes.Options usageScopeOptions(UUID hotelId) {
-        TenantPrincipal principal = prepareHotel("store-resource.item-manage", hotelId);
+        TenantPrincipal principal = prepareHotel(accessPolicy.principal().hasPermission("store-resource.item-manage")
+                ? "store-resource.item-manage" : "store-resource.asset-manage", hotelId);
         return usageScopes.options(principal.tenantId(), hotelId, false);
     }
 
     @Transactional
     public Map<String, Object> createItem(UUID hotelId, StoreResourceModels.CreateItemRequest request) {
         TenantPrincipal principal = prepareHotel("store-resource.item-manage", hotelId);
-        var usageScope = request.usageScope() == null ? null : usageScopes.validate(request.usageScope(),
-                usageScopes.options(principal.tenantId(), hotelId, true));
+        var options = usageScopes.options(principal.tenantId(), hotelId, true);
+        var usageScope = request.usageScope() == null ? usageScopes.infer(principal.tenantId(),hotelId,request.sku(),options)
+                : usageScopes.validate(request.usageScope(),options);
         String category = enumValue(request.category(), ITEM_CATEGORIES, "物品分类");
         StoreItemUnits units = new StoreItemUnits(request.unit(), request.purchaseUnit(), request.purchaseFactor(),
                 request.issueUnit(), request.issueFactor());
@@ -593,6 +595,9 @@ public class StoreResourceService {
     @Transactional
     public Map<String, Object> createAsset(UUID hotelId, StoreResourceModels.CreateAssetRequest request) {
         TenantPrincipal principal = prepareHotel("store-resource.asset-manage", hotelId);
+        var options=usageScopes.options(principal.tenantId(),hotelId,true);
+        var scope=request.usageScope()==null ? usageScopes.infer(principal.tenantId(),hotelId,request.assetCode(),options)
+                : usageScopes.validate(request.usageScope(),options);
         UUID responsible = request.responsibleAssignmentId();
         if (responsible != null) requireAssignmentAtHotel(principal, hotelId, responsible);
         String status = request.status() == null || request.status().isBlank()
@@ -621,6 +626,7 @@ public class StoreResourceService {
         } catch (DataIntegrityViolationException exception) {
             throw conflict("该门店已存在相同资产编号");
         }
+        usageScopes.saveAsset(principal.tenantId(),hotelId,id,scope);
         audit(principal, "STORE_FIXED_ASSET_CREATED", "STORE_FIXED_ASSET", id,
                 Map.of("hotelId", hotelId, "assetCode", clean(request.assetCode())));
         return requireAsset(principal, hotelId, id);
@@ -659,6 +665,8 @@ public class StoreResourceService {
             throw conflict("该门店已存在相同资产编号");
         }
         changed(changed, "资产卡片已变化，请刷新后重试");
+        if(request.usageScope()!=null) usageScopes.saveAsset(principal.tenantId(),hotelId,assetId,
+                usageScopes.validate(request.usageScope(),usageScopes.options(principal.tenantId(),hotelId,true)));
         audit(principal, "STORE_FIXED_ASSET_UPDATED", "STORE_FIXED_ASSET", assetId,
                 Map.of("hotelId", hotelId, "status", status));
         return requireAsset(principal, hotelId, assetId);
@@ -1178,13 +1186,13 @@ public class StoreResourceService {
     }
 
     private Map<String, Object> requireAsset(TenantPrincipal principal, UUID hotelId, UUID assetId) {
-        return jdbc.queryForMap("""
+        return usageScopes.decorateAssets(principal.tenantId(),hotelId,List.of(jdbc.queryForMap("""
                 select asset.id, asset.hotel_org_unit_id, asset.asset_code,
                        asset.name, asset.category, asset.specification, asset.serial_number,
                        asset.unit, asset.original_value, asset.acquired_on, asset.location,
                        asset.responsible_assignment_id, asset.status, asset.row_version,
                        employee.name as responsible_name, position.name as responsible_position_name,
-                       asset.created_at, asset.updated_at
+                       asset.created_at, asset.updated_at, asset.usage_scope_mode
                 from store_fixed_asset asset
                 left join employee_position_assignment assignment
                   on assignment.tenant_id = asset.tenant_id and assignment.id = asset.responsible_assignment_id
@@ -1192,7 +1200,7 @@ public class StoreResourceService {
                 left join position_definition position on position.tenant_id = assignment.tenant_id
                   and position.id = assignment.position_id
                 where asset.tenant_id = :tenantId and asset.hotel_org_unit_id = :hotelId and asset.id = :assetId
-                """, hotel(principal, hotelId).addValue("assetId", assetId));
+                """, hotel(principal, hotelId).addValue("assetId", assetId)))).getFirst();
     }
 
     private void requireAssignmentAtHotel(TenantPrincipal principal, UUID hotelId, UUID assignmentId) {

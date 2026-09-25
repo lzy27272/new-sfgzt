@@ -1,6 +1,6 @@
-import type { ItemUsageScope, UsageScopeOptions, UsageScopeOption } from './usageScope.ts'
+import type { ItemUsageScope, UsageScopeOptions, UsageScopeOption, PrefixConfig } from './usageScope.ts'
 
-export type StoreResourceTab = 'items' | 'inventory' | 'usage' | 'laundry' | 'costs' | 'assets' | 'handovers'
+export type StoreResourceTab = 'items' | 'inventory' | 'usage' | 'laundry' | 'costs' | 'assets' | 'handovers' | 'department-prefix'
 
 export function parseUsageScopeOptions(value: unknown): UsageScopeOptions {
   if (!value || typeof value !== 'object') throw new Error('物品使用范围选项格式异常')
@@ -12,7 +12,11 @@ export function parseUsageScopeOptions(value: unknown): UsageScopeOptions {
       return { id: entry.id, code: entry.code, name: entry.name }
     })
   }
-  return { departments: options(row.departments), positions: options(row.positions) }
+  const prefixConfig = row.prefixConfig as PrefixConfig | undefined
+  if (prefixConfig && (!Number.isSafeInteger(prefixConfig.rowVersion) || !Array.isArray(prefixConfig.rules)
+    || prefixConfig.rules.some(rule => !['QT', 'KF', 'WX'].includes(rule.prefix) || typeof rule.defaultName !== 'string'
+      || (rule.departmentId != null && typeof rule.departmentId !== 'string')))) throw new Error('物品编号规则格式异常')
+  return { departments: options(row.departments), positions: options(row.positions), ...(prefixConfig ? { prefixConfig } : {}) }
 }
 
 export function parseItemUsageScope(value: unknown): ItemUsageScope {
@@ -196,6 +200,7 @@ export type FixedAssetInput = {
   location?: string
   responsibleAssignmentId?: string
   status: string
+  usageScope?: ItemUsageScope
 }
 
 export type StoreResourceHandoverInput = {

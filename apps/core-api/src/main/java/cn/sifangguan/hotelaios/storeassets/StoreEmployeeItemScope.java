@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.UUID;
+import java.time.LocalDate;
 
 /** Employee selection is tied to one assignment, never the union of the account's roles. */
 @Component
@@ -29,6 +30,38 @@ final class StoreEmployeeItemScope {
                   where pos.tenant_id=i.tenant_id and pos.hotel_org_unit_id=i.hotel_org_unit_id
                     and pos.item_id=i.id and pos.position_id=:positionId))
             """;
+
+    // Cross-department issue is opt-in in the UI, but remains inside this hotel and configured catalogue.
+    static final String CONFIGURED = "i.usage_scope_mode in ('ALL_DEPARTMENTS','DEPARTMENTS')";
+    static final String ISSUED_TODAY = """
+            exists(select 1 from work_record issued
+              join work_package_item wi on wi.tenant_id=issued.tenant_id and wi.id=issued.work_package_item_id
+              join org_unit_closure hc on hc.tenant_id=issued.tenant_id
+                and hc.ancestor_id=:hotelId and hc.descendant_id=issued.target_org_unit_id
+              where issued.tenant_id=i.tenant_id and issued.position_assignment_id=:assignmentId
+                and issued.business_date=:businessDate and issued.status in ('SUBMITTED','APPROVED')
+                and wi.item_code in ('HKA_ITEM_ISSUE','NSA_ITEM_ISSUE')
+                and issued.payload->'inventoryQuantities' @> jsonb_build_object(
+                  'schemaVersion',1,'noUsage',false,'lines',jsonb_build_array(jsonb_build_object('itemId',i.id::text))))
+            """;
+
+    void requireIssueEligible(TenantPrincipal p, UUID hotelId, UUID itemId) {
+        boolean allowed = Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from store_resource_item i where i.tenant_id=:tenantId
+                  and i.hotel_org_unit_id=:hotelId and i.id=:itemId and
+                """ + CONFIGURED + ")", new MapSqlParameterSource("tenantId",p.tenantId())
+                .addValue("hotelId",hotelId).addValue("itemId",itemId), Boolean.class));
+        if (!allowed) throw new IllegalArgumentException("物品尚未配置使用部门，请管理员补齐后再领用");
+    }
+
+    void requireUsageEligible(TenantPrincipal p, UUID hotelId, Map<String,Object> assignment, UUID itemId, LocalDate date) {
+        boolean allowed = Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from store_resource_item i where i.tenant_id=:tenantId
+                  and i.hotel_org_unit_id=:hotelId and i.id=:itemId and (
+                """ + ELIGIBLE + " or (" + CONFIGURED + " and " + ISSUED_TODAY + ")))",
+                parameters(p,hotelId,assignment).addValue("itemId",itemId).addValue("businessDate",date), Boolean.class));
+        if (!allowed) throw new IllegalArgumentException("物品不在本任职范围，且没有本任职当日已提交的领用记录，请核对领用记录后再填写实际用量");
+    }
 
     Map<String,Object> assignment(TenantPrincipal p, UUID hotelId, UUID assignmentId, boolean requireOwner) {
         var rows = jdbc.queryForList("""
@@ -54,7 +87,8 @@ final class StoreEmployeeItemScope {
 
     MapSqlParameterSource parameters(TenantPrincipal p, UUID hotelId, Map<String,Object> assignment) {
         return new MapSqlParameterSource("tenantId",p.tenantId()).addValue("hotelId",hotelId)
-                .addValue("assignmentOrgId",assignment.get("org_unit_id")).addValue("positionId",assignment.get("position_id"));
+                .addValue("assignmentOrgId",assignment.get("org_unit_id")).addValue("positionId",assignment.get("position_id"))
+                .addValue("assignmentId",assignment.get("id"));
     }
 
     /** Call after locking the item; configuration changes lock this same row before updating mappings. */
