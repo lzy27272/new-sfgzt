@@ -35,6 +35,20 @@ management:
         enabled: true
 
 app:
+  ai-evidence:
+    # Shadow only. External processing requires a separate privacy/provider approval.
+    enabled: ${AI_EVIDENCE_ENABLED:false}
+    external-processing-approved: ${AI_EVIDENCE_EXTERNAL_APPROVED:false}
+    provider: ${AI_EVIDENCE_PROVIDER:qwen}
+    # Key must belong to the explicitly selected provider. Never borrow another service's key.
+    api-key: ${AI_EVIDENCE_API_KEY:}
+    # Blank model/endpoint selects provider-specific defaults, not a cross-provider fallback.
+    model: ${AI_EVIDENCE_MODEL:}
+    endpoint: ${AI_EVIDENCE_ENDPOINT:}
+    tenant-ids: ${AI_EVIDENCE_TENANT_IDS:}
+    pilot-hotel-ids: ${AI_EVIDENCE_PILOT_HOTEL_IDS:}
+    daily-request-limit: ${AI_EVIDENCE_DAILY_REQUEST_LIMIT:100}
+    fixed-delay-ms: ${AI_EVIDENCE_FIXED_DELAY_MS:10000}
   academy:
     storage-root: ${ACADEMY_STORAGE_ROOT:${ATTACHMENT_STORAGE_ROOT:var/attachments}/academy}
     worker-enabled: ${ACADEMY_WORKER_ENABLED:false}

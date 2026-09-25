@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.dailyreports;
 
 import cn.sifangguan.hotelaios.workdata.WorkEntryPolicy;
+import cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver;
 import cn.sifangguan.hotelaios.dailyreporttemplates.DailyReportTemplateService;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
@@ -11,6 +12,7 @@ import cn.sifangguan.hotelaios.shared.idempotency.CommandIdempotencyService;
 import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
 import cn.sifangguan.hotelaios.shared.security.WorkVisibilityPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy;
 import cn.sifangguan.hotelaios.shared.time.BusinessDayService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -67,6 +69,7 @@ public class DailyReportService {
     private final DailyReportRoutineProjectionService routineProjection;
     private final DailyReportWorkEntryService workEntry;
     private final DailyActivityService activities;
+    private final StoreManagerSupervisorResolver supervisors;
 
     public DailyReportService(
             NamedParameterJdbcTemplate jdbc,
@@ -81,7 +84,8 @@ public class DailyReportService {
             ObjectMapper objectMapper,
             DailyReportRoutineProjectionService routineProjection,
             DailyReportWorkEntryService workEntry,
-            DailyActivityService activities
+            DailyActivityService activities,
+            StoreManagerSupervisorResolver supervisors
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -96,6 +100,7 @@ public class DailyReportService {
         this.routineProjection = routineProjection;
         this.workEntry = workEntry;
         this.activities = activities;
+        this.supervisors = supervisors;
     }
 
     @Transactional(readOnly = true)
@@ -451,6 +456,19 @@ public class DailyReportService {
                 .addValue("reviewStatus", reviewRequired ? "PENDING" : "NOT_REQUIRED")
                 .addValue("expectedVersion", submissionVersion));
         if (reportChanged != 1) conflict("日报已变化，提交未生效");
+        if (reviewRequired) {
+            String permission = "CORRECTION".equals(revision.type()) ? "daily-report.revision-review" : "daily-report.review";
+            for (var reviewer : supervisors.ordinaryReviewers(principal, permission, report.positionAssignmentId(), report.orgUnitId())) {
+                jdbc.update("""
+                        insert into notification(tenant_id,recipient_account_id,recipient_assignment_id,notification_type,
+                          title,content,source_type,source_id,idempotency_key)
+                        values(:tenantId,:account,:assignment,'DAILY_REPORT_REVIEW_PENDING','员工日报待审核',
+                          '员工已提交日报，请查看汇总及证据并完成审核。','DAILY_REPORT',:report,:key)
+                        on conflict(tenant_id,recipient_account_id,idempotency_key) do nothing
+                        """, base(principal).addValue("account", reviewer.accountId()).addValue("assignment", reviewer.assignmentId())
+                        .addValue("report", reportId).addValue("key", "report-review:" + reportId + ":" + request.revisionId()));
+            }
+        }
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("reportId", reportId.toString());
         payload.put("revisionId", request.revisionId().toString());
@@ -538,7 +556,7 @@ public class DailyReportService {
             accessPolicy.requirePermission("daily-report.review");
         }
         accessPolicy.requireOrgScope(report.orgUnitId());
-        verifyReviewerAssignment(principal, request.reviewerAssignmentId(), report.orgUnitId());
+        verifyReviewerAssignment(principal, request.reviewerAssignmentId(), report.orgUnitId(), report.positionAssignmentId());
         if (principal.actorId().equals(report.createdByAccountId())
                 || principal.actorId().equals(revision.submittedByAccountId())) {
             throw new AccessDeniedException("日报提交人不能审核自己的日报");
@@ -881,7 +899,24 @@ public class DailyReportService {
         recommendations.forEach(recommendation -> recommendation.put(
                 "sourceLabels", parseJson(String.valueOf(recommendation.remove("sourceLabelsJson")))));
         result.put("aiRecommendations", recommendations);
+        result.put("reviewEligibility", reviewEligibility(principal, result, revisions));
         return result;
+    }
+
+    private Map<String, Object> reviewEligibility(TenantPrincipal principal, Map<String, Object> report, List<Map<String, Object>> revisions) {
+        var revision = revisions.stream().filter(r -> r.get("id").equals(report.get("currentRevisionId"))).findFirst().orElse(Map.of());
+        if (!"SUBMITTED".equals(report.get("reportStatus")) || !"SUBMITTED".equals(revision.get("revisionStatus")))
+            return Map.of("canReview", false, "reason", "当前日报无需审核");
+        if (principal.actorId().equals(revision.get("submittedByAccountId")) || principal.assignmentIds().contains(report.get("positionAssignmentId")))
+            return Map.of("canReview", false, "reason", "不能审核自己的日报");
+        try {
+            accessPolicy.requirePermission("CORRECTION".equals(revision.get("revisionType")) ? "daily-report.revision-review" : "daily-report.review");
+            accessPolicy.requireOrgScope((UUID) report.get("orgUnitId"));
+            verifyReviewerAssignment(principal, principal.businessActorAssignmentId(), (UUID) report.get("orgUnitId"), (UUID) report.get("positionAssignmentId"));
+            return Map.of("canReview", true, "reason", "");
+        } catch (AccessDeniedException | cn.sifangguan.hotelaios.shared.security.BusinessIdentityException denied) {
+            return Map.of("canReview", false, "reason", denied.getMessage());
+        }
     }
 
     private void requireVisible(TenantPrincipal principal, UUID reportId) {
@@ -1195,8 +1230,12 @@ public class DailyReportService {
         }
     }
 
-    private void verifyReviewerAssignment(TenantPrincipal principal, UUID assignmentId, UUID reportOrgUnitId) {
+    private void verifyReviewerAssignment(TenantPrincipal principal, UUID assignmentId, UUID reportOrgUnitId, UUID executorId) {
         accessPolicy.requireActiveAssignment(assignmentId);
+        accessPolicy.requireBusinessActorAssignment(assignmentId);
+        if (new WorkReviewPolicy(jdbc).canManage(principal, executorId, reportOrgUnitId)) return;
+        if (principal.hasRole("GROUP_VICE_PRESIDENT") || principal.hasRole("GENERAL_MANAGER"))
+            throw new AccessDeniedException("该日报不属于当前任职负责的门店及下属范围");
         Integer count = jdbc.queryForObject("""
                 select count(*)
                 from employee_position_assignment assignment

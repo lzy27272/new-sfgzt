@@ -5,6 +5,7 @@ import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.BusinessIdentityException;
 import cn.sifangguan.hotelaios.shared.security.EffectiveIdentityService;
 import cn.sifangguan.hotelaios.shared.security.IdentityAuthenticationException;
+import cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -84,6 +85,44 @@ public class StoreManagerSupervisorResolver {
             }
         }
         return new Audience(Map.copyOf(storeManagers), List.copyOf(supervisors));
+    }
+
+    /** The same ordinary-review policy used by the write endpoint, evaluated
+     * against fresh permissions for each active recipient. Never used for stock reviews. */
+    public List<Supervisor> ordinaryReviewers(TenantPrincipal operator, String permission, UUID executor, UUID target) {
+        databaseContext.apply(operator.tenantId());
+        var params = new MapSqlParameterSource("tenant", operator.tenantId()).addValue("executor", executor);
+        List<Candidate> candidates = jdbc.query("""
+                select distinct a.id, e.account_id
+                from employee_position_assignment a
+                join employee e on e.tenant_id = a.tenant_id and e.id = a.employee_id
+                left join position_function_profile f on f.tenant_id = a.tenant_id and f.position_id = a.position_id and f.scope_type = 'GROUP'
+                left join app_role r on r.tenant_id = f.tenant_id and r.id = f.default_role_id and r.role_type = 'SYSTEM'
+                where a.tenant_id = :tenant and a.status = 'ACTIVE' and a.valid_from <= current_date
+                  and (a.valid_to is null or a.valid_to >= current_date) and e.account_id is not null
+                  and (r.code in ('GENERAL_MANAGER','GROUP_VICE_PRESIDENT') or a.id in (
+                    select manager_assignment_id from employee_position_assignment where tenant_id = :tenant and id = :executor
+                    union select leader_assignment_id from position_assignment_reporting_relation
+                    where tenant_id = :tenant and subordinate_assignment_id = :executor
+                      and valid_from <= current_date and (valid_to is null or valid_to >= current_date)))
+                order by a.id
+                """, params, (rs, n) -> new Candidate(rs.getObject("id", UUID.class), rs.getObject("account_id", UUID.class), ""));
+        Map<UUID, Supervisor> recipients = new LinkedHashMap<>();
+        for (Candidate candidate : candidates) {
+            if (candidate.accountId().equals(operator.actorId())) continue;
+            try {
+                TenantPrincipal identity = identityRead.execute(status -> identities.resolve(
+                        operator.tenantId(), candidate.accountId(), operator.correlationId(), candidate.assignmentId()));
+                databaseContext.apply(operator.tenantId());
+                if (identity != null && (identity.hasPermission(permission) || identity.hasPermission("*"))
+                        && new WorkReviewPolicy(jdbc).canManage(identity, executor, target)) {
+                    recipients.putIfAbsent(candidate.accountId(), new Supervisor(candidate.accountId(), candidate.assignmentId(), identity));
+                }
+            } catch (IdentityAuthenticationException | BusinessIdentityException ignored) {
+                // Deactivated accounts/assignments cannot receive actionable reminders.
+            }
+        }
+        return List.copyOf(recipients.values());
     }
 
     private record Candidate(UUID assignmentId, UUID accountId, String roleCode) { }

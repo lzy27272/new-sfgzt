@@ -68,7 +68,8 @@ public class WorkVisibilityPolicy {
                     ? Set.of("__NO_SUBORDINATES__") : subordinateRoles);
             // Headquarters' explicitly authorized hotel portfolio is independent of
             // a hotel's direct manager link. Local teams instead honor configured leaders.
-            params.addValue("workPortfolioRoles", principal.roleCodes().stream().anyMatch(
+            params.addValue("workPortfolioRoles", principal.hasRole("GENERAL_MANAGER")
+                    ? SUBORDINATE_ROLES.get("GENERAL_MANAGER") : principal.roleCodes().stream().anyMatch(
                     Set.of("GROUP_CHAIRMAN", "CEO", "GROUP_VICE_PRESIDENT")::contains)
                     ? HOTEL_MANAGEMENT : Set.of("__NO_PORTFOLIO__"));
             managed.addAll(jdbc.queryForList("""

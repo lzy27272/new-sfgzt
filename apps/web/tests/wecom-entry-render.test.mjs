@@ -16,6 +16,14 @@ before(async () => {
 })
 after(async () => { await vite?.close() })
 
+test('未绑定企微的员工能从失败入口申请注册，不绕过人事审批', () => {
+  const markup = renderToStaticMarkup(React.createElement(EntryPage, {
+    entry: { securityError: '当前企业微信成员尚未绑定有效中台账号。新员工可申请注册。' }, onAuthenticated() {}, onCancel() {},
+  }))
+  assert.match(markup, /申请注册 \/ 查询申请进度/)
+  assert.match(markup, /人事审核通过后/)
+})
+
 test('失败入口提供新的企微验证链接，且不再显示无限加载状态', () => {
   const markup = renderToStaticMarkup(React.createElement(EntryPage, {
     entry: { securityError: '当前企微尚未绑定有效账号' }, onAuthenticated() {}, onCancel() {},

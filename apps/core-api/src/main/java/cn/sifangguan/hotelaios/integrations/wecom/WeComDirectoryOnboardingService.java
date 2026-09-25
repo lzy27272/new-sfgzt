@@ -323,6 +323,41 @@ public class WeComDirectoryOnboardingService {
                     """, params().addValue("id", candidate.id()).addValue("stateHash", sha256(state))
                     .addValue("verifierHash", sha256(verifier)));
         }
+        return authorizationStart(state, verifier, candidate.expiresAt());
+    }
+
+    @Transactional
+    public Start startSelfService() {
+        apply();
+        // Serialize the tenant-wide safety limit so anonymous requests cannot grow
+        // unbounded pending records. No caller-supplied identity or role is accepted.
+        jdbc.queryForObject("select pg_advisory_xact_lock(hashtext(:corpId), 82925)", params(), Object.class);
+        Integer recent = jdbc.queryForObject("""
+                select count(*) from wecom_person_onboarding
+                where tenant_id = :tenantId and corp_id = :corpId
+                  and invitation_source = 'SELF_SERVICE' and created_at > now() - interval '10 minutes'
+                """, params(), Integer.class);
+        if (recent != null && recent >= 100) throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.TOO_MANY_REQUESTS, "注册请求较多，请稍后再试");
+        UUID id = UUID.randomUUID();
+        String state = randomSecret();
+        String verifier = randomSecret();
+        OffsetDateTime started = OffsetDateTime.now();
+        OffsetDateTime expires = started.plusMinutes(10);
+        jdbc.update("""
+                insert into wecom_person_onboarding
+                  (id, tenant_id, corp_id, user_id_fingerprint, display_name,
+                   invitation_source, invitation_token_hash, invitation_issued_at, invitation_expires_at,
+                   oauth_state_hash, browser_verifier_hash, source_event_hash, last_event_at)
+                values (:id, :tenantId, :corpId, :fingerprint, '待员工填写',
+                   'SELF_SERVICE', :tokenHash, :started, :expires, :stateHash, :verifierHash, :fingerprint, :started)
+                """, params().addValue("id", id).addValue("fingerprint", sha256("self-service:" + id))
+                .addValue("tokenHash", sha256(randomSecret())).addValue("started", started).addValue("expires", expires)
+                .addValue("stateHash", sha256(state)).addValue("verifierHash", sha256(verifier)));
+        return authorizationStart(state, verifier, expires);
+    }
+
+    private Start authorizationStart(String state, String verifier, OffsetDateTime expiresAt) {
         URI authorizationUri = UriComponentsBuilder.fromUriString(
                         "https://open.weixin.qq.com/connect/oauth2/authorize")
                 .queryParam("appid", properties.corpId())
@@ -333,7 +368,7 @@ public class WeComDirectoryOnboardingService {
                 .queryParam("state", state)
                 .fragment("wechat_redirect").build().encode().toUri();
         long seconds = Math.max(1, Math.min(Duration.between(
-                OffsetDateTime.now(), candidate.expiresAt()).toSeconds(), 600));
+                OffsetDateTime.now(), expiresAt).toSeconds(), 600));
         return new Start(authorizationUri, verifier, seconds);
     }
 
@@ -392,7 +427,8 @@ public class WeComDirectoryOnboardingService {
                 select id, status from wecom_person_onboarding
                 where tenant_id = :tenantId and corp_id = :corpId
                   and exchange_code_hash = :exchangeHash and exchange_expires_at > now()
-                  and identity_verified_at is not null and status = 'WAITING_PROFILE'
+                  and identity_verified_at is not null and directory_status = 'ACTIVE'
+                  and status in ('WAITING_PROFILE','PENDING_APPROVAL','CONFLICT')
                 for update
                 """, params().addValue("exchangeHash", sha256(raw)), (rs, rowNum) -> new SessionCandidate(
                 rs.getObject("id", UUID.class), rs.getString("status")));
@@ -415,16 +451,26 @@ public class WeComDirectoryOnboardingService {
     public OnboardingContext context(String sessionToken) {
         apply();
         CandidateSession candidate = requireSession(sessionToken, false);
+        Map<String, Object> requested = jdbc.queryForMap("""
+                select org.name as org_name, position.name as position_name
+                from wecom_person_onboarding candidate
+                left join org_unit org on org.tenant_id = candidate.tenant_id and org.id = candidate.requested_org_unit_id
+                left join position_definition position on position.tenant_id = candidate.tenant_id and position.id = candidate.requested_position_id
+                where candidate.tenant_id = :tenantId and candidate.id = :id
+                """, params().addValue("id", candidate.id()));
         return new OnboardingContext(candidate.id(), candidate.status(), candidate.displayName(),
                 candidate.requestedLoginName(), candidate.sourceAccountId() == null,
                 candidate.invitationSource(),
-                loadOptions(), candidate.rowVersion());
+                loadOptions(), candidate.rowVersion(), (String) requested.get("org_name"), (String) requested.get("position_name"));
     }
 
     @Transactional
     public SubmitResponse submit(SubmitRequest request) {
         apply();
         CandidateSession candidate = requireSession(request.sessionToken(), true);
+        if (!"WAITING_PROFILE".equals(candidate.status())) {
+            throw new IllegalArgumentException("申请已提交，请等待审核，不要重复提交");
+        }
         if (candidate.rowVersion() != request.expectedVersion()) {
             throw new IllegalArgumentException("申请已变化，请刷新后重试");
         }
@@ -893,21 +939,41 @@ public class WeComDirectoryOnboardingService {
                 rs.getString("invitation_source")));
         if (rows.size() != 1) throw new IllegalArgumentException("入职申请状态已变化");
         OAuthCandidate candidate = rows.getFirst();
-        boolean manualLink = "MANUAL_LINK".equals(candidate.invitationSource());
+        boolean selfService = "SELF_SERVICE".equals(candidate.invitationSource());
+        boolean manualLink = selfService || "MANUAL_LINK".equals(candidate.invitationSource());
         if (manualLink) {
             jdbc.queryForObject("""
                     select pg_advisory_xact_lock(
                         hashtext(cast(:tenantId as text)),
                         hashtext(:corpId || ':' || :fingerprint))
                     """, params().addValue("fingerprint", observedFingerprint), Object.class);
-            Integer duplicate = jdbc.queryForObject("""
-                    select count(*) from wecom_person_onboarding
+            if (selfService) {
+                Boolean blocked = jdbc.queryForObject("""
+                        select exists (select 1 from wecom_user_binding
+                          where tenant_id = :tenantId and corp_id = :corpId
+                            and user_id_fingerprint = :fingerprint
+                            and (status = 'SUSPENDED' or (status = 'REVOKED' and status_reason is distinct from 'IDENTITY_TRANSFERRED_BY_ONBOARDING')))
+                        or coalesce((select directory_status in ('DISABLED','DELETED','UNACTIVATED') from wecom_person_onboarding
+                          where tenant_id = :tenantId and corp_id = :corpId and user_id_fingerprint = :fingerprint
+                            and invitation_source = 'DIRECTORY_EVENT'
+                          order by last_event_at desc, created_at desc, id desc limit 1), false)
+                        """, params().addValue("fingerprint", observedFingerprint), Boolean.class);
+                if (Boolean.TRUE.equals(blocked)) return finishSelfServiceAttempt(candidateId, "MEMBER_UNAVAILABLE");
+            }
+            List<UUID> duplicate = jdbc.queryForList("""
+                    select id from wecom_person_onboarding
                     where tenant_id = :tenantId and corp_id = :corpId
                       and id <> :id and user_id_fingerprint = :fingerprint
                       and status in ('WAITING_PROFILE','PENDING_APPROVAL','CONFLICT')
+                    order by created_at desc
+                    for update
                     """, params().addValue("id", candidateId)
-                    .addValue("fingerprint", observedFingerprint), Integer.class);
-            if (duplicate != null && duplicate > 0) {
+                    .addValue("fingerprint", observedFingerprint), UUID.class);
+            if (!duplicate.isEmpty()) {
+                if (selfService) {
+                    finishSelfServiceAttempt(candidateId, "IDENTITY_ALREADY_PENDING");
+                    return issueVerifiedExchange(duplicate.getFirst(), false, observedFingerprint, null);
+                }
                 jdbc.update("""
                         update wecom_person_onboarding
                         set status = 'CANCELLED', invitation_token_hash = null,
@@ -919,6 +985,14 @@ public class WeComDirectoryOnboardingService {
                         where tenant_id = :tenantId and id = :id
                         """, params().addValue("id", candidateId));
                 return null;
+            }
+            if (selfService) {
+                Boolean registered = jdbc.queryForObject("""
+                        select exists (select 1 from wecom_user_binding
+                          where tenant_id = :tenantId and corp_id = :corpId
+                            and user_id_fingerprint = :fingerprint and status = 'ACTIVE')
+                        """, params().addValue("fingerprint", observedFingerprint), Boolean.class);
+                if (Boolean.TRUE.equals(registered)) return finishSelfServiceAttempt(candidateId, "ACCOUNT_READY");
             }
         } else if (!MessageDigest.isEqual(
                 candidate.fingerprint().getBytes(java.nio.charset.StandardCharsets.US_ASCII),
@@ -959,6 +1033,22 @@ public class WeComDirectoryOnboardingService {
                             "terminal", true));
             return null;
         }
+        return issueVerifiedExchange(candidateId, manualLink, observedFingerprint, manualLink ? codec.encrypt(userId) : null);
+    }
+
+    private URI finishSelfServiceAttempt(UUID candidateId, String code) {
+        jdbc.update("""
+                update wecom_person_onboarding set status = 'CANCELLED',
+                  invitation_token_hash = null, invitation_issued_at = null, invitation_expires_at = null,
+                  oauth_state_hash = null, browser_verifier_hash = null, provider_code_hash = null,
+                  failure_code = :code, row_version = row_version + 1
+                where tenant_id = :tenantId and id = :id
+                """, params().addValue("id", candidateId).addValue("code", code));
+        return URI.create(properties.frontendBaseUrl().toString().replaceAll("/+$", "")
+                + "/#/wecom-onboarding?error_code=" + code);
+    }
+
+    private URI issueVerifiedExchange(UUID candidateId, boolean manualLink, String observedFingerprint, String ciphertext) {
         String exchangeCode = randomSecret();
         jdbc.update("""
                 update wecom_person_onboarding
@@ -974,7 +1064,7 @@ public class WeComDirectoryOnboardingService {
                 """, params().addValue("id", candidateId).addValue("exchangeHash", sha256(exchangeCode))
                 .addValue("exchangeExpiresAt", OffsetDateTime.now().plus(properties.exchangeTtl()))
                 .addValue("manualLink", manualLink).addValue("observedFingerprint", observedFingerprint)
-                .addValue("userIdCiphertext", manualLink ? codec.encrypt(userId) : null));
+                .addValue("userIdCiphertext", ciphertext));
         String base = properties.frontendBaseUrl().toString().replaceAll("/+$", "");
         return URI.create(base + "/#/wecom-onboarding?exchange_code=" + exchangeCode);
     }
@@ -1000,7 +1090,7 @@ public class WeComDirectoryOnboardingService {
                 where tenant_id = :tenantId and corp_id = :corpId
                   and session_token_hash = :sessionHash and session_expires_at > now()
                   and identity_verified_at is not null and directory_status = 'ACTIVE'
-                  and status in ('WAITING_PROFILE','PENDING_APPROVAL')
+                  and status in ('WAITING_PROFILE','PENDING_APPROVAL','CONFLICT')
                 """ + suffix, params().addValue("sessionHash", sha256(boundedSecret(rawToken))),
                 (rs, rowNum) -> new CandidateSession(rs.getObject("id", UUID.class),
                         rs.getString("status"), rs.getString("display_name"),

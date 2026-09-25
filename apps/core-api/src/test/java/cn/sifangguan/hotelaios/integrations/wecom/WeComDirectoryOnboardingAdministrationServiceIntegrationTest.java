@@ -123,6 +123,7 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         when(properties.invitationTtl()).thenReturn(Duration.ofMinutes(120));
         when(properties.sharedInvitationTtl()).thenReturn(Duration.ofDays(7));
         when(properties.exchangeTtl()).thenReturn(Duration.ofMinutes(2));
+        when(properties.sessionTtl()).thenReturn(Duration.ofMinutes(20));
         codec = new WeComDirectorySecretCodec(properties);
         employeeService = mock(WeComDirectoryOnboardingService.class);
         eventProcessor = mock(WeComDirectoryEventProcessor.class);
@@ -2238,6 +2239,84 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
                   and profile.scope_type = 'GROUP' and version.lifecycle_status = 'PUBLISHED'
                   and version.wecom_self_selectable = true
                 """, Integer.class, TENANT, positionId)).isOne();
+    }
+
+    @Test
+    void selfServiceRegistrationResumesPendingApplicationAndStillRequiresApproval() {
+        var lifecycle = lifecycleService();
+        String userId = "self-registration-" + UUID.randomUUID();
+        Counts before = identityCounts();
+        UUID id = startSelfCandidate(lifecycle);
+        assertThat(jdbc.queryForObject("select identity_verified_at is null from wecom_person_onboarding where id=?", Boolean.class, id)).isTrue();
+        URI uri = inTransaction(() -> lifecycle.completeOAuth(id, userId));
+        String code = uri.toString().substring(uri.toString().lastIndexOf('=') + 1);
+        var session = inTransaction(() -> lifecycle.exchange(code));
+        assertThatThrownBy(() -> inTransaction(() -> lifecycle.exchange(code))).isInstanceOf(IllegalArgumentException.class);
+        var context = inTransaction(() -> lifecycle.context(session.sessionToken()));
+        String login = "self." + id;
+        var submitted = inTransaction(() -> lifecycle.submit(new SubmitRequest(session.sessionToken(), "自主注册测试", "13900004879",
+                login, "Self-Registration-2026", "Self-Registration-2026", FRONT_DEPARTMENT, FRONT_POSITION, context.rowVersion())));
+        assertThat(submitted.status()).isEqualTo("PENDING_APPROVAL");
+        assertThat(identityCounts()).isEqualTo(before);
+        assertThatThrownBy(() -> inTransaction(() -> lifecycle.submit(new SubmitRequest(session.sessionToken(), "重复", "13900004879",
+                login, "Self-Registration-2026", "Self-Registration-2026", FRONT_DEPARTMENT, FRONT_POSITION, submitted.rowVersion()))))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("不要重复提交");
+        UUID second = startSelfCandidate(lifecycle);
+        URI resumed = inTransaction(() -> lifecycle.completeOAuth(second, userId));
+        var resumeSession = inTransaction(() -> lifecycle.exchange(resumed.toString().substring(resumed.toString().lastIndexOf('=') + 1)));
+        var pending = inTransaction(() -> lifecycle.context(resumeSession.sessionToken()));
+        assertThat(pending.candidateId()).isEqualTo(id);
+        assertThat(pending.status()).isEqualTo("PENDING_APPROVAL");
+        assertThat(pending.requestedOrganizationName()).isEqualTo(jdbc.queryForObject("select name from org_unit where id=?", String.class, FRONT_DEPARTMENT));
+        assertThat(pending.requestedPositionName()).isEqualTo(jdbc.queryForObject("select name from position_definition where id=?", String.class, FRONT_POSITION));
+        var approved = inTransaction(() -> service.approve(id, new DecisionRequest(pending.rowVersion(), "本人核实通过", false, null, null, "REGULAR")));
+        assertThat(approved.status()).isEqualTo("APPROVED");
+        String storedHash = jdbc.queryForObject("select password_hash from user_account where id=?", String.class, approved.accountId());
+        assertThat(new PilotPasswordHasher().matches("Self-Registration-2026", storedHash)).isTrue();
+        UUID third = startSelfCandidate(lifecycle);
+        assertThat(inTransaction(() -> lifecycle.completeOAuth(third, userId)).toString()).endsWith("error_code=ACCOUNT_READY");
+    }
+
+    @Test
+    void selfServiceCannotRecreateAnAccountAfterBindingWasSuspendedOrRevoked() {
+        var lifecycle = lifecycleService();
+        String userId = "self-blocked-" + UUID.randomUUID();
+        UUID binding = UUID.randomUUID();
+        insertBinding(binding, userId, FRONT_ACCOUNT, null);
+        Counts before = identityCounts();
+        for (String status : java.util.List.of("SUSPENDED", "REVOKED")) {
+            jdbc.update("update wecom_user_binding set status=?,status_reason='ADMIN_REVOKED' where id=?", status, binding);
+            UUID candidate = startSelfCandidate(lifecycle);
+            assertThat(inTransaction(() -> lifecycle.completeOAuth(candidate, userId)).toString()).endsWith("error_code=MEMBER_UNAVAILABLE");
+            assertThat(jdbc.queryForObject("select exchange_code_hash from wecom_person_onboarding where id=?", String.class, candidate)).isNull();
+        }
+        assertThat(identityCounts()).isEqualTo(before);
+    }
+
+    @Test
+    void selfServiceUsesCurrentDirectoryFactInsteadOfOldDisabledHistory() {
+        var lifecycle = lifecycleService();
+        String userId = "self-reactivated-" + UUID.randomUUID();
+        UUID old = UUID.randomUUID(), current = UUID.randomUUID();
+        jdbc.update("""
+                insert into wecom_person_onboarding(id,tenant_id,corp_id,user_id_fingerprint,display_name,
+                  onboarding_kind,directory_status,status,source_event_hash,last_event_at)
+                values(?,?,?,?,'停用历史','NEW_MEMBER','DISABLED','CANCELLED',?,now()-interval '2 days')
+                """, old,TENANT,CORP_ID,codec.fingerprint(userId),WeComDirectorySecretCodec.sha256("old-event:"+old));
+        UUID blocked = startSelfCandidate(lifecycle);
+        assertThat(inTransaction(() -> lifecycle.completeOAuth(blocked, userId)).toString()).endsWith("error_code=MEMBER_UNAVAILABLE");
+        insertCandidate(current, userId, "NEW_MEMBER", null, null, "WAITING_PROFILE", null, null, null);
+        UUID resumed = startSelfCandidate(lifecycle);
+        URI uri = inTransaction(() -> lifecycle.completeOAuth(resumed, userId));
+        String code = uri.toString().substring(uri.toString().lastIndexOf('=') + 1);
+        var session = inTransaction(() -> lifecycle.exchange(code));
+        assertThat(inTransaction(() -> lifecycle.context(session.sessionToken())).candidateId()).isEqualTo(current);
+    }
+
+    private UUID startSelfCandidate(WeComDirectoryOnboardingService lifecycle) {
+        var start = inTransaction(lifecycle::startSelfService);
+        String state = org.springframework.web.util.UriComponentsBuilder.fromUri(start.authorizationUri()).build().getQueryParams().getFirst("state");
+        return uuidValue("select id from wecom_person_onboarding where oauth_state_hash=?", WeComDirectorySecretCodec.sha256(state));
     }
 
     private WeComDirectoryOnboardingService lifecycleService() {

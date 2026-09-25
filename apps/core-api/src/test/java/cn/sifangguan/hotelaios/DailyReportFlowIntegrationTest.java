@@ -412,12 +412,14 @@ class DailyReportFlowIntegrationTest {
             String body,
             int expectedStatus
     ) throws Exception {
-        return mockMvc.perform(post(path)
+        var request = post(path)
                         .header("X-Tenant-Id", TENANT)
                         .header("X-Actor-Id", actorId)
                         .header("Idempotency-Key", idempotencyKey)
                         .contentType("application/json")
-                        .content(body))
+                        .content(body);
+        if (GENERAL_MANAGER.equals(actorId)) request.header("X-Assignment-Id", GM_ASSIGNMENT);
+        return mockMvc.perform(request)
                 .andExpect(status().is(expectedStatus))
                 .andReturn();
     }

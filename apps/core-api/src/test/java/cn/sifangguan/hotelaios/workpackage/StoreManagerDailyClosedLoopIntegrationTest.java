@@ -572,7 +572,7 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                         .contentType("application/json")
                         .content("{\"outcome\":\"APPROVED\",\"reason\":\"越级尝试\",\"expectedVersion\":1}"))
                 .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("直属主管")));
+                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("有效主管或授权门店管理者")));
         mockMvc.perform(identity(post("/api/v1/work-data/records/{recordId}/actions/review", recordId), CEO, null)
                         .contentType("application/json")
                         .content("{\"outcome\":\"APPROVED\",\"reason\":\"证据完整\",\"expectedVersion\":1}"))
@@ -1264,7 +1264,7 @@ class StoreManagerDailyClosedLoopIntegrationTest {
                 where tenant_id = ?::uuid and resource_type = 'WORK_RECORD'
                   and resource_id = ?::uuid
                   and action = 'WORK_RECORD_REVIEW_NOTIFICATION_SKIPPED'
-                  and after_data ->> 'reason' = 'DIRECT_MANAGER_ASSIGNMENT_UNRESOLVED'
+                  and after_data ->> 'reason' = 'AUTHORIZED_REVIEWER_UNRESOLVED'
                 """, Integer.class, TENANT, recordId)).isEqualTo(1);
     }
 

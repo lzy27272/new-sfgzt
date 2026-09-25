@@ -102,23 +102,17 @@ public class WeComDeliveryWorker {
                      and record.tenant_id = n.tenant_id and record.id = n.source_id
                     left join lateral (
                         select count(*)::integer as pending_count
-                        from daily_report_item_result result
-                        join daily_report_template_item template_item
-                          on template_item.tenant_id = result.tenant_id
-                         and template_item.id = result.template_item_id
-                        where result.tenant_id = report.tenant_id
-                          and result.revision_id = report.current_revision_id
-                          and result.result_status = 'PENDING'
-                          and result.system_prefilled
-                          and result.source_summary ->> 'sourceType' = 'WORK_RECORD'
-                          and exists (
-                            select 1
-                            from work_package_item_responsibility responsibility
-                            where responsibility.tenant_id = template_item.tenant_id
-                              and responsibility.work_package_item_id = template_item.work_package_item_id
-                              and responsibility.participant_type in ('REVIEWER', 'ACCEPTOR')
-                              and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT'
-                          )
+                        from work_record pending_record
+                        where pending_record.tenant_id = report.tenant_id
+                          and pending_record.position_assignment_id = report.position_assignment_id
+                          and pending_record.business_date = report.business_date and pending_record.status = 'SUBMITTED'
+                          and exists (select 1 from work_package_item_responsibility responsibility
+                            where responsibility.tenant_id = pending_record.tenant_id
+                              and responsibility.work_package_item_id = pending_record.work_package_item_id
+                              and responsibility.participant_type in ('REVIEWER','ACCEPTOR')
+                              and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT')
+                          and not exists (select 1 from store_work_usage usage
+                            where usage.tenant_id = pending_record.tenant_id and usage.work_record_id = pending_record.id)
                     ) review_state on true
                     left join wecom_user_binding ub
                       on ub.tenant_id = n.tenant_id and ub.corp_id = :corpId
@@ -176,7 +170,12 @@ public class WeComDeliveryWorker {
                                     or (review_state.pending_count > 0
                                         and n.idempotency_key = concat(
                                             'daily-report:review-pending:', report.id::text,
-                                            ':', review_state.pending_count::text))))
+                                            ':', review_state.pending_count::text))
+                                    or (report.report_status = 'SUBMITTED' and report.review_status = 'PENDING'
+                                        and n.idempotency_key = concat('report-review:', report.id::text, ':', report.current_revision_id::text)
+                                        and exists (select 1 from daily_report_revision revision
+                                          where revision.tenant_id = report.tenant_id and revision.id = report.current_revision_id
+                                            and revision.revision_status = 'SUBMITTED'))))
                            or (n.source_type = 'WORK_RECORD' and record.id is not null
                                and (n.notification_type <> 'WORK_RECORD_REVIEW_PENDING'
                                     or record.status = 'SUBMITTED')))
@@ -229,23 +228,17 @@ public class WeComDeliveryWorker {
                      and record.tenant_id = n.tenant_id and record.id = n.source_id
                     left join lateral (
                         select count(*)::integer as pending_count
-                        from daily_report_item_result result
-                        join daily_report_template_item template_item
-                          on template_item.tenant_id = result.tenant_id
-                         and template_item.id = result.template_item_id
-                        where result.tenant_id = report.tenant_id
-                          and result.revision_id = report.current_revision_id
-                          and result.result_status = 'PENDING'
-                          and result.system_prefilled
-                          and result.source_summary ->> 'sourceType' = 'WORK_RECORD'
-                          and exists (
-                            select 1
-                            from work_package_item_responsibility responsibility
-                            where responsibility.tenant_id = template_item.tenant_id
-                              and responsibility.work_package_item_id = template_item.work_package_item_id
-                              and responsibility.participant_type in ('REVIEWER', 'ACCEPTOR')
-                              and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT'
-                          )
+                        from work_record pending_record
+                        where pending_record.tenant_id = report.tenant_id
+                          and pending_record.position_assignment_id = report.position_assignment_id
+                          and pending_record.business_date = report.business_date and pending_record.status = 'SUBMITTED'
+                          and exists (select 1 from work_package_item_responsibility responsibility
+                            where responsibility.tenant_id = pending_record.tenant_id
+                              and responsibility.work_package_item_id = pending_record.work_package_item_id
+                              and responsibility.participant_type in ('REVIEWER','ACCEPTOR')
+                              and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT')
+                          and not exists (select 1 from store_work_usage usage
+                            where usage.tenant_id = pending_record.tenant_id and usage.work_record_id = pending_record.id)
                     ) review_state on true
                     left join wecom_user_binding ub
                       on ub.tenant_id = n.tenant_id and ub.corp_id = :corpId
@@ -302,7 +295,12 @@ public class WeComDeliveryWorker {
                                     or (review_state.pending_count > 0
                                         and n.idempotency_key = concat(
                                             'daily-report:review-pending:', report.id::text,
-                                            ':', review_state.pending_count::text))))
+                                            ':', review_state.pending_count::text))
+                                    or (report.report_status = 'SUBMITTED' and report.review_status = 'PENDING'
+                                        and n.idempotency_key = concat('report-review:', report.id::text, ':', report.current_revision_id::text)
+                                        and exists (select 1 from daily_report_revision revision
+                                          where revision.tenant_id = report.tenant_id and revision.id = report.current_revision_id
+                                            and revision.revision_status = 'SUBMITTED'))))
                            or (n.source_type = 'WORK_RECORD' and record.id is not null
                                and (n.notification_type <> 'WORK_RECORD_REVIEW_PENDING'
                                     or record.status = 'SUBMITTED')))
