@@ -5,13 +5,20 @@ import { DailyReportAutoSummary } from './DailyReportAutoSummary'
 import { PlannedHygieneFields } from './PlannedHygieneFields'
 import { featureStyles, formatLocalDateTime } from '../shared/FeatureUI'
 import styles from './housekeepingReport.module.css'
+import type { ApiIdentity } from '../../api/client'
+import { HousekeepingActivitiesFields } from './HousekeepingActivitiesFields'
+import { emptyActivities, type HousekeepingActivities } from './housekeepingActivities'
 
 export function HousekeepingReportForm({ report, values, editable, busy, catalogue, inventoryValue, notice, message, conflict,
-  missingRequiredCount, setValue, onRefreshCatalogue, onLegacyDraft, onSave, onSubmit, children }: {
+  missingRequiredCount, setValue, onRefreshCatalogue, onLegacyDraft, onSave, onSubmit, children,
+  identity, activities, activitiesError, onActivitiesChange, onPhotosPending, photosPending }: {
   report: DailyReportDetail; values: Record<string,string>; editable: boolean; busy: boolean; catalogue?: UsageCatalogue;
   inventoryValue: unknown; notice?: string; message?: string; conflict: boolean; missingRequiredCount: number;
   setValue: (key: string, value: string) => void; onRefreshCatalogue: () => void; onLegacyDraft: () => void;
   onSave: () => void; onSubmit: () => void; children?: React.ReactNode
+  identity: ApiIdentity; activities?: HousekeepingActivities; activitiesError?: string; photosPending: boolean;
+  onActivitiesChange: (update: (current: HousekeepingActivities) => HousekeepingActivities) => void;
+  onPhotosPending: (id: string, pending: boolean) => void
 }) {
   const manualItems = report.currentRevision.sections.filter(section => section.applicable).flatMap(section => section.items.filter(item => item.dataSource !== 'SYSTEM'))
   return <div className={styles.layout}><main className={styles.main}>
@@ -26,6 +33,10 @@ export function HousekeepingReportForm({ report, values, editable, busy, catalog
     {(editable ? report.plannedHygieneSupported : report.plannedHygiene != null) && <div className={styles.hygiene}><PlannedHygieneFields value={editable ? { content: values._plannedHygieneContent, roomNumbers: values._plannedHygieneRoomNumbers } : report.plannedHygiene} disabled={busy} onChange={editable ? value => {
       setValue('_plannedHygieneContent', value.content ?? ''); setValue('_plannedHygieneRoomNumbers', value.roomNumbers ?? '')
     } : undefined} /></div>}
+    {activitiesError ? <p className="inline-error" role="alert">{activitiesError}</p>
+      : <HousekeepingActivitiesFields identity={identity} reportId={report.id} value={activities ?? emptyActivities()} editable={editable}
+        disabled={busy} onChange={onActivitiesChange} onPendingChange={onPhotosPending} />}
+    {photosPending && <p role="status" className="inline-warning">仍有照片等待上传；请完成或移除待上传照片后保存、提交。其他填写内容已在本机暂存。</p>}
     <section className={styles.card} aria-label="其他工作与补充说明"><header><h2>其他工作与补充说明</h2>{!manualItems.some(item => item.required) && <span>选填</span>}</header>
       {!editable && <p className={styles.readonly}>日报已提交或当前任职无编辑权限，原始填报内容只读。需要修改时发起修订，不覆盖历史版本。</p>}
       {manualItems.map((item, index) => <div key={item.id} className={styles.manualItem}><label>
@@ -38,6 +49,6 @@ export function HousekeepingReportForm({ report, values, editable, busy, catalog
     <details className={styles.fold}><summary><strong>AI 汇总与建议</strong><span>依据已提交工作与用量记录汇总<br />仅供参考，不代替人工审核</span></summary><DailyReportAutoSummary report={report} section="ai" /></details>
     {notice && <div className={styles.saved} role="status">{notice}<small>提交后保留原始记录，修改需发起修订。</small></div>}
     {message && <div className={conflict ? featureStyles.conflict : 'inline-error'} role="alert">{message}</div>}
-    {editable && <section className={styles.submit}><div><button className="secondary" disabled={busy} onClick={onSave}>{busy ? '处理中…' : '保存草稿'}</button>{report.allowedActions.includes('SUBMIT') && <button className="primary" disabled={busy || missingRequiredCount > 0} onClick={onSubmit}>{busy ? '处理中…' : '提交日报'}</button>}</div>{report.blockedActionReasons.SUBMIT && <p>{report.blockedActionReasons.SUBMIT}</p>}</section>}
+    {editable && <section className={styles.submit}><div><button className="secondary" disabled={busy || photosPending || Boolean(activitiesError)} onClick={onSave}>{busy ? '处理中…' : '保存草稿'}</button>{report.allowedActions.includes('SUBMIT') && <button className="primary" disabled={busy || photosPending || Boolean(activitiesError) || missingRequiredCount > 0} onClick={onSubmit}>{busy ? '处理中…' : '提交日报'}</button>}</div>{report.blockedActionReasons.SUBMIT && <p>{report.blockedActionReasons.SUBMIT}</p>}</section>}
   </main><aside className={styles.side}><details className={styles.fold}><summary><strong>日报记录与修订</strong><span>截止：{formatLocalDateTime(report.dueAt)}</span></summary><div className={styles.history}><p>历史模板与已提交证据保留，合并页面不改变历史版本。</p>{report.revisions.map(revision => <p key={revision.id}>修订 {revision.revisionNo} · {revision.status === 'DRAFT' ? '草稿' : revision.status === 'SUBMITTED' ? '已提交' : revision.status === 'APPROVED' ? '已通过' : '已退回'}<small>{formatLocalDateTime(revision.submittedAt)} {revision.correctionReason}</small></p>)}</div></details>{children}</aside></div>
 }

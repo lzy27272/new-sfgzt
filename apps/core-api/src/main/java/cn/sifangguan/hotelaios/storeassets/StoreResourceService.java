@@ -571,13 +571,13 @@ public class StoreResourceService {
     @Transactional(readOnly = true)
     public List<Map<String, Object>> assets(UUID hotelId, boolean includeRetired) {
         TenantPrincipal principal = prepareHotel("store-resource.read", hotelId);
-        return jdbc.queryForList("""
+        return usageScopes.decorateAssets(principal.tenantId(),hotelId,jdbc.queryForList("""
                 select asset.id, asset.hotel_org_unit_id, asset.asset_code,
                        asset.name, asset.category, asset.specification, asset.serial_number,
                        asset.unit, asset.original_value, asset.acquired_on, asset.location,
                        asset.responsible_assignment_id, asset.status, asset.row_version,
                        employee.name as responsible_name, position.name as responsible_position_name,
-                       asset.created_at, asset.updated_at
+                       asset.created_at, asset.updated_at, asset.usage_scope_mode
                 from store_fixed_asset asset
                 left join employee_position_assignment assignment
                   on assignment.tenant_id = asset.tenant_id and assignment.id = asset.responsible_assignment_id
@@ -587,7 +587,7 @@ public class StoreResourceService {
                 where asset.tenant_id = :tenantId and asset.hotel_org_unit_id = :hotelId
                   and (:includeRetired = true or asset.status <> 'RETIRED')
                 order by asset.status, asset.category, asset.asset_code
-                """, hotel(principal, hotelId).addValue("includeRetired", includeRetired));
+                """, hotel(principal, hotelId).addValue("includeRetired", includeRetired)));
     }
 
     @Transactional

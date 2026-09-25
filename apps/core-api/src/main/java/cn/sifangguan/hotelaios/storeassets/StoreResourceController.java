@@ -161,8 +161,8 @@ public class StoreResourceController {
     }
 
     @GetMapping("/hotels/{hotelId}/imports/template")
-    public ResponseEntity<byte[]> importTemplate(@PathVariable UUID hotelId) {
-        return file(importService.template(hotelId));
+    public ResponseEntity<byte[]> importTemplate(@PathVariable UUID hotelId, @RequestParam(defaultValue="false") boolean scopeOnly) {
+        return file(importService.template(hotelId,scopeOnly));
     }
 
     @GetMapping("/hotels/{hotelId}/imports")
@@ -174,9 +174,10 @@ public class StoreResourceController {
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> previewImport(
             @PathVariable UUID hotelId,
-            @RequestPart("file") MultipartFile file
+            @RequestPart("file") MultipartFile file,
+            @RequestParam(defaultValue="false") boolean scopeOnly
     ) {
-        return importService.preview(hotelId, file);
+        return importService.preview(hotelId, file,scopeOnly);
     }
 
     @GetMapping("/hotels/{hotelId}/imports/{jobId}/errors")

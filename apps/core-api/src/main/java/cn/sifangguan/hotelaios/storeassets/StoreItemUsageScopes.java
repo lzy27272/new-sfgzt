@@ -59,6 +59,7 @@ public class StoreItemUsageScopes {
     }
 
     public UsageScopeInput parse(String departmentNames, String positionNames, Options options) {
+        if ("不限岗位".equals(positionNames.trim())) positionNames = "";
         if (departmentNames.isBlank()) throw invalid("适用部门", "请填写全店通用或本门店有效部门名称/编码");
         List<String> departments = split(departmentNames, "适用部门");
         boolean all = departments.contains("全店通用");
@@ -109,6 +110,38 @@ public class StoreItemUsageScopes {
         jdbc.update("delete from store_item_usage_position where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and item_id=:itemId", params);
         for (UUID id : input.departmentIds()) jdbc.update("insert into store_item_usage_department(tenant_id,hotel_org_unit_id,item_id,department_id) values(:tenantId,:hotelId,:itemId,:id)", params.addValue("id", id));
         for (UUID id : input.positionIds()) jdbc.update("insert into store_item_usage_position(tenant_id,hotel_org_unit_id,item_id,position_id) values(:tenantId,:hotelId,:itemId,:id)", params.addValue("id", id));
+    }
+
+    public void saveAsset(UUID tenantId, UUID hotelId, UUID assetId, UsageScopeInput input) {
+        if (input == null) return;
+        var p = params(tenantId, hotelId).addValue("assetId",assetId).addValue("mode",input.mode());
+        jdbc.update("update store_fixed_asset set usage_scope_mode=:mode where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and id=:assetId",p);
+        jdbc.update("delete from store_asset_usage_department where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and asset_id=:assetId",p);
+        jdbc.update("delete from store_asset_usage_position where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and asset_id=:assetId",p);
+        for (UUID id:input.departmentIds()) jdbc.update("insert into store_asset_usage_department values(:tenantId,:hotelId,:assetId,:id)",p.addValue("id",id));
+        for (UUID id:input.positionIds()) jdbc.update("insert into store_asset_usage_position values(:tenantId,:hotelId,:assetId,:id)",p.addValue("id",id));
+    }
+
+    public List<Map<String,Object>> decorateAssets(UUID tenantId,UUID hotelId,List<Map<String,Object>> assets) {
+        if(assets.isEmpty()) return assets;
+        var p=params(tenantId,hotelId).addValue("ids",assets.stream().map(a->a.get("id")).toList());
+        var deps=group(jdbc.queryForList("""
+            select s.asset_id as item_id,d.id,d.code,d.name from store_asset_usage_department s
+            join org_unit d on d.tenant_id=s.tenant_id and d.id=s.department_id
+            where s.tenant_id=:tenantId and s.hotel_org_unit_id=:hotelId and s.asset_id in (:ids) order by d.name,d.id
+            """,p));
+        var positions=group(jdbc.queryForList("""
+            select s.asset_id as item_id,d.id,d.code,d.name from store_asset_usage_position s
+            join position_definition d on d.tenant_id=s.tenant_id and d.id=s.position_id
+            where s.tenant_id=:tenantId and s.hotel_org_unit_id=:hotelId and s.asset_id in (:ids) order by d.name,d.id
+            """,p));
+        for(var asset:assets) {
+            var d=deps.getOrDefault(asset.get("id"),List.of());var v=positions.getOrDefault(asset.get("id"),List.of());
+            asset.put("usage_scope",Map.of("mode",asset.getOrDefault("usage_scope_mode","LEGACY"),
+                "departmentIds",d.stream().map(Option::id).toList(),"positionIds",v.stream().map(Option::id).toList(),
+                "departments",d,"positions",v));
+        }
+        return assets;
     }
 
     public List<Map<String, Object>> decorate(UUID tenantId, UUID hotelId, List<Map<String, Object>> items) {

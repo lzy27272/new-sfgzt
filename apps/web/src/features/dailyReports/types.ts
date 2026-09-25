@@ -94,6 +94,7 @@ export type DailyReportDetail = DailyReportSummary & {
   roomCounts?: { checkoutRooms?: number; stayoverRooms?: number }
   plannedHygieneSupported?: boolean
   plannedHygiene?: PlannedHygiene
+  housekeepingActivities?: import('./housekeepingActivities').HousekeepingActivities
   currentRevision: DailyReportRevision
   revisions: Array<Pick<DailyReportRevision, 'id' | 'revisionNo' | 'status' | 'submittedAt' | 'correctionReason'>>
   aiRecommendations: DailyReportAiRecommendation[]
@@ -103,6 +104,7 @@ export type DailyReportDetail = DailyReportSummary & {
 }
 
 export type DailyReportDraftInput = {
+  housekeepingActivities?: import('./housekeepingActivities').HousekeepingActivities
   inventoryQuantities?: unknown
   roomCounts?: { checkoutRooms?: number; stayoverRooms?: number }
   plannedHygiene?: PlannedHygiene

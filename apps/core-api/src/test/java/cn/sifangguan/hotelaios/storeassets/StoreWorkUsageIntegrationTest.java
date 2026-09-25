@@ -34,9 +34,11 @@ class StoreWorkUsageIntegrationTest {
     private static final String EMP="19000000-0000-0000-0000-000000000003", EMPLOYEE="19100000-0000-0000-0000-000000000002", EA="19200000-0000-0000-0000-000000000002";
     private static final EmbeddedPostgres PG=start();
     private static final String URL=url();
+    private static final String CUSTODY_ACTOR="19000000-0000-0000-0000-000000000005", CUSTODY_ASSIGNMENT="19200000-0000-0000-0000-000000000005";
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper mapper;
     @Autowired JdbcTemplate jdbc;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
     private String form, version, expectation;
     private String usageItemCode="HKA_USAGE_RETURN";
 
@@ -44,6 +46,7 @@ class StoreWorkUsageIntegrationTest {
         r.add("spring.datasource.url",()->URL); r.add("spring.datasource.username",()->"postgres"); r.add("spring.datasource.password",()->"postgres");
         r.add("spring.flyway.user",()->"postgres"); r.add("spring.flyway.password",()->"postgres");
         r.add("app.security.development-header-auth-enabled",()->true); r.add("app.database.rls-enabled",()->true);
+        r.add("app.attachments.root",()->java.nio.file.Path.of(System.getProperty("java.io.tmpdir"),"custody-test-"+PG.getPort()).toString());
     }
     @AfterAll static void close() throws Exception { PG.close(); }
     @BeforeEach void setup() throws Exception {
@@ -400,6 +403,156 @@ class StoreWorkUsageIntegrationTest {
                 where tenant_id = ?::uuid and id = ?
                 """, revisionId, T, reportId);
         return revisionId;
+    }
+
+    @Test void dailyActivitiesCommitWithReportAndCustodyApprovalReleaseAreIsolatedAndIdempotent() throws Exception {
+        var report=activityReport(6);String id=report.path("id").asText();
+        String revision=report.path("revisions").get(0).path("id").asText();
+        var options=call(get("/api/v1/daily-reports/"+id+"/activity-recipients"),EMP,null,200);
+        assertThat(options.toString()).contains(CUSTODY_ASSIGNMENT).doesNotContain(EA);
+        String photo=activityPhoto("/api/v1/daily-reports/"+id+"/activity-photos",EMP,EA);
+        String servicePhoto=activityPhoto("/api/v1/daily-reports/"+id+"/activity-photos",EMP,EA);
+        var entry=lostEntry(photo); var payload=activities(entry,servicePhoto);
+        var saved=saveActivities(id,revision,report.path("rowVersion").asLong(),payload,false);
+        assertThat(jdbc.queryForObject("select count(*) from lost_property_case where report_id=?::uuid",Integer.class,id)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_type='LOST_PROPERTY' and source_id in(select id from lost_property_case where report_id=?::uuid)",Integer.class,id)).isZero();
+        assertThat(call(get("/api/v1/daily-reports/"+id),EMP,null,200).path("revisions").get(0).path("payloadSnapshot").path("housekeepingActivities").path("serviceCases").size()).isEqualTo(1);
+        // Missing usage confirmation fails after activity creation: the outer transaction must undo both.
+        call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),400);
+        assertThat(jdbc.queryForObject("select count(*) from lost_property_case where report_id=?::uuid",Integer.class,id)).isZero();
+        saved=saveActivities(id,revision,saved.path("rowVersion").asLong(),payload,true);
+        var submitted=call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),200);
+        assertThat(submitted.path("reportStatus").asText()).isEqualTo("SUBMITTED");
+        String caseId=jdbc.queryForObject("select id::text from lost_property_case where report_id=?::uuid",String.class,id);
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_type='LOST_PROPERTY' and source_id=?::uuid",Integer.class,caseId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select remaining_quantity from lost_property_case where id=?::uuid",Integer.class,caseId)).isZero();
+        call(get("/api/v1/lost-properties/"+caseId),AGM,null,403);
+        // The recipient's primary post is a supervisor, but the message targets their front-desk post.
+        assertThat(call(get("/api/v1/lost-properties/"+caseId+"/entry-assignment"),CUSTODY_ACTOR,null,200).path("assignmentId").asText()).isEqualTo(CUSTODY_ASSIGNMENT);
+        call(get("/api/v1/lost-properties/"+caseId+"/entry-assignment"),AGM,null,403);
+        var receive=Map.of("expectedVersion",0,"outcome","RECEIVED","storageLocation","前台保险柜A2","note","数量照片相符");
+        call(post("/api/v1/lost-properties/"+caseId+"/review").header("Idempotency-Key","wrong-recipient"),EMP,receive,403);
+        custodyCall(get("/api/v1/lost-properties/"+caseId),null,200);
+        mvc.perform(get("/api/v1/lost-properties/"+caseId+"/photos/"+photo).header("X-Tenant-Id",T).header("X-Actor-Id",CUSTODY_ACTOR).header("X-Assignment-Id",CUSTODY_ASSIGNMENT)).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+        mvc.perform(get("/api/v1/lost-properties/"+caseId+"/photos/"+servicePhoto).header("X-Tenant-Id",T).header("X-Actor-Id",CUSTODY_ACTOR).header("X-Assignment-Id",CUSTODY_ASSIGNMENT)).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNotFound());
+        var approved=custodyCall(post("/api/v1/lost-properties/"+caseId+"/review").header("Idempotency-Key","receive"),receive,200);
+        custodyCall(post("/api/v1/lost-properties/"+caseId+"/review").header("Idempotency-Key","receive"),receive,200);
+        assertThat(approved.path("remainingQuantity").asInt()).isEqualTo(3);
+        custodyCall(post("/api/v1/lost-properties/"+caseId+"/review").header("Idempotency-Key","stale"),receive,409);
+        String handover=activityPhoto("/api/v1/lost-properties/"+caseId+"/photos",CUSTODY_ACTOR,CUSTODY_ASSIGNMENT);
+        var release=new LinkedHashMap<String,Object>(Map.of("expectedVersion",1,"quantity",2,"recipientName","张女士","verification","房号及物品特征核对一致","photoIds",List.of(handover)));
+        var partial=custodyCall(post("/api/v1/lost-properties/"+caseId+"/release").header("Idempotency-Key","release-first"),release,200);
+        custodyCall(post("/api/v1/lost-properties/"+caseId+"/release").header("Idempotency-Key","release-first"),release,200);
+        assertThat(partial.path("remainingQuantity").asInt()).isEqualTo(1);
+        release.put("expectedVersion",2);
+        custodyCall(post("/api/v1/lost-properties/"+caseId+"/release").header("Idempotency-Key","over-release"),release,400);
+        release.put("quantity",1);
+        assertThat(custodyCall(post("/api/v1/lost-properties/"+caseId+"/release").header("Idempotency-Key","release-final"),release,200).path("state").asText()).isEqualTo("COLLECTED");
+        assertThat(jdbc.queryForObject("select count(*) from lost_property_event where case_id=?::uuid",Integer.class,caseId)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("select count(*) from store_cost_entry where source_parent_id=?::uuid",Integer.class,caseId)).isZero();
+        assertThatThrownBy(()->jdbc.update("update lost_property_event set kind='RETURNED' where case_id=?::uuid",caseId)).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(()->jdbc.update("delete from daily_activity_photo where id=?::uuid",photo)).isInstanceOf(RuntimeException.class);
+    }
+
+    @Test void dailyActivitiesValidateSelfOtherHotelAndReturnWithReason() throws Exception {
+        var report=activityReport(7);String id=report.path("id").asText(),revision=report.path("revisions").get(0).path("id").asText();
+        String photo=activityPhoto("/api/v1/daily-reports/"+id+"/activity-photos",EMP,EA);
+        var entry=lostEntry(photo);entry.put("recipientAssignmentId",EA);
+        var saved=saveActivities(id,revision,report.path("rowVersion").asLong(),activities(entry,null),true);
+        call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),400);
+        UUID other=UUID.randomUUID();
+        jdbc.update("insert into employee_position_assignment(id,tenant_id,employee_id,org_unit_id,position_id,is_primary,valid_from) values(?,?::uuid,'19100000-0000-0000-0000-000000000004',?::uuid,'14000000-0000-0000-0000-000000000001',false,current_date)",other,T,OTHER_H);
+        entry.put("recipientAssignmentId",other.toString());
+        saved=saveActivities(id,revision,saved.path("rowVersion").asLong(),activities(entry,null),true);
+        call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),400);
+        entry.put("recipientAssignmentId",CUSTODY_ASSIGNMENT);
+        saved=saveActivities(id,revision,saved.path("rowVersion").asLong(),activities(entry,null),true);
+        call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),200);
+        String caseId=jdbc.queryForObject("select id::text from lost_property_case where report_id=?::uuid",String.class,id);
+        call(get("/api/v1/lost-properties/"+caseId).header("X-Assignment-Id",other.toString()),CUSTODY_ACTOR,null,403);
+        var wecom=custodyWecomWorker();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(wecom,"enqueueTaskNotifications");
+        assertThat(custodyDeliveryCount(caseId)).isEqualTo(1);
+        custodyCall(post("/api/v1/lost-properties/"+caseId+"/review").header("Idempotency-Key","return-no-reason"),Map.of("expectedVersion",0,"outcome","RETURNED"),400);
+        assertThat(custodyCall(post("/api/v1/lost-properties/"+caseId+"/review").header("Idempotency-Key","return"),Map.of("expectedVersion",0,"outcome","RETURNED","note","请补充抽屉位置"),200).path("state").asText()).isEqualTo("RETURNED");
+        assertThat(jdbc.queryForObject("select remaining_quantity from lost_property_case where id=?::uuid",Integer.class,caseId)).isZero();
+        List<?> staleClaims=org.springframework.test.util.ReflectionTestUtils.invokeMethod(wecom,"claim");
+        assertThat(staleClaims).extracting("sourceId").doesNotContain(UUID.fromString(caseId));
+        var submitted=call(get("/api/v1/daily-reports/"+id),EMP,null,200);
+        var correction=call(post("/api/v1/daily-reports/"+id+"/corrections").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("expectedVersion",submitted.path("rowVersion").asLong(),"reason","补充发现位置"),201);
+        String correctedRevision=jdbc.queryForObject("select current_revision_id::text from daily_report where id=?::uuid",String.class,id);
+        entry.put("foundLocation","床头柜左侧抽屉");
+        // Editing already submitted quantities is still rejected; correcting only the lost item is allowed.
+        saved=saveActivities(id,correctedRevision,correction.path("rowVersion").asLong(),activities(entry,null),false);
+        call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",correctedRevision,"expectedVersion",saved.path("rowVersion").asLong()),400);
+        assertThat(jdbc.queryForObject("select state from lost_property_case where id=?::uuid",String.class,caseId)).isEqualTo("RETURNED");
+        saved=saveActivities(id,correctedRevision,saved.path("rowVersion").asLong(),activities(entry,null),true);
+        call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",correctedRevision,"expectedVersion",saved.path("rowVersion").asLong()),200);
+        assertThat(jdbc.queryForObject("select state from lost_property_case where id=?::uuid",String.class,caseId)).isEqualTo("PENDING");
+        assertThat(jdbc.queryForObject("select count(*) from lost_property_case where report_id=?::uuid",Integer.class,id)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_type='LOST_PROPERTY' and source_id=?::uuid",Integer.class,caseId)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from lost_property_event where case_id=?::uuid",Integer.class,caseId)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("select count(*) from work_record where payload->>'dailyReportId'=?",Integer.class,id)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from store_work_usage u join work_record w on w.id=u.work_record_id where w.payload->>'dailyReportId'=?",Integer.class,id)).isEqualTo(1);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(wecom,"enqueueTaskNotifications");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(wecom,"enqueueTaskNotifications");
+        assertThat(custodyDeliveryCount(caseId)).isEqualTo(2);
+        List<?> freshClaims=org.springframework.test.util.ReflectionTestUtils.invokeMethod(wecom,"claim");
+        assertThat(freshClaims).filteredOn("sourceId",UUID.fromString(caseId)).hasSize(1);
+    }
+
+    private int custodyDeliveryCount(String caseId) {
+        return jdbc.queryForObject("select count(*) from notification_delivery d join notification n on n.id=d.notification_id and n.tenant_id=d.tenant_id where n.source_type='LOST_PROPERTY' and n.source_id=?::uuid and d.channel='WECHAT'",Integer.class,caseId);
+    }
+    private cn.sifangguan.hotelaios.integrations.wecom.WeComDeliveryWorker custodyWecomWorker() {
+        String corp="custody-test-"+UUID.randomUUID();
+        var properties=org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComProperties.class);
+        org.mockito.Mockito.when(properties.tenantId()).thenReturn(UUID.fromString(T));
+        org.mockito.Mockito.when(properties.corpId()).thenReturn(corp);
+        jdbc.update("insert into wecom_user_binding(tenant_id,corp_id,wecom_user_id,account_id,preferred_assignment_id,user_id_fingerprint) values(?::uuid,?,'local-custody-test',?::uuid,?::uuid,repeat('b',64))",T,corp,CUSTODY_ACTOR,CUSTODY_ASSIGNMENT);
+        // Only enqueue/claim are invoked. The API mock can never send real messages.
+        return new cn.sifangguan.hotelaios.integrations.wecom.WeComDeliveryWorker(
+                new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
+                new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc,true),
+                new org.springframework.transaction.support.TransactionTemplate(transactions),
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,100);
+    }
+
+    private JsonNode activityReport(int daysAgo) throws Exception {
+        usageItemCode="HKA_DAILY_REPORT";setup();LocalDate date=LocalDate.now().minusDays(daysAgo);
+        jdbc.update("update work_package_allocation set valid_from=? where id=(select work_package_allocation_id from work_expectation where id=?::uuid)",date,expectation);
+        jdbc.update("update work_expectation set business_date=? where id=?::uuid",date,expectation);
+        String itemId=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
+        UUID rev=createUsageDailyReport(version,itemId,date);
+        String id=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,rev);
+        return call(get("/api/v1/daily-reports/"+id),EMP,null,200);
+    }
+    private JsonNode saveActivities(String id,String revision,long version,Map<String,Object> activities,boolean validUsage) throws Exception {
+        return call(put("/api/v1/daily-reports/"+id+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",version,"items",List.of(),"roomCounts",Map.of("checkoutRooms",0,"stayoverRooms",0),
+                       "inventoryQuantities",Map.of("schemaVersion",1,"noUsage",validUsage,"lines",List.of()),"housekeepingActivities",activities),200);
+    }
+    private Map<String,Object> lostEntry(String photo) {
+        return new LinkedHashMap<>(Map.of("id",UUID.randomUUID().toString(),"itemName","充电器","quantity",3,"roomNumber","1208","foundLocation","床头柜",
+                "foundAt",OffsetDateTime.now().minusHours(1).toString(),"recipientAssignmentId",CUSTODY_ASSIGNMENT,"notes","黑色","photoIds",List.of(photo)));
+    }
+    private Map<String,Object> activities(Map<String,Object> entry,String servicePhoto) {
+        return Map.of("schemaVersion",1,"lostPropertyOccurred",true,"lostProperties",List.of(entry),"serviceCases",servicePhoto==null?List.of():List.of(Map.of("id",UUID.randomUUID().toString(),"roomNumber","1210","serviceContent","协助客人搬运行李","photoIds",List.of(servicePhoto))));
+    }
+    private JsonNode custodyCall(MockHttpServletRequestBuilder request,Object body,int status) throws Exception {
+        return call(request.header("X-Assignment-Id",CUSTODY_ASSIGNMENT),CUSTODY_ACTOR,body,status);
+    }
+    private String activityPhoto(String base,String actor,String assignment) throws Exception {
+        String id=UUID.randomUUID().toString();
+        var image=new java.awt.image.BufferedImage(8,4,java.awt.image.BufferedImage.TYPE_INT_RGB);var bytes=new java.io.ByteArrayOutputStream();javax.imageio.ImageIO.write(image,"png",bytes);
+        var file=new org.springframework.mock.web.MockMultipartFile("file","scene.png","image/png",bytes.toByteArray());
+        var request=multipart(base+"/"+id).file(file).with(r->{r.setMethod("PUT");return r;});
+        if(!actor.equals(EMP))request.header("X-Assignment-Id",assignment);
+        call(request,actor,null,200);
+        return id;
     }
 
     @Test void dailyReportEditorSubmitsOneUsageRecordAndRollsBackInvalidQuantities() throws Exception {

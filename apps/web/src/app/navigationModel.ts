@@ -24,7 +24,7 @@ const centerDefinitions: readonly {
   label: string
   modules: readonly AppRouteId[]
 }[] = [
-  { id: 'workbench', label: '工作台', modules: ['workbench', 'my-work', 'daily-reports-my', 'team-work', 'tasks', 'notifications', 'procurement'] },
+  { id: 'workbench', label: '工作台', modules: ['workbench', 'my-work', 'daily-reports-my', 'team-work', 'tasks', 'notifications', 'procurement', 'lost-properties'] },
   { id: 'operations', label: '经营中心', modules: ['daily-operations', 'investments', 'store-resources', 'ai-data'] },
   { id: 'people', label: '人事中心', modules: ['organization', 'wecom-onboarding', 'wecom-bindings'] },
   { id: 'performance', label: '绩效中心', modules: ['kpi-center', 'evaluations'] },

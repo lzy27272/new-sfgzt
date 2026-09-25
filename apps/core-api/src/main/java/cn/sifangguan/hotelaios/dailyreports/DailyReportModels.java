@@ -41,10 +41,15 @@ public final class DailyReportModels {
             @PositiveOrZero long expectedVersion,
             JsonNode inventoryQuantities,
             JsonNode roomCounts,
-            @Valid PlannedHygiene plannedHygiene
+            @Valid PlannedHygiene plannedHygiene,
+            JsonNode housekeepingActivities
     ) {
         public SaveDraft(UUID revisionId, List<ItemValue> items, String narrative, long expectedVersion) {
-            this(revisionId,items,narrative,expectedVersion,null,null,null);
+            this(revisionId,items,narrative,expectedVersion,null,null,null,null);
+        }
+        public SaveDraft(UUID revisionId,List<ItemValue> items,String narrative,long expectedVersion,
+                         JsonNode inventoryQuantities,JsonNode roomCounts,PlannedHygiene plannedHygiene) {
+            this(revisionId,items,narrative,expectedVersion,inventoryQuantities,roomCounts,plannedHygiene,null);
         }
     }
 

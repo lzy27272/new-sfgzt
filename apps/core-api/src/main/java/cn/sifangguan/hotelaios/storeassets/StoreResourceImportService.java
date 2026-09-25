@@ -43,7 +43,8 @@ import java.util.UUID;
 @Service
 public class StoreResourceImportService {
     private static final String IMPORT_TYPE = "STORE_RESOURCE_INITIALIZATION";
-    private static final int TEMPLATE_VERSION = 3;
+    private static final String SCOPE_IMPORT_TYPE = "STORE_RESOURCE_USAGE_SCOPE";
+    private static final int TEMPLATE_VERSION = 4;
     private static final String ITEM_SHEET = "物品与期初库存";
     private static final String ASSET_SHEET = "固定资产";
     private static final String XLSX_MEDIA_TYPE =
@@ -52,7 +53,7 @@ public class StoreResourceImportService {
             "物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*");
     private static final List<String> ITEM_TEMPLATE_HEADERS = List.of(
             "物品编码*", "物品名称*", "分类*", "计量单位*", "单位成本*", "最低库存*", "期初数量*",
-            "规格型号", "采购单位", "采购换算比例", "领用耗用单位", "领用耗用换算比例", "适用部门*", "适用岗位");
+            "规格型号", "采购单位", "采购换算比例", "领用耗用单位", "领用耗用换算比例", "使用部门*", "适用岗位");
     private static final List<String> ASSET_HEADERS = List.of(
             "资产编号*", "资产名称*", "资产分类*", "规格型号", "序列号", "计量单位*",
             "原值*", "购置日期", "存放位置", "责任人工号", "责任人岗位编码", "状态");
@@ -87,7 +88,10 @@ public class StoreResourceImportService {
     }
 
     @Transactional(readOnly = true)
-    public ImportFile template(UUID hotelId) {
+    public ImportFile template(UUID hotelId) { return template(hotelId,false); }
+
+    @Transactional(readOnly = true)
+    public ImportFile template(UUID hotelId, boolean scopeOnly) {
         TenantPrincipal principal = prepareHotel("store-resource.import-preview", hotelId);
         var options = usageScopes.options(principal.tenantId(), hotelId, false);
         LinkedHashMap<String, List<List<String>>> sheets = new LinkedHashMap<>();
@@ -99,34 +103,40 @@ public class StoreResourceImportService {
                 List.of("4", "计量单位是库存基础单位；单位成本、最低库存、期初数量全部按基础单位填写。期初数量×单位成本为期初金额，并生成不可变流水。"),
                 List.of("5", "责任人工号可留空；同一员工有多个任职时请同时填写责任人岗位编码。"),
                 List.of("6", "资产状态可填：在用、维修中、损坏、盘亏、已退役；留空默认为在用。"),
-                List.of("7", "当前版本为仅新增模式：门店内重复SKU或资产编号会被拦截，不会覆盖原数据。"),
+                List.of("7", scopeOnly ? "本模板仅更新使用范围：按已有物品编码/资产编号匹配，不新增主档，不改变数量、成本、流水或责任人。上传时请选择仅更新使用范围。" : "本模板为新增模式：门店内重复物品编码或资产编号会被拦截。已有物品请改选仅更新使用范围后下载专用模板。"),
                 List.of("8", "规格和采购/领用耗用单位为选填；不填则沿用基础单位。1个采购或领用耗用单位=换算比例个基础单位；异名单位必须填比例，同名单位比例必须相同。"),
                 List.of("9", "例如基础单位支、采购单位箱、采购换算比例100；2箱期初库存请填200支，单支成本填0.5而非整箱50。旧V1/V2模板仍可导入，缺少使用范围的物品标为待配置，补齐后员工才能领用及填报，不自动改成全店通用。"),
-                List.of("10", "适用部门必填：全店通用，或部门岗位参考表中的本门店有效部门名称/编码；多项用分号分隔，例如前厅部;客房部。名称重名时请填写编码。"),
+                List.of("10", "使用部门必填（兼容旧列名适用部门）：全店通用，或参考表中的本门店有效部门名称/编码；多项用分号分隔。名称重名时请填写编码。固定资产使用范围与责任人分开配置。"),
                 List.of("11", "适用岗位选填：使用集团有效岗位标准名称/编码，多项用分号分隔；留空表示所选部门内全部岗位，不表示全店所有部门。岗位定义不以当前是否有人任职为条件。"),
-                List.of("12", "参考表仅供填写，不参与导入；系统以后台当前有效数据为准校验。此配置不拆分库存、不改变权限、审批或常用品清单；按范围快捷领用在后续接入。")
+                List.of("12", "参考表仅供填写，系统按后台当前有效数据校验。部门和岗位取交集；员工按当前任职过滤物品。此配置不拆分库存、不授予新权限。岗位也可填写不限岗位。")
         ));
-        sheets.put(ITEM_SHEET, List.of(ITEM_TEMPLATE_HEADERS));
-        sheets.put(ASSET_SHEET, List.of(ASSET_HEADERS));
+        List<String> assetHeaders = new ArrayList<>(ASSET_HEADERS);
+        assetHeaders.addAll(List.of("使用部门*","适用岗位"));
+        sheets.put(ITEM_SHEET, scopeOnly ? scopeTemplateRows(principal,hotelId,false) : List.of(ITEM_TEMPLATE_HEADERS));
+        sheets.put(ASSET_SHEET, scopeOnly ? scopeTemplateRows(principal,hotelId,true) : List.of(assetHeaders));
         List<List<String>> references = new ArrayList<>();
         references.add(List.of("类型", "编码", "名称", "适用说明"));
         options.departments().forEach(option -> references.add(List.of("部门", option.code(), option.name(), "当前门店有效部门")));
         options.positions().forEach(option -> references.add(List.of("岗位", option.code(), option.name(), "集团有效岗位标准；与所选部门取交集")));
         sheets.put("部门岗位参考", references);
-        return new ImportFile("新店库存与固定资产导入模板_V3.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
+        return new ImportFile(scopeOnly ? "库存资产使用范围更新模板_V4.xlsx" : "库存与固定资产导入模板_V4.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
     }
 
     @Transactional
-    public Map<String, Object> preview(UUID hotelId, MultipartFile file) {
+    public Map<String, Object> preview(UUID hotelId, MultipartFile file) { return preview(hotelId,file,false); }
+
+    @Transactional
+    public Map<String, Object> preview(UUID hotelId, MultipartFile file, boolean scopeOnly) {
         TenantPrincipal principal = prepareHotel("store-resource.import-preview", hotelId);
+        String importType = scopeOnly ? SCOPE_IMPORT_TYPE : IMPORT_TYPE;
         Upload upload = validatedUpload(file);
-        MapSqlParameterSource fileKey = hotel(principal, hotelId).addValue("importType", IMPORT_TYPE)
+        MapSqlParameterSource fileKey = hotel(principal, hotelId).addValue("importType", importType)
                 .addValue("sha256", upload.sha256());
         // Serialize first uploads before a job row exists. Existing jobs also take
         // the same row lock as apply, so a refresh can never overwrite APPLIED.
         jdbc.queryForList("select pg_advisory_xact_lock(hashtextextended(:fileKey, 0))",
                 new MapSqlParameterSource("fileKey", principal.tenantId() + ":" + hotelId
-                        + ":" + IMPORT_TYPE + ":" + upload.sha256()));
+                        + ":" + importType + ":" + upload.sha256()));
         List<Map<String, Object>> duplicate = jdbc.queryForList("""
                 select * from tabular_import_job
                 where tenant_id = :tenantId and target_org_unit_id = :hotelId
@@ -138,7 +148,8 @@ public class StoreResourceImportService {
             return jobResponse(existing, true);
         }
 
-        Parsed parsed = parse(principal, hotelId, workbook.read(upload.bytes()));
+        Parsed parsed = scopeOnly ? parseScopeUpdate(principal,hotelId,workbook.read(upload.bytes()))
+                : parse(principal, hotelId, workbook.read(upload.bytes()));
         List<ImportError> errors = new ArrayList<>(parsed.errors());
         errors.addAll(databaseConflicts(principal, hotelId, parsed.payload()));
         int rowCount = parsed.payload().items().size() + parsed.payload().assets().size();
@@ -154,7 +165,7 @@ public class StoreResourceImportService {
         }
         UUID jobId = existing == null ? UUID.randomUUID() : uuid(existing.get("id"));
         MapSqlParameterSource params = hotel(principal, hotelId)
-                .addValue("id", jobId).addValue("importType", IMPORT_TYPE)
+                .addValue("id", jobId).addValue("importType", importType)
                 .addValue("templateVersion", TEMPLATE_VERSION).addValue("name", upload.name())
                 .addValue("mediaType", XLSX_MEDIA_TYPE).addValue("sizeBytes", upload.bytes().length)
                 .addValue("sha256", upload.sha256()).addValue("scanStatus", upload.scanStatus())
@@ -215,10 +226,10 @@ public class StoreResourceImportService {
                        applied_at as "appliedAt"
                 from tabular_import_job
                 where tenant_id = :tenantId and target_org_unit_id = :hotelId
-                  and import_type = :importType
+                  and import_type in (:importType,:scopeImportType)
                 order by created_at desc, id desc
                 limit 30
-                """, hotel(principal, hotelId).addValue("importType", IMPORT_TYPE));
+                """, hotel(principal, hotelId).addValue("importType", IMPORT_TYPE).addValue("scopeImportType",SCOPE_IMPORT_TYPE));
     }
 
     @Transactional(readOnly = true)
@@ -247,6 +258,7 @@ public class StoreResourceImportService {
             throw conflict("导入任务未通过预检，不能确认入账");
         }
         ImportPayload payload = readPayload(job.get("parsed_payload"));
+        if(payload.scopeOnly()) return applyScopeUpdate(principal,hotelId,jobId,job,payload,idempotencyKey);
         List<ImportError> conflicts = databaseConflicts(principal, hotelId, payload);
         if (!conflicts.isEmpty()) throw conflict("正式数据已变化，请重新上传并预检：" + conflicts.getFirst().message());
         requireAssignmentsStillValid(principal, hotelId, payload);
@@ -260,6 +272,8 @@ public class StoreResourceImportService {
                 }
             }
         }
+        var scopeOptions = usageScopes.options(principal.tenantId(),hotelId,true);
+        for(var asset:payload.assets()) usageScopes.validate(asset.usageScope(),scopeOptions);
 
         BigDecimal openingQuantity = BigDecimal.ZERO;
         BigDecimal openingValue = BigDecimal.ZERO;
@@ -346,6 +360,7 @@ public class StoreResourceImportService {
                     .addValue("status", asset.status()).addValue("actorId", principal.actorId()));
             resultLink(principal, jobId, ASSET_SHEET, asset.rowNumber(),
                     "STORE_FIXED_ASSET", assetId, asset.assetCode());
+            usageScopes.saveAsset(principal.tenantId(),hotelId,assetId,asset.usageScope());
             assetValue = assetValue.add(asset.originalValue());
         }
         Map<String, Object> result = new LinkedHashMap<>();
@@ -368,11 +383,109 @@ public class StoreResourceImportService {
         return jobResponse(requireJob(principal, hotelId, jobId, false), false);
     }
 
+    private List<Map<String,Object>> scopedResources(TenantPrincipal p,UUID hotelId,boolean asset,boolean lock) {
+        // SQL identifiers depend only on this internal flag, never on workbook data.
+        String table=asset ? "store_fixed_asset" : "store_resource_item";
+        String code=asset ? "asset_code" : "sku";
+        return jdbc.queryForList("select id,"+code+" as code,name,row_version,usage_scope_mode from "+table+
+                " where tenant_id=:tenantId and hotel_org_unit_id=:hotelId order by id"+(lock ? " for update" : ""),
+                hotel(p,hotelId));
+    }
+
+    private List<List<String>> scopeTemplateRows(TenantPrincipal p,UUID hotelId,boolean asset) {
+        var records=scopedResources(p,hotelId,asset,false);
+        if(asset) usageScopes.decorateAssets(p.tenantId(),hotelId,records);
+        else usageScopes.decorate(p.tenantId(),hotelId,records);
+        List<List<String>> rows=new ArrayList<>();
+        rows.add(List.of(asset ? "资产编号*" : "物品编码*",asset ? "资产名称" : "物品名称","使用部门*","适用岗位"));
+        for(var record:records) {
+            var scope=objectMapper.valueToTree(record.get("usage_scope"));
+            List<String> departments=new ArrayList<>(),positions=new ArrayList<>();
+            scope.path("departments").forEach(o->departments.add(o.path("code").asText()));
+            scope.path("positions").forEach(o->positions.add(o.path("code").asText()));
+            rows.add(List.of(record.get("code").toString(),record.get("name").toString(),
+                "ALL_DEPARTMENTS".equals(scope.path("mode").asText()) ? "全店通用" : String.join(";",departments),
+                String.join(";",positions)));
+        }
+        return rows;
+    }
+
+    private Parsed parseScopeUpdate(TenantPrincipal p,UUID hotelId,XlsxWorkbook.WorkbookData source) {
+        List<ImportError> errors=new ArrayList<>();
+        List<ImportedItem> items=new ArrayList<>();List<ImportedAsset> assets=new ArrayList<>();
+        var options=usageScopes.options(p.tenantId(),hotelId,false);
+        for(boolean asset:new boolean[]{false,true}) {
+            String sheetName=asset ? ASSET_SHEET : ITEM_SHEET,codeField=asset ? "资产编号" : "物品编码";
+            var sheet=source.sheet(sheetName);
+            if(sheet==null) { errors.add(new ImportError(sheetName,1,"工作表","缺少工作表："+sheetName,"")); continue; }
+            var columns=columns(sheet,List.of(codeField,"使用部门","适用岗位"),errors);
+            Map<String,Map<String,Object>> existing=new HashMap<>();
+            scopedResources(p,hotelId,asset,false).forEach(r->existing.put(r.get("code").toString().toLowerCase(Locale.ROOT),r));
+            Set<String> seen=new HashSet<>();
+            for(int i=1;i<sheet.rows().size();i++) {
+                var row=sheet.rows().get(i);if(blankRow(row)) continue;
+                String code=cell(row,columns,codeField),departments=cell(row,columns,"适用部门"),positions=cell(row,columns,"适用岗位");
+                var record=existing.get(code.toLowerCase(Locale.ROOT));
+                if(!seen.add(code.toLowerCase(Locale.ROOT))) errors.add(new ImportError(sheetName,i+1,codeField,"文件内编码重复",code));
+                if(record==null) errors.add(new ImportError(sheetName,i+1,codeField,"仅更新模式要求编码已存在于当前门店，不会新增物品",code));
+                StoreResourceModels.UsageScopeInput scope=null;
+                try { scope=usageScopes.parse(departments,positions,options); }
+                catch(StoreItemUsageScopes.ScopeValidationException e) { errors.add(new ImportError(sheetName,i+1,e.field(),e.getMessage(),"")); }
+                Long version=record==null ? null : ((Number)record.get("row_version")).longValue();
+                String name=record==null ? "" : record.get("name").toString();
+                if(asset) assets.add(new ImportedAsset(i+1,code,name,"",null,null,"",BigDecimal.ZERO,null,null,null,"",scope,departments,positions,version));
+                else items.add(new ImportedItem(i+1,code,name,"","",BigDecimal.ZERO,BigDecimal.ZERO,BigDecimal.ZERO,
+                    null,null,null,null,null,scope,departments,positions,version));
+            }
+        }
+        return new Parsed(new ImportPayload(items,assets,true),errors);
+    }
+
+    private Map<String,Object> applyScopeUpdate(TenantPrincipal p,UUID hotelId,UUID jobId,Map<String,Object> job,
+                                               ImportPayload payload,String idempotencyKey) {
+        var options=usageScopes.options(p.tenantId(),hotelId,true);
+        for(boolean asset:new boolean[]{false,true}) {
+            Map<String,Map<String,Object>> records=new HashMap<>();
+            scopedResources(p,hotelId,asset,true).forEach(r->records.put(r.get("code").toString().toLowerCase(Locale.ROOT),r));
+            int count=asset ? payload.assets().size() : payload.items().size();
+            for(int i=0;i<count;i++) {
+                String code=asset ? payload.assets().get(i).assetCode() : payload.items().get(i).sku();
+                Long version=asset ? payload.assets().get(i).expectedVersion() : payload.items().get(i).expectedVersion();
+                var scope=asset ? payload.assets().get(i).usageScope() : payload.items().get(i).usageScope();
+                int row=asset ? payload.assets().get(i).rowNumber() : payload.items().get(i).rowNumber();
+                var record=records.get(code.toLowerCase(Locale.ROOT));
+                if(record==null || version==null || ((Number)record.get("row_version")).longValue()!=version)
+                    throw conflict("物品或资产已变化，请重新上传并预检："+code);
+                if(scope==null) throw conflict("使用范围未配置，请重新预检："+code);
+                usageScopes.validate(scope,options);
+                UUID id=uuid(record.get("id"));
+                if(asset) usageScopes.saveAsset(p.tenantId(),hotelId,id,scope);
+                else usageScopes.save(p.tenantId(),hotelId,id,scope);
+                jdbc.update("update "+(asset ? "store_fixed_asset" : "store_resource_item")+
+                    " set row_version=row_version+1 where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and id=:id",
+                    hotel(p,hotelId).addValue("id",id));
+                resultLink(p,jobId,asset ? ASSET_SHEET : ITEM_SHEET,row,
+                    asset ? "STORE_FIXED_ASSET_SCOPE" : "STORE_RESOURCE_ITEM_SCOPE",id,code);
+                auditWriter.record("STORE_RESOURCE_USAGE_SCOPE_IMPORTED",asset ? "STORE_FIXED_ASSET" : "STORE_RESOURCE_ITEM",id,
+                    json(Map.of("jobId",jobId,"previousVersion",version,"scope",scope)));
+            }
+        }
+        var result=Map.of("itemCount",payload.items().size(),"assetCount",payload.assets().size(),"scopeOnly",true);
+        jdbc.update("""
+            update tabular_import_job set status='APPLIED',applied_by=:actorId,applied_at=now(),result_summary=cast(:result as jsonb)
+            where tenant_id=:tenantId and target_org_unit_id=:hotelId and id=:id and status='READY'
+            """,hotel(p,hotelId).addValue("id",jobId).addValue("actorId",p.actorId()).addValue("result",json(result)));
+        auditWriter.record("STORE_RESOURCE_SCOPE_IMPORT_APPLIED","TABULAR_IMPORT_JOB",jobId,
+            json(Map.of("hotelId",hotelId,"result",result,"idempotencyKey",idempotencyKey)));
+        return jobResponse(requireJob(p,hotelId,jobId,false),false);
+    }
+
     private Parsed parse(TenantPrincipal principal, UUID hotelId, XlsxWorkbook.WorkbookData source) {
         List<ImportError> errors = new ArrayList<>();
         List<ImportedItem> items = parseItems(source.sheet(ITEM_SHEET), errors,
                 usageScopes.options(principal.tenantId(), hotelId, false));
-        List<ImportedAssetDraft> assetDrafts = parseAssets(source.sheet(ASSET_SHEET), errors);
+        List<ImportedAssetDraft> assetDrafts = parseAssets(source.sheet(ASSET_SHEET), errors,
+                usageScopes.options(principal.tenantId(),hotelId,false));
         List<ImportedAsset> assets = resolveResponsibleAssignments(principal, hotelId, assetDrafts, errors);
         return new Parsed(new ImportPayload(items, assets), errors);
     }
@@ -441,7 +554,7 @@ public class StoreResourceImportService {
             }
             result.add(new ImportedItem(rowNumber, text(sku), text(name), text(category), text(unit),
                     value(unitCost), value(minimum), value(opening), specification,
-                    purchaseUnit, purchaseFactor, issueUnit, issueFactor, usageScope, departments, positions));
+                    purchaseUnit, purchaseFactor, issueUnit, issueFactor, usageScope, departments, positions,null));
         }
         return List.copyOf(result);
     }
@@ -452,12 +565,16 @@ public class StoreResourceImportService {
         return raw.isBlank() ? null : decimal(raw, ITEM_SHEET, rowNumber, field, 6, 12, errors);
     }
 
-    private List<ImportedAssetDraft> parseAssets(XlsxWorkbook.SheetData sheet, List<ImportError> errors) {
+    private List<ImportedAssetDraft> parseAssets(XlsxWorkbook.SheetData sheet, List<ImportError> errors,
+                                                StoreItemUsageScopes.Options options) {
         if (sheet == null) {
             errors.add(new ImportError(ASSET_SHEET, 1, "工作表", "缺少工作表：" + ASSET_SHEET, ""));
             return List.of();
         }
         Map<String, Integer> columns = columns(sheet, ASSET_HEADERS, errors);
+        boolean hasScope = columns.containsKey("适用部门") || columns.containsKey("适用岗位");
+        if(hasScope && (!columns.containsKey("适用部门") || !columns.containsKey("适用岗位")))
+            errors.add(new ImportError(ASSET_SHEET,1,"使用范围","请同时保留使用部门与适用岗位两列",""));
         if (sheet.rows().isEmpty()) return List.of();
         List<ImportedAssetDraft> result = new ArrayList<>();
         Set<String> codes = new HashSet<>();
@@ -487,9 +604,13 @@ public class StoreResourceImportService {
             if (code != null && !codes.add(code.toLowerCase(Locale.ROOT))) {
                 errors.add(new ImportError(ASSET_SHEET, rowNumber, "资产编号", "文件内资产编号重复", code));
             }
+            String departments=cell(row,columns,"适用部门"),positions=cell(row,columns,"适用岗位");
+            StoreResourceModels.UsageScopeInput scope=null;
+            if(hasScope) try { scope=usageScopes.parse(departments,positions,options); }
+            catch(StoreItemUsageScopes.ScopeValidationException e) { errors.add(new ImportError(ASSET_SHEET,rowNumber,e.field(),e.getMessage(),"")); }
             result.add(new ImportedAssetDraft(rowNumber, text(code), text(name), text(category), specification,
                     serial, text(unit), value(originalValue), acquiredOn, location, employeeNo,
-                    positionCode, text(status)));
+                    positionCode, text(status),scope,departments,positions));
         }
         return List.copyOf(result);
     }
@@ -547,7 +668,8 @@ public class StoreResourceImportService {
             }
             result.add(new ImportedAsset(draft.rowNumber(), draft.assetCode(), draft.name(), draft.category(),
                     draft.specification(), draft.serialNumber(), draft.unit(), draft.originalValue(),
-                    draft.acquiredOn(), draft.location(), assignmentId, draft.status()));
+                    draft.acquiredOn(), draft.location(), assignmentId, draft.status(),draft.usageScope(),
+                    draft.usageDepartmentNames(),draft.usagePositionNames(),null));
         }
         return List.copyOf(result);
     }
@@ -555,6 +677,7 @@ public class StoreResourceImportService {
     private List<ImportError> databaseConflicts(
             TenantPrincipal principal, UUID hotelId, ImportPayload payload
     ) {
+        if(payload.scopeOnly()) return List.of(); // Scope parser resolves existing rows, apply locks and revalidates versions.
         List<ImportError> errors = new ArrayList<>();
         Map<String, ImportedItem> itemsByCode = new HashMap<>();
         for (ImportedItem item : payload.items()) itemsByCode.put(item.sku().toLowerCase(Locale.ROOT), item);
@@ -779,9 +902,9 @@ public class StoreResourceImportService {
         List<Map<String, Object>> jobs = jdbc.queryForList("""
                 select * from tabular_import_job
                 where tenant_id = :tenantId and target_org_unit_id = :hotelId
-                  and import_type = :importType and id = :jobId
+                  and import_type in (:importType,:scopeImportType) and id = :jobId
                 """ + (lock ? " for update" : ""), hotel(principal, hotelId)
-                .addValue("importType", IMPORT_TYPE).addValue("jobId", jobId));
+                .addValue("importType", IMPORT_TYPE).addValue("scopeImportType",SCOPE_IMPORT_TYPE).addValue("jobId", jobId));
         if (jobs.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "导入任务不存在");
         return jobs.getFirst();
     }
@@ -808,6 +931,7 @@ public class StoreResourceImportService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("id", job.get("id"));
         result.put("fileName", job.get("original_name"));
+        result.put("scopeOnly",payload.scopeOnly());
         result.put("status", job.get("status"));
         result.put("rowCount", job.get("row_count"));
         result.put("validRowCount", job.get("valid_row_count"));
@@ -906,6 +1030,7 @@ public class StoreResourceImportService {
     private String normalizeHeader(String value) {
         String normalized = (value == null ? "" : value).trim()
                 .replaceAll("[\\s*＊()（）:_：-]", "").toLowerCase(Locale.ROOT);
+        if(normalized.equals("使用部门")) return "适用部门";
         return normalized.equals("适用岗位选填") ? "适用岗位" : normalized;
     }
 
@@ -949,7 +1074,8 @@ public class StoreResourceImportService {
     public record ImportError(String sheetName, int rowNumber, String field, String message, String value) {
     }
 
-    public record ImportPayload(List<ImportedItem> items, List<ImportedAsset> assets) {
+    public record ImportPayload(List<ImportedItem> items, List<ImportedAsset> assets, boolean scopeOnly) {
+        public ImportPayload(List<ImportedItem> items,List<ImportedAsset> assets) { this(items,assets,false); }
     }
 
     public record ImportedItem(
@@ -957,21 +1083,23 @@ public class StoreResourceImportService {
             BigDecimal unitCost, BigDecimal minimumQuantity, BigDecimal openingQuantity,
             String specification, String purchaseUnit, BigDecimal purchaseFactor,
             String issueUnit, BigDecimal issueFactor, StoreResourceModels.UsageScopeInput usageScope,
-            String usageDepartmentNames, String usagePositionNames
+            String usageDepartmentNames, String usagePositionNames, Long expectedVersion
     ) {
     }
 
     private record ImportedAssetDraft(
             int rowNumber, String assetCode, String name, String category, String specification,
             String serialNumber, String unit, BigDecimal originalValue, LocalDate acquiredOn,
-            String location, String employeeNo, String positionCode, String status
+            String location, String employeeNo, String positionCode, String status,
+            StoreResourceModels.UsageScopeInput usageScope,String usageDepartmentNames,String usagePositionNames
     ) {
     }
 
     public record ImportedAsset(
             int rowNumber, String assetCode, String name, String category, String specification,
             String serialNumber, String unit, BigDecimal originalValue, LocalDate acquiredOn,
-            String location, UUID responsibleAssignmentId, String status
+            String location, UUID responsibleAssignmentId, String status,
+            StoreResourceModels.UsageScopeInput usageScope,String usageDepartmentNames,String usagePositionNames,Long expectedVersion
     ) {
     }
 }

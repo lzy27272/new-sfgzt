@@ -171,6 +171,14 @@ public class WeComOAuthService {
             UUID.fromString(reportId);
             return value;
         }
+        if ("/lost-properties".equals(uri.getPath())) {
+            var query = UriComponentsBuilder.fromUri(uri).build().getQueryParams();
+            if (!query.keySet().equals(Set.of("id")) || query.get("id").size() != 1) {
+                throw new IllegalArgumentException("遗留物入口必须包含一个 id");
+            }
+            UUID.fromString(query.getFirst("id"));
+            return value;
+        }
         if ("/procurement".equals(uri.getPath())) {
             var query = UriComponentsBuilder.fromUri(uri).build().getQueryParams();
             if (!query.keySet().equals(Set.of("orderId")) || query.get("orderId").size() != 1) {

@@ -401,6 +401,7 @@ export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyRep
     roomCounts: snapshot.roomCounts as DailyReportDetail['roomCounts'],
     plannedHygieneSupported: source.plannedHygieneSupported === true,
     plannedHygiene: snapshot.plannedHygiene as DailyReportDetail['plannedHygiene'],
+    housekeepingActivities: snapshot.housekeepingActivities as DailyReportDetail['housekeepingActivities'],
     currentRevision,
     revisions,
     autoSummary: Object.keys(autoSummary).length ? {
@@ -506,6 +507,7 @@ export async function saveDailyReportDraft(identity: ApiIdentity, report: DailyR
     inventoryQuantities: input.inventoryQuantities,
     roomCounts: input.roomCounts,
     plannedHygiene: input.plannedHygiene,
+    housekeepingActivities: input.housekeepingActivities,
     items: input.itemValues.map((item) => ({
       templateItemId: item.templateItemId,
       value: commandValue(item.value, itemTypes.get(item.templateItemId) || 'TEXT'),
