@@ -119,6 +119,10 @@ public class WeComOAuthService {
         return URI.create(base + "/?wecom_session=1" + hashRoute);
     }
 
+    URI frontendEntryLocation() {
+        return URI.create(properties.frontendBaseUrl().toString().replaceAll("/+$", "") + "/#/workbench");
+    }
+
     URI frontendExchangeLocation(String rawExchangeCode) {
         String exchangeCode = boundedSecret(rawExchangeCode, "WeCom exchange code");
         if (!exchangeCode.matches("[A-Za-z0-9._~-]{16,512}")) {

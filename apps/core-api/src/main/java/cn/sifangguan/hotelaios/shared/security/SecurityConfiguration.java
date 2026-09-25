@@ -40,7 +40,13 @@ public class SecurityConfiguration {
             "/api/v1/integrations/wecom/oauth/start",
             "/api/v1/integrations/wecom/oauth/callback",
             "/api/v1/integrations/wecom/oauth/exchange",
-            "/api/v1/integrations/wecom/oauth/browser-exchange"
+            "/api/v1/integrations/wecom/oauth/browser-exchange",
+            "/api/v1/integrations/wecom/directory-onboarding/start",
+            "/api/v1/integrations/wecom/directory-onboarding/self-service/start",
+            "/api/v1/integrations/wecom/directory-onboarding/oauth/callback",
+            "/api/v1/integrations/wecom/directory-onboarding/exchange",
+            "/api/v1/integrations/wecom/directory-onboarding/context",
+            "/api/v1/integrations/wecom/directory-onboarding/submit"
     );
 
     @Bean
@@ -79,6 +85,7 @@ public class SecurityConfiguration {
                         .requestMatchers(HttpMethod.POST,
                                 "/api/v1/integrations/wecom/directory/callback",
                                 "/api/v1/integrations/wecom/directory-onboarding/start",
+                                "/api/v1/integrations/wecom/directory-onboarding/self-service/start",
                                 "/api/v1/integrations/wecom/directory-onboarding/exchange",
                                 "/api/v1/integrations/wecom/directory-onboarding/context",
                                 "/api/v1/integrations/wecom/directory-onboarding/submit").permitAll()

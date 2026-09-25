@@ -90,6 +90,11 @@ public class WorkDataController {
         return service.review(recordId, request);
     }
 
+    @GetMapping("/records/{recordId}/review-eligibility")
+    public Map<String, Object> reviewEligibility(@PathVariable UUID recordId) {
+        return service.reviewEligibility(recordId);
+    }
+
     @PostMapping("/records/{recordId}/supplements")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> addSupplement(

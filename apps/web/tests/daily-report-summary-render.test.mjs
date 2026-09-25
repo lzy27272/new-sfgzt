@@ -14,6 +14,21 @@ before(async () => {
 })
 after(async () => { await vite?.close() })
 
+test('日报审核按钮必须经过服务端范围校验，不能仅凭前端角色显示', () => {
+  const submitted = { id: 'review-report', reportStatus: 'SUBMITTED', reviewStatus: 'PENDING',
+    positionAssignmentId: 'employee', currentRevisionId: 'review-revision',
+    revisions: [{ id: 'review-revision', revisionStatus: 'SUBMITTED', submittedByAccountId: 'employee-account', payloadSnapshot: {} }],
+    allowedActions: ['REVIEW_APPROVE', 'REVIEW_REJECT'] }
+  const identity = { businessActorAssignmentId: 'manager', actorId: 'manager-account' }
+  for (const eligibility of [undefined, { canReview: false, reason: '不属于负责门店' }]) {
+    const report = normalizeDetail({ ...submitted, reviewEligibility: eligibility }, identity)
+    assert.deepEqual(report.allowedActions, [])
+    assert.ok(report.blockedActionReasons.REVIEW)
+  }
+  assert.deepEqual(normalizeDetail({ ...submitted, reviewEligibility: { canReview: true, reason: '' } }, identity).allowedActions,
+    ['REVIEW_APPROVE', 'REVIEW_REJECT'])
+})
+
 const raw = (summary, status = 'DRAFT') => ({ id: 'report', reportStatus: status, positionAssignmentId: 'own', currentRevisionId: 'rev',
   revisions: [{ id: 'rev', revisionStatus: status, payloadSnapshot: { dailySummary: summary,
     resolvedTemplate: { sections: [{ id: 'section', title: '客房日报', items: [

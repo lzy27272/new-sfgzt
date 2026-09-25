@@ -333,6 +333,7 @@ export type WorkRecordSupplement = {
 export type TeamWorkCase = {
   expectation: WorkExpectation
   record?: WorkRecordDetail
+  reviewEligibility?: { canReview: boolean; reason: string }
 }
 
 export type ManagementRule = {

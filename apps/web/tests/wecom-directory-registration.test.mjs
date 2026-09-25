@@ -82,7 +82,7 @@ test('one reusable invitation entry performs independent reviewed mobile registr
   assert.doesNotMatch(bindingAdministration, /已有中台账号绑定|无中台账号注册/)
   assert.doesNotMatch(bindingAdministration, /createEmployeeInvitation|employeeInviteForm/)
   assert.match(api, /directory-onboarding\/invitations/)
-  assert.match(entry, /context\.invitationSource === 'MANUAL_LINK'/)
+  assert.match(entry, /context\.requiresAccountRegistration \? '新员工注册'/)
 })
 
 test('mobile registration is validated and protected by database uniqueness', () => {

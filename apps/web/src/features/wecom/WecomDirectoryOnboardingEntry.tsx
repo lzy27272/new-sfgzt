@@ -9,10 +9,13 @@ import {
   type DirectoryOnboardingContext,
 } from './directoryOnboardingApi'
 import { validateDirectoryOnboardingRegistration } from './directoryOnboardingRegistration'
+import { SelfRegistrationButton } from './SelfRegistrationButton'
 
 type Selection = { orgUnitId: string; positionId: string }
 
 const oauthErrors = {
+  ACCOUNT_READY: { title: '已有中台账号', message: '该企业微信身份已关联中台账号，无需重复注册。请返回使用账号密码登录。' },
+  MEMBER_UNAVAILABLE: { title: '身份暂不可用', message: '该成员存在停用或解绑记录，不能自行重新注册。请联系人事核对后恢复。' },
   OAUTH_SESSION_INVALID: {
     title: '验证会话已失效',
     message: '本次入职邀请已过期或验证会话无效。请从企业微信重新打开仍在有效期内的邀请。',
@@ -113,6 +116,7 @@ export function WecomDirectoryOnboardingEntry({ entry, onReturn }: { entry: Weco
     <section className="wecom-onboarding-card" aria-live="polite">
       <div className="inline-error"><strong>{oauthError.title}</strong><p>{oauthError.message}</p></div>
       <button className="secondary" onClick={onReturn}>返回中台登录</button>
+      {entry.errorCode !== 'MEMBER_UNAVAILABLE' && entry.errorCode !== 'ACCOUNT_READY' ? <SelfRegistrationButton label="重新验证 / 查询申请进度" /> : null}
       <small className="onboarding-privacy">系统未创建人员绑定，也不会开启企业微信群推送；地址栏中的验证结果已清除。</small>
     </section>
   </main>
@@ -124,8 +128,9 @@ export function WecomDirectoryOnboardingEntry({ entry, onReturn }: { entry: Weco
     <section className="wecom-onboarding-card submitted" aria-live="polite">
       <div className="onboarding-success" aria-hidden="true">{conflict ? '!' : '✓'}</div><h1>申请已提交</h1><h2>{conflict ? '身份关联异常，等待管理员核对' : '等待管理员确认'}</h2>
       <p>{conflict ? '系统发现该企业微信身份已有受控关联记录，人事审核前不会启用；您无需重复提交。' : '行政人事审核通过后，注册账号、任职权限与企业微信绑定会同时启用。'}</p>
-      <dl><div><dt>申请组织</dt><dd>{organization?.name ?? '—'}</dd></div><div><dt>岗位</dt><dd>{selection.positionId ? positionOptions.find((item) => item.positionId === selection.positionId)?.label ?? '—' : '岗位待分配'}</dd></div><div><dt>状态</dt><dd>{conflict ? '异常待核对' : '待审核'}</dd></div></dl>
-      <button className="primary" onClick={onReturn}>返回企业微信</button>
+      <dl><div><dt>申请组织</dt><dd>{submittedStatus ? organization?.name ?? '—' : context?.requestedOrganizationName ?? '—'}</dd></div><div><dt>岗位</dt><dd>{submittedStatus ? (selection.positionId ? positionOptions.find((item) => item.positionId === selection.positionId)?.label ?? '—' : '岗位待分配') : context?.requestedPositionName ?? '岗位待分配'}</dd></div><div><dt>状态</dt><dd>{conflict ? '异常待核对' : '待审核'}</dd></div></dl>
+      <SelfRegistrationButton label="重新验证并查询审核进度" />
+      <button className="primary" onClick={onReturn}>返回账号密码登录</button>
     </section>
   </main>
   }
@@ -136,7 +141,7 @@ export function WecomDirectoryOnboardingEntry({ entry, onReturn }: { entry: Weco
       <h1>{context ? '完成入职绑定' : '企业微信入职验证'}</h1>
       <p>{context ? (context.requiresAccountRegistration ? '企业微信身份已验证，请填写手机号、注册账号并补充任职信息。' : '企业微信身份已验证，请补充任职信息。') : '系统只会核验您本人的企业微信身份，不公开其他员工信息。'}</p>
       {context && <>
-        <div className="onboarding-person"><i aria-hidden="true">人</i><span><strong>{context.invitationSource === 'MANUAL_LINK' ? '新员工注册' : context.displayName}</strong><small>企业微信成员</small></span><b>● 身份已验证</b></div>
+        <div className="onboarding-person"><i aria-hidden="true">人</i><span><strong>{context.requiresAccountRegistration ? '新员工注册' : context.displayName}</strong><small>企业微信成员</small></span><b>● 身份已验证</b></div>
         {context.requiresAccountRegistration && <div className="onboarding-registration-fields">
           <label>个人姓名<input value={displayName} maxLength={120} autoComplete="name" aria-invalid={Boolean(registrationValidation.errors.displayName && (validationAttempted || displayName))} onChange={(event) => setDisplayName(event.target.value)} placeholder="请输入真实姓名" />{validationAttempted && registrationValidation.errors.displayName && <small className="field-error">{registrationValidation.errors.displayName}</small>}</label>
           <label>手机号<input type="tel" value={mobile} maxLength={20} inputMode="numeric" autoComplete="tel" aria-invalid={Boolean(registrationValidation.errors.mobile && (validationAttempted || mobile))} onChange={(event) => setMobile(event.target.value)} placeholder="请输入本人11位手机号" />{(validationAttempted || Boolean(mobile)) && registrationValidation.errors.mobile && <small className="field-error">{registrationValidation.errors.mobile}</small>}</label>

@@ -4,7 +4,7 @@ const CODE_PATTERN = /^[A-Za-z0-9._~-]{16,512}$/
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const DAILY_REPORT_PATH_PATTERN = /^\/daily-reports\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i
 const LOGIN_ERRORS: Record<string, string> = {
-  MEMBER_UNBOUND: '当前企业微信成员尚未绑定有效中台账号。已有中台账号的员工请联系管理员发起该账号的企微绑定；无需重复注册账号。',
+  MEMBER_UNBOUND: '当前企业微信成员尚未绑定有效中台账号。新员工可申请注册；已有中台账号可返回使用账号密码登录，无需重复注册账号，企微绑定可联系管理员处理。',
   ACCOUNT_UNAVAILABLE: '中台账号或任职当前不可用，请联系管理员检查账号启用状态、任职及岗位配置。',
   ASSIGNMENT_INACTIVE: '企微绑定的默认任职已失效，请联系管理员重新确认有效任职后再登录。',
   SESSION_INVALID: '本次企微身份验证已失效，请点击“重新通过企业微信验证”重新进入。',

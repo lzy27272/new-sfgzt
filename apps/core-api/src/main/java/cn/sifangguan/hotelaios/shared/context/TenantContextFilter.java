@@ -92,6 +92,7 @@ public class TenantContextFilter extends OncePerRequestFilter {
                 || path.equals("/api/v1/integrations/wecom/binding-enrollment/preview")
                 || path.equals("/api/v1/integrations/wecom/binding-enrollment/start")
                 || path.equals("/api/v1/integrations/wecom/directory-onboarding/start")
+                || path.equals("/api/v1/integrations/wecom/directory-onboarding/self-service/start")
                 || path.equals("/api/v1/integrations/wecom/directory-onboarding/exchange")
                 || path.equals("/api/v1/integrations/wecom/directory-onboarding/context")
                 || path.equals("/api/v1/integrations/wecom/directory-onboarding/submit");

@@ -309,6 +309,8 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
   const reviewingHistoricalRevision = Boolean(correctionRevisionId && correctionRevisionId !== report.currentRevision.id)
   const reviewPermission = report.currentRevision.revisionType === 'CORRECTION' ? permissions.dailyReport.reviewCorrection : permissions.dailyReport.reviewException
   const canReviewCurrentRevision = !reviewingHistoricalRevision && Boolean(identity.businessActorAssignmentId) && hasPermission(grantedPermissions, reviewPermission)
+  const reviewBlockedNotice = !reviewingHistoricalRevision && report.currentRevision.status === 'SUBMITTED' && report.blockedActionReasons.REVIEW
+    ? <div className={styles.locked} role="status">审核提示：{report.blockedActionReasons.REVIEW}</div> : null
   const run = async (action: 'save' | 'submit' | 'correction' | 'approve' | 'reject') => {
     if ((action === 'save' || action === 'submit') && housekeeping) {
       if (pendingPhotoEntries.size) { setMessage('仍有照片等待上传，请完成上传或移除后再保存、提交。'); return }
@@ -360,12 +362,13 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
     missingRequiredCount={currentMissingRequiredCount} setValue={(key,value) => setValues(current => ({ ...current, [key]: value }))}
     onRefreshCatalogue={() => void refreshCatalogue()} onLegacyDraft={() => go('my-work', { expectationId: report.inventoryContext!.expectationId, entry: 'legacy' })}
     onSave={() => void run('save')} onSubmit={() => void run('submit')}>
+    {reviewBlockedNotice}
     {!editable && report.allowedActions.includes('REQUEST_CORRECTION') && <section className={styles.section}><label className={styles.formGrid}>修订原因<textarea rows={2} value={reason} onChange={event => setReason(event.target.value)} /></label><button className="secondary" disabled={command.busy || !reason.trim()} onClick={() => void run('correction')}>发起修订</button></section>}
     {report.revisions.filter(revision => revision.id !== report.currentRevision.id).map(revision => <button key={revision.id} className="link-button" onClick={() => go('daily-report-correction', { reportId: report.id, revisionId: revision.id })}>查看修订 {revision.revisionNo}</button>)}
     {reviewingHistoricalRevision && <p>历史修订只读；后端仅允许审核当前修订。</p>}
     {canReviewCurrentRevision && (report.allowedActions.includes('REVIEW_APPROVE') || report.allowedActions.includes('REVIEW_REJECT')) && <section className={styles.section}><h2>主管审核</h2><label className={styles.formGrid}>审核意见<textarea rows={3} value={reason} onChange={event => setReason(event.target.value)} /></label><div className={styles.actions}>{report.allowedActions.includes('REVIEW_APPROVE') && <button className="primary" disabled={command.busy || !reason.trim()} onClick={() => void run('approve')}>确认通过</button>}{report.allowedActions.includes('REVIEW_REJECT') && <button className="danger-button" disabled={command.busy || !reason.trim()} onClick={() => void run('reject')}>退回补充</button>}</div></section>}
   </HousekeepingReportForm>
-  return <div className={`${styles.split} ${editorStyles.editor}`}><main className={styles.stack}><DailyReportAutoSummary report={report} section="work" />
+  return <div className={`${styles.split} ${editorStyles.editor}`}><main className={styles.stack}>{reviewBlockedNotice}<DailyReportAutoSummary report={report} section="work" />
     {(editable ? report.plannedHygieneSupported : report.plannedHygiene != null) && <PlannedHygieneFields
       value={editable ? input.plannedHygiene : report.plannedHygiene} disabled={command.busy}
       onChange={editable ? value => setValues(current => ({ ...current,

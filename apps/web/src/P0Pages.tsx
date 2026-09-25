@@ -303,7 +303,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   const fallback: TeamWorkCase = useMemo(() => ({ expectation: initial }), [initial])
   const [selectedRecordId, setSelectedRecordId] = useState<string | undefined>(requestedRecordId)
   const resource = useResource(`${identity.key}:team-case:${initial.id}:${selectedRecordId ?? 'default'}`, () => loadTeamWorkCase(identity, initial, selectedRecordId), fallback)
-  const { expectation, record } = resource.data
+  const { expectation, record, reviewEligibility } = resource.data
   const [reviewReason, setReviewReason] = useState('')
   const [taskTitle, setTaskTitle] = useState(`整改：${initial.title}`)
   const [taskDescription, setTaskDescription] = useState('请根据工作标准完成整改，补充结果说明和现场证据。')
@@ -383,7 +383,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   }
 
   const review = (outcome: 'APPROVED' | 'REJECTED') => {
-    if (!record) return
+    if (!record || !reviewEligibility?.canReview) return
     void mutation(`review-${outcome}`, () => reviewWorkRecord(identity, record.id, outcome, reviewReason, record.rowVersion), outcome === 'APPROVED'
       ? { tone: 'ok', text: '工作记录已复核通过。下一步可按工作标准创建评价。', next: { kind: 'section', targetId: 'standard-evaluation-action', label: '继续创建标准评价' } }
       : { tone: 'ok', text: '工作记录已退回补充，员工可在“我的工作”中补齐说明和证据。' })
@@ -478,7 +478,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
             {!!documentAttachments.length && <><h4 className="evidence-document-title">文档附件</h4><AttachmentList items={documentAttachments} disabled={!!busy || isDemo} loadingId={busy?.startsWith('preview-') ? busy.slice('preview-'.length) : undefined} onPreview={preview} /></>}
           </section>
 
-          {allows('work-record.review') && <section className="action-box" id="work-review-action"><h3>工作记录复核</h3><p className="muted">复核只判断记录是否完整，不替代标准评价和任务验收。</p>{record.status === 'SUBMITTED' ? <><label>复核意见<textarea rows={2} value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} placeholder="退回时必须填写原因" /></label><div><button className="primary" disabled={!!busy || isDemo} onClick={() => review('APPROVED')}>{busy === 'review-APPROVED' ? '处理中…' : '复核通过'}</button><button className="danger-button" disabled={!!busy || !reviewReason.trim() || isDemo} onClick={() => review('REJECTED')}>{busy === 'review-REJECTED' ? '处理中…' : '退回补充'}</button></div></> : <div className="inline-success">该记录已完成复核，无需重复操作。</div>}</section>}
+          {allows('work-record.review') && <section className="action-box" id="work-review-action"><h3>工作记录复核</h3><p className="muted">复核只判断记录是否完整，不替代标准评价和任务验收。</p>{record.status === 'SUBMITTED' ? <>{!reviewEligibility?.canReview ? <div className="inline-error">{reviewEligibility?.reason || '正在确认审核权限'}</div> : null}<label>复核意见<textarea rows={2} value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} placeholder="退回时必须填写原因" /></label><div><button className="primary" disabled={!!busy || isDemo || !reviewEligibility?.canReview} onClick={() => review('APPROVED')}>{busy === 'review-APPROVED' ? '处理中…' : '复核通过'}</button><button className="danger-button" disabled={!!busy || !reviewReason.trim() || isDemo || !reviewEligibility?.canReview} onClick={() => review('REJECTED')}>{busy === 'review-REJECTED' ? '处理中…' : '退回补充'}</button></div></> : <div className="inline-success">当前记录无需复核。</div>}</section>}
 
           {allows('evaluation.manual-review') && <section className="action-box" id="standard-evaluation-action"><h3>创建标准评价</h3><label>评价依据<select value={selectedStandard} onChange={(event) => setSelectedStandard(event.target.value)}><option value="">请选择已发布标准</option>{standards.map((standard) => <option value={standard.standardVersionId} key={standard.standardVersionId}>{standard.title}（第{standard.versionNo}版）</option>)}</select></label>{!standards.length && <div className="inline-warning">工作包条目尚未返回绑定标准，不能由页面猜测评价依据。</div>}<div><button className="primary" disabled={!!busy || !selectedStandard || isDemo} onClick={evaluate}>{busy === 'evaluation' ? '创建中…' : '按标准创建评价'}</button></div></section>}
 
