@@ -85,7 +85,8 @@ public final class StoreResourceModels {
             LocalDate acquiredOn,
             @Size(max = 160) String location,
             UUID responsibleAssignmentId,
-            String status
+            String status,
+            @Valid UsageScopeInput usageScope
     ) {
     }
 
@@ -101,7 +102,8 @@ public final class StoreResourceModels {
             @Size(max = 160) String location,
             UUID responsibleAssignmentId,
             @NotBlank String status,
-            long expectedVersion
+            long expectedVersion,
+            @Valid UsageScopeInput usageScope
     ) {
     }
 

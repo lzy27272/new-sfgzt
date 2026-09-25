@@ -76,9 +76,10 @@ export async function loadStoreResourceImportHistory(identity: RoleContext, hote
   return parseStoreResourceImportHistory(await featureApiRequest<unknown>(`${hotelPath(hotelId)}/imports`, identity, { signal }))
 }
 
-export async function previewStoreResourceImport(identity: RoleContext, hotelId: string, file: File) {
+export async function previewStoreResourceImport(identity: RoleContext, hotelId: string, file: File, scopeOnly = false) {
   const form = new FormData()
   form.append('file', file)
+  form.append('scopeOnly', String(scopeOnly))
   return parseStoreResourceImportJob(await featureApiRequest<unknown>(`${hotelPath(hotelId)}/imports/preview`, identity, {
     method: 'POST', body: form,
   }))
@@ -103,8 +104,8 @@ async function downloadStoreResourceImportFile(identity: RoleContext, path: stri
   window.setTimeout(() => URL.revokeObjectURL(link.href), 0)
 }
 
-export async function downloadStoreResourceImportTemplate(identity: RoleContext, hotelId: string) {
-  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template`, '新店库存与固定资产导入模板_V3.xlsx')
+export async function downloadStoreResourceImportTemplate(identity: RoleContext, hotelId: string, scopeOnly = false) {
+  return downloadStoreResourceImportFile(identity, `${hotelPath(hotelId)}/imports/template?scopeOnly=${scopeOnly}`, scopeOnly ? '库存资产使用范围更新模板_V5.xlsx' : '库存与固定资产导入模板_V5.xlsx')
 }
 
 export async function downloadStoreResourceImportErrors(identity: RoleContext, hotelId: string, jobId: string) {

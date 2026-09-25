@@ -1,6 +1,6 @@
-import type { ItemUsageScope, UsageScopeOptions, UsageScopeOption } from './usageScope.ts'
+import type { ItemUsageScope, UsageScopeOptions, UsageScopeOption, PrefixConfig } from './usageScope.ts'
 
-export type StoreResourceTab = 'items' | 'inventory' | 'usage' | 'laundry' | 'costs' | 'assets' | 'handovers'
+export type StoreResourceTab = 'items' | 'inventory' | 'usage' | 'laundry' | 'costs' | 'assets' | 'handovers' | 'department-prefix'
 
 export function parseUsageScopeOptions(value: unknown): UsageScopeOptions {
   if (!value || typeof value !== 'object') throw new Error('物品使用范围选项格式异常')
@@ -12,7 +12,11 @@ export function parseUsageScopeOptions(value: unknown): UsageScopeOptions {
       return { id: entry.id, code: entry.code, name: entry.name }
     })
   }
-  return { departments: options(row.departments), positions: options(row.positions) }
+  const prefixConfig = row.prefixConfig as PrefixConfig | undefined
+  if (prefixConfig && (!Number.isSafeInteger(prefixConfig.rowVersion) || !Array.isArray(prefixConfig.rules)
+    || prefixConfig.rules.some(rule => !['QT', 'KF', 'WX'].includes(rule.prefix) || typeof rule.defaultName !== 'string'
+      || (rule.departmentId != null && typeof rule.departmentId !== 'string')))) throw new Error('物品编号规则格式异常')
+  return { departments: options(row.departments), positions: options(row.positions), ...(prefixConfig ? { prefixConfig } : {}) }
 }
 
 export function parseItemUsageScope(value: unknown): ItemUsageScope {
@@ -91,6 +95,7 @@ export type InventoryMovement = {
 }
 
 export type FixedAsset = {
+  usageScope?: ItemUsageScope
   id: string
   hotelOrgUnitId: string
   assetCode: string
@@ -195,6 +200,7 @@ export type FixedAssetInput = {
   location?: string
   responsibleAssignmentId?: string
   status: string
+  usageScope?: ItemUsageScope
 }
 
 export type StoreResourceHandoverInput = {
@@ -232,6 +238,8 @@ export type StoreResourceImportPreviewItem = {
 }
 
 export type StoreResourceImportPreviewAsset = {
+  usageDepartmentNames?: string
+  usagePositionNames?: string
   rowNumber: number
   assetCode: string
   name: string
@@ -244,6 +252,7 @@ export type StoreResourceImportPreviewAsset = {
 }
 
 export type StoreResourceImportJob = {
+  scopeOnly?: boolean
   id: string
   fileName: string
   status: 'INVALID' | 'READY' | 'APPLIED' | 'CANCELLED'
@@ -387,6 +396,7 @@ export function parseInventoryMovements(value: unknown): InventoryMovement[] {
 export function parseFixedAsset(value: unknown): FixedAsset {
   const row = object(value, 'asset')
   return {
+    ...(row.usageScope ? { usageScope: parseItemUsageScope(row.usageScope) } : {}),
     id: text(row, 'id'), hotelOrgUnitId: text(row, 'hotelOrgUnitId', text(row, 'hotelId', '')), assetCode: text(row, 'assetCode'), name: text(row, 'name'),
     category: text(row, 'category'), specification: optionalText(row, 'specification'), serialNumber: optionalText(row, 'serialNumber'),
     unit: text(row, 'unit', '台'), location: optionalText(row, 'location'), responsibleAssignmentId: optionalText(row, 'responsibleAssignmentId'),
@@ -466,14 +476,14 @@ export function parseStoreResourceImportJob(value: unknown): StoreResourceImport
   const preview = object(row.preview ?? {}, 'import-preview')
   // Invalid rows deliberately contain blank required cells; keep their row errors visible.
   // Successful previews still require the complete server response contract.
-  const previewText = (entry: JsonObject, key: string) => text(entry, key, status === 'INVALID' ? '未填写' : undefined)
+  const previewText = (entry: JsonObject, key: string) => text(entry, key, row.scopeOnly === true ? '—' : status === 'INVALID' ? '未填写' : undefined)
   const parseItem = (entry: unknown): StoreResourceImportPreviewItem => {
     const item = object(entry, 'import-item')
     return {
       ...(item.usageScope ? { usageScope: parseItemUsageScope(item.usageScope) } : {}),
       usageDepartmentNames: text(item, 'usageDepartmentNames', ''), usagePositionNames: text(item, 'usagePositionNames', ''),
       rowNumber: numberValue(item, 'rowNumber'), sku: previewText(item, 'sku'), name: previewText(item, 'name'),
-      category: category(text(item, 'category', 'OPERATING_ITEM')), unit: previewText(item, 'unit'),
+      category: category(row.scopeOnly === true ? 'OPERATING_ITEM' : text(item, 'category', 'OPERATING_ITEM')), unit: previewText(item, 'unit'),
       unitCost: numberValue(item, 'unitCost'), minimumQuantity: numberValue(item, 'minimumQuantity'),
       openingQuantity: numberValue(item, 'openingQuantity'),
       specification: text(item, 'specification', ''), purchaseUnit: text(item, 'purchaseUnit', previewText(item, 'unit')),
@@ -484,6 +494,7 @@ export function parseStoreResourceImportJob(value: unknown): StoreResourceImport
   const parseAsset = (entry: unknown): StoreResourceImportPreviewAsset => {
     const asset = object(entry, 'import-asset')
     return {
+      usageDepartmentNames: text(asset, 'usageDepartmentNames', ''), usagePositionNames: text(asset, 'usagePositionNames', ''),
       rowNumber: numberValue(asset, 'rowNumber'), assetCode: previewText(asset, 'assetCode'), name: previewText(asset, 'name'),
       category: previewText(asset, 'category'), unit: previewText(asset, 'unit'), originalValue: numberValue(asset, 'originalValue'),
       acquiredOn: optionalText(asset, 'acquiredOn'), location: optionalText(asset, 'location'), status: text(asset, 'status', 'ACTIVE'),
@@ -497,7 +508,7 @@ export function parseStoreResourceImportJob(value: unknown): StoreResourceImport
     }
   }) : []
   return {
-    id: text(row, 'id'), fileName: text(row, 'fileName'), status: status as StoreResourceImportJob['status'],
+    id: text(row, 'id'), fileName: text(row, 'fileName'), status: status as StoreResourceImportJob['status'], scopeOnly: row.scopeOnly === true,
     rowCount: numberValue(row, 'rowCount'), validRowCount: numberValue(row, 'validRowCount'), errorCount: numberValue(row, 'errorCount'),
     canApply: booleanValue(row, 'canApply'), duplicateUpload: booleanValue(row, 'duplicateUpload'),
     summary: {

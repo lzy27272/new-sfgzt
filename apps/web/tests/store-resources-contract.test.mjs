@@ -118,6 +118,13 @@ test('hotel deep links are authoritative across same-page navigation and reject 
   assert.doesNotMatch(page, /setSelectedHotelId/)
 })
 
+test('scope-only imports must not announce a new opening stock or cost posting', () => {
+  const page = read('../src/features/storeResources/StoreResourceRoutes.tsx')
+  assert.match(page, /onApplied\(result.scopeOnly === true\)/)
+  assert.match(page, /onApplied=\{\(scopeOnly\) => success\(scopeOnly \? '物品与资产使用范围已更新，未新增库存或成本流水。'/)
+  assert.match(page, /onError\(result.scopeOnly \? '使用范围已更新，但页面数据刷新失败/)
+})
+
 test('import responses are discarded after changing a file or departing the scope', () => {
   const guard = createImportRequestGuard()
   const original = guard.start()

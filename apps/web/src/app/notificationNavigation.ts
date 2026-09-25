@@ -25,6 +25,9 @@ export function resolveNotificationNavigation(
     return has('academy.learn') ? {view:'academy',params:{tab:'mine',id:sourceId},actionLabel:'查看成长计划'} : undefined
   }
   const canGovernWecom = has('wecom-binding.read', 'wecom-binding.manage', 'wecom-binding.approve')
+  if (sourceType === 'LOST_PROPERTY' && sourceId && has('lost-property.receive', 'lost-property.read', 'lost-property.release')) {
+    return { view: 'lost-properties', params: { id: sourceId }, actionLabel: '审核遗留物' }
+  }
   const canGovernPositions = has('position-profile.read', 'position-profile.manage')
   const personalBindingResult = ['WECOM_BINDING_ACTIVE', 'WECOM_BINDING_REJECTED', 'WECOM_BINDING_SUSPENDED', 'WECOM_BINDING_RESUMED', 'WECOM_BINDING_REVOKED'].includes(type)
 

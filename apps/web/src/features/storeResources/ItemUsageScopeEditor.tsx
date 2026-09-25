@@ -12,7 +12,7 @@ export function ItemUsageScopeEditor({ value, onChange, options, loading, error,
   return <section className={styles.usageScopeLayout} aria-label="物品使用范围">
     <div className={styles.usageScopeFields}>
       <h3>物品使用范围</h3>
-      <p>员工领用及日报使用清单按当前任职的部门、岗位共同筛选。全店通用物品仍受选填的岗位限制；不会自动授予领用或审批权限。</p>
+      <p>部门、岗位决定员工默认“我的范围”。员工可主动切换跨部门领用或全店物资；日报额外纳入本人当日已提交领用的物品。仍需原有领用、填报与审核权限，不跨门店。</p>
       {value.mode === 'LEGACY' && <p role="status">尚未配置使用范围，员工暂不能选择本物品。请补齐部门范围；历史库存、已提交记录不会改动。</p>}
       <fieldset disabled={loading || Boolean(error)}><legend>适用部门 *</legend>
         <div className={styles.scopeModes}>
@@ -31,7 +31,7 @@ export function ItemUsageScopeEditor({ value, onChange, options, loading, error,
     </div>
     <aside className={styles.usageScopeSummary} aria-label="当前使用范围">
       <span>当前使用范围</span><h3>{itemName.trim() || '待填写物品名称'}</h3>
-      <dl><dt>适用部门</dt><dd>{summary.departments}</dd><dt>适用岗位</dt><dd>{summary.positions}</dd><dt>员工领用及填报</dt><dd>{!employeeUsageEnabled ? '未开启' : value.mode === 'LEGACY' ? '待补齐使用范围' : '符合任职范围时允许（仍需原有权限）'}</dd></dl>
+      <dl><dt>适用部门</dt><dd>{summary.departments}</dd><dt>适用岗位</dt><dd>{summary.positions}</dd><dt>员工领用及填报</dt><dd>{!employeeUsageEnabled ? '未开启' : value.mode === 'LEGACY' ? '待补齐使用范围' : '默认按任职筛选，可在本店跨部门领用'}</dd></dl>
       <p>一份物品，一本库存账。配置范围不会拆分库存，不会改动历史数量、成本或常用品清单。</p>
     </aside>
   </section>

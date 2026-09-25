@@ -345,11 +345,17 @@ public class DailyReportDispatchTransactionService {
             notifyManagerOfPendingReviews(principal, reportId, policy, day.businessDate());
         }
 
+        boolean housekeeping = Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from daily_report d join work_package_item i
+                  on i.tenant_id=d.tenant_id and i.work_package_version_id=d.work_package_version_id
+                  where d.tenant_id=:tenantId and d.id=:reportId and i.item_code='HKA_DAILY_REPORT')
+                """, base(principal).addValue("reportId", reportId), Boolean.class));
         notificationService.createForAssignment(
                 policy.positionAssignmentId(),
                 "DAILY_REPORT_READY",
-                "今日日报待填报",
-                "请按当前岗位工作包完成 " + day.businessDate() + " 营业日日报。",
+                housekeeping ? "今日日报与遗留物待填报" : "今日日报待填报",
+                "请按当前岗位工作包完成 " + day.businessDate() + " 营业日日报。"
+                        + (housekeeping ? "服务案例和遗留物一并填写；无遗留物也请确认。提交后通知指定接收人审核。" : ""),
                 "DAILY_REPORT",
                 reportId,
                 "daily-report:ready:" + reportId);

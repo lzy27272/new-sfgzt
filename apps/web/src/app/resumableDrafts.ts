@@ -123,7 +123,7 @@ function writeFallback<T>(envelope: DraftEnvelope<T>): void {
   }
 }
 
-export function buildResumableDraftKey(kind: 'work-record-form' | 'work-record-files' | 'task-form' | 'task-files' | 'daily-report-form', parts: Array<string | undefined>) {
+export function buildResumableDraftKey(kind: 'work-record-form' | 'work-record-files' | 'task-form' | 'task-files' | 'daily-report-form' | 'daily-activity-photos' | 'lost-property-action', parts: Array<string | undefined>) {
   return [kind, ...parts.map((part) => encodeURIComponent(part || 'none'))].join(':')
 }
 

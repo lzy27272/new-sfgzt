@@ -215,6 +215,7 @@ public class WorkExpectationSlaService {
                 where x.tenant_id = :tenantId
                   and x.status in ('PLANNED', 'AVAILABLE', 'IN_PROGRESS', 'MISSED')
                   and i.reminder_policy <> '{}'::jsonb
+                  and i.item_code not in ('HKA_GUEST_SERVICE_EVENT','HKA_LOST_PROPERTY')
                   and i.required
                   and coalesce(i.execution_policy ->> 'registrationMode', '') <> 'WHEN_OCCURRED'
                   and coalesce(i.execution_policy ->> 'repeatableDailyRecords', 'false') <> 'true'

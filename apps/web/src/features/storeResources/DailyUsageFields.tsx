@@ -25,6 +25,11 @@ export function DailyUsageFields({ catalogue, value, disabled, onChange, onRefre
     {(!catalogue.enabled || !catalogue.reviewerAvailable) && <p role="alert" className={styles.warning}>门店尚未配置有效耗用审核人，请联系管理员配置后提交；可以先保存草稿。</p>}
     {changed && <p role="alert" className={styles.warning}>物品配置已变化，已填数量仍保留。请核对标记物品的单位、数量后确认。<button type="button" className="link-button" onClick={onRefresh}>刷新清单</button></p>}
     <UsageScopeNotice catalogue={catalogue} />
+    {catalogue.items.some(item => item.issuedToday) && <section className={styles.group} aria-label="当日已领物品"><h3>当日已领物品</h3><p>来自本任职、本营业日已提交的领用记录，包括跨部门物品。只补充清单，实际用量请自行填写，不复制领用数量。</p>{catalogue.items.filter(item => item.issuedToday).map(item => <button type="button" key={item.id} className="secondary" disabled={!input.lines.some(line => line.itemId === item.id) && input.lines.length >= 100} onClick={() => {
+      setScope('ALL')
+      if (!input.lines.some(line => line.itemId === item.id)) update({ lines: [...input.lines, emptyUsageLine(item)], remainingUnusedConfirmed: false })
+      navigation.locate(item.id)
+    }}>{item.name} · {input.lines.some(line => line.itemId === item.id) ? '填写用量' : '添加并填写'}</button>)}</section>}
     {!catalogue.quickList?.configured && <small>目前显示当前任职适用清单（最多100项）；管理员可在“日清耗用审核”配置岗位常用品。</small>}
     <UsageItemNavigator items={catalogue.items} selectedIds={input.lines.map(line => line.itemId)} scope={scope} onScopeChange={setScope} onLocate={item => {
       if (!input.lines.some(line => line.itemId === item.id)) update({ lines: [...input.lines, emptyUsageLine(item)], remainingUnusedConfirmed: false })
@@ -35,7 +40,7 @@ export function DailyUsageFields({ catalogue, value, disabled, onChange, onRefre
       if (!group.length) return null
       return <section key={category} className={styles.group} aria-label={label}><h3>{label}</h3><div className={styles.columns} aria-hidden="true"><span>物品 / 规格</span><span>单位</span><span>今日用量</span></div>
         {group.map(({ line, item }) => <div className={styles.row} key={line.itemId}>
-          <div><strong>{item?.name ?? '已停用或不可用物品'}</strong><small>{item?.specification || '按实际使用登记'}</small>
+          <div><strong>{item?.name ?? '已停用或不可用物品'}</strong><small>{item?.specification || '按实际使用登记'}{item?.issuedToday && ' · 当日已领用'}</small>
             {!input.commonItemIds.includes(line.itemId) && <button type="button" className="link-button" aria-label={`移除${item?.name ?? '不可用物品'}`} onClick={() => update({ lines: input.lines.filter(row => row.itemId !== line.itemId), remainingUnusedConfirmed: false })}>移除</button>}
           </div><span>{line.unit}</span><input ref={navigation.inputRef(line.itemId)} aria-label={`${item?.name ?? '不可用物品'}${item?.specification ? ` ${item.specification}` : ''}今日用量`} type="text" inputMode="decimal" autoComplete="off" placeholder="未填" value={line.quantity} onChange={event => update({ lines: input.lines.map(row => row.itemId === line.itemId ? { ...row, quantity: event.target.value } : row) })} />
           {item && line.expectedItemVersion !== item.rowVersion && <div className={styles.stale}>原单位：{line.unit}；当前单位：{item.issueUnit}。数量保留，请核对后确认。<button type="button" className="secondary" onClick={() => update({ lines: input.lines.map(row => row.itemId === item.id ? { ...row, expectedItemVersion: item.rowVersion, unit: item.issueUnit } : row), remainingUnusedConfirmed: false })}>已核对单位和数量</button></div>}

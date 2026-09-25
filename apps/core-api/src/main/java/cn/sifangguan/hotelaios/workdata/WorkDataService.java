@@ -258,6 +258,9 @@ public class WorkDataService {
         validateAssignmentAndForm(principal, request);
         usageService.lockDay(targetOrgUnitId, request.employeeId(), request.businessDate());
         WorkContext workContext = resolveWorkContext(principal, request, targetOrgUnitId);
+        if (WorkEntryPolicy.mergedIntoDailyReport(workContext.itemCode()) && request.supersedesWorkRecordId() == null) {
+            throw new IllegalArgumentException("服务案例与遗留物已合并到客房日报，请在日报中填写并一同提交；历史草稿可在原记录继续完成");
+        }
         boolean saveAsDraft = Boolean.TRUE.equals(request.saveAsDraft());
         if (saveAsDraft) {
             validateWorkPayload(principal, request.formVersionId(), workContext.itemId(), request.payload(), true);

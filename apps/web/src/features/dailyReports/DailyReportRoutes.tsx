@@ -2,11 +2,12 @@ import { WorkUsageFields } from '../storeResources/WorkUsageFields'
 import { usageValidation, usagePayload, loadUsageCatalogue, type UsageCatalogue } from '../storeResources/workUsage'
 import { dailyUsagePayload, dailyUsageValidation } from '../storeResources/dailyUsage'
 import { HousekeepingReportForm } from './HousekeepingReportForm'
+import { emptyActivities, readActivities, validateActivities, type HousekeepingActivities } from './housekeepingActivities'
 import housekeepingStyles from './housekeepingReport.module.css'
 import { DailyReportAutoSummary } from './DailyReportAutoSummary'
 import { PlannedHygieneFields } from './PlannedHygieneFields'
 import editorStyles from './editor.module.css'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import { hasPermission, permissions } from '../../app/permissions'
 import { buildResumableDraftKey, readResumableDraft, removeResumableDraft, writeResumableDraft } from '../../app/resumableDrafts'
@@ -100,12 +101,20 @@ function ReportCard({ report, go }: { report: DailyReportSummary; go: AppNavigat
 
 function ReportDetailPage({ identity, grantedPermissions, reportId, correctionRevisionId, go }: { identity: RoleContext; grantedPermissions: string[]; reportId: string; correctionRevisionId?: string; go: AppNavigate }) {
   const resource = useScopedResource(`${identity.key}:daily-report:${reportId}`, (signal) => loadDailyReport(identity, reportId, signal), undefined as never)
+  const noticeScope = `${identity.key}:${reportId}`
+  const [savedNotice, setSavedNotice] = useState<{ scope: string; text: string }>()
+  const onChanged = async (notice?: string) => {
+    // Reload unmounts the editor. Keep the acknowledged save result at the page level.
+    setSavedNotice(notice ? { scope: noticeScope, text: notice } : undefined)
+    await resource.reload()
+  }
   const housekeeping = resource.data?.plannedHygieneSupported || Boolean(resource.data?.inventoryContext)
   const back = <button className="link-button" onClick={() => go(hasPermission(grantedPermissions, permissions.dailyReport.readTeam) ? 'daily-reports-team' : 'daily-reports-my')}>返回列表</button>
   return <section className={styles.page}>{housekeeping
     ? <header className={housekeepingStyles.reportHeader}><div><h1>{resource.data.positionName}日报</h1><p>{resource.data.hotelName || identity.orgName || ''} · {resource.data.businessDate}</p></div>{back}</header>
     : <FeatureHeader eyebrow="POSITION DAILY REPORT" title={resource.data ? `${resource.data.businessDate} · ${resource.data.positionName}日报` : '日报详情'} description="系统预填与员工补充明确区分；提交后原版本和证据锁定。" actions={back} />}
-    <AsyncState loading={resource.loading} error={resource.error} onRetry={resource.reload} />{resource.data && <ReportEditor key={`${resource.data.id}:${resource.data.currentRevision.id}`} report={resource.data} identity={identity} grantedPermissions={grantedPermissions} correctionRevisionId={correctionRevisionId} onChanged={resource.reload} go={go} />}</section>
+    {savedNotice?.scope === noticeScope && <div className="inline-success" role="status">{savedNotice.text}</div>}
+    <AsyncState loading={resource.loading} error={resource.error} onRetry={resource.reload} />{resource.data && <ReportEditor key={`${resource.data.id}:${resource.data.currentRevision.id}`} report={resource.data} identity={identity} grantedPermissions={grantedPermissions} correctionRevisionId={correctionRevisionId} onChanged={onChanged} go={go} />}</section>
 }
 
 type DailyReportLocalDraft = {
@@ -128,10 +137,15 @@ function wasDraftSaved(draft: DailyReportLocalDraft, saved?: DailyReportLocalDra
     && !hasDailyReportDraftChanges(draft, saved.values, new Set(saved.exceptions)))
 }
 
-function ReportEditor({ report, identity, grantedPermissions, correctionRevisionId, onChanged, go }: { report: DailyReportDetail; identity: RoleContext; grantedPermissions: string[]; correctionRevisionId?: string; onChanged: () => Promise<void>; go: AppNavigate }) {
-  const initialValues = useMemo(() => ({ ...Object.fromEntries(report.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), _inventory: JSON.stringify(report.inventoryQuantities ?? null), _checkoutRooms: String(report.roomCounts?.checkoutRooms ?? ''), _stayoverRooms: String(report.roomCounts?.stayoverRooms ?? ''), _plannedHygieneContent: report.plannedHygiene?.content ?? '', _plannedHygieneRoomNumbers: report.plannedHygiene?.roomNumbers ?? '' }), [report])
+function ReportEditor({ report, identity, grantedPermissions, correctionRevisionId, onChanged, go }: { report: DailyReportDetail; identity: RoleContext; grantedPermissions: string[]; correctionRevisionId?: string; onChanged: (notice?: string) => Promise<void>; go: AppNavigate }) {
+  const initialValues = useMemo(() => ({ ...Object.fromEntries(report.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), _inventory: JSON.stringify(report.inventoryQuantities ?? null), _checkoutRooms: String(report.roomCounts?.checkoutRooms ?? ''), _stayoverRooms: String(report.roomCounts?.stayoverRooms ?? ''), _plannedHygieneContent: report.plannedHygiene?.content ?? '', _plannedHygieneRoomNumbers: report.plannedHygiene?.roomNumbers ?? '', _activities: JSON.stringify(report.housekeepingActivities ?? emptyActivities()) }), [report])
   const initialExceptions = useMemo(() => new Set(report.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.exception).map((item) => item.id))), [report])
   const [values, setValues] = useState<Record<string, string>>(initialValues)
+  const [pendingPhotoEntries, setPendingPhotoEntries] = useState<Set<string>>(new Set())
+  const onPhotosPending = useCallback((id: string, pending: boolean) => setPendingPhotoEntries(current => {
+    if (current.has(id) === pending) return current
+    const next = new Set(current); if (pending) next.add(id); else next.delete(id); return next
+  }), [])
   const [exceptions, setExceptions] = useState<Set<string>>(initialExceptions)
   const [message, setMessage] = useState<string>()
   const [draftNotice, setDraftNotice] = useState<string>()
@@ -267,6 +281,12 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
   let inventoryValue: unknown
   try { inventoryValue = JSON.parse(values._inventory || 'null') } catch { inventoryValue = undefined }
   const housekeeping = report.plannedHygieneSupported || Boolean(report.inventoryContext)
+  let activities: HousekeepingActivities | undefined
+  let activitiesError: string | undefined
+  try { activities = readActivities(values._activities) } catch (error) { activitiesError = error instanceof Error ? error.message : '遗留物草稿读取失败' }
+  const updateActivities = (update: (current: HousekeepingActivities) => HousekeepingActivities) => setValues(current => ({
+    ...current, _activities: JSON.stringify(update(readActivities(current._activities))),
+  }))
   const usageCatalogue = refreshedCatalogue?.reportVersion === report.rowVersion ? refreshedCatalogue.catalogue : report.inventoryContext?.catalogue
   const refreshCatalogue = async () => {
     if (!usageCatalogue) return
@@ -278,6 +298,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
   }
   const roomCount = (key: string) => values[key]?.trim() ? Number(values[key]) : undefined
   const input: DailyReportDraftInput = {
+    housekeepingActivities: housekeeping ? activities : undefined,
     inventoryQuantities: usageCatalogue ? (housekeeping ? dailyUsagePayload(inventoryValue, usageCatalogue) : usagePayload(inventoryValue, usageCatalogue)) : undefined,
     roomCounts: usageCatalogue ? { checkoutRooms: roomCount('_checkoutRooms'), stayoverRooms: roomCount('_stayoverRooms') } : undefined,
     plannedHygiene: report.plannedHygieneSupported ? { content: values._plannedHygieneContent ?? '', roomNumbers: values._plannedHygieneRoomNumbers ?? '' } : undefined,
@@ -289,6 +310,11 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
   const reviewPermission = report.currentRevision.revisionType === 'CORRECTION' ? permissions.dailyReport.reviewCorrection : permissions.dailyReport.reviewException
   const canReviewCurrentRevision = !reviewingHistoricalRevision && Boolean(identity.businessActorAssignmentId) && hasPermission(grantedPermissions, reviewPermission)
   const run = async (action: 'save' | 'submit' | 'correction' | 'approve' | 'reject') => {
+    if ((action === 'save' || action === 'submit') && housekeeping) {
+      if (pendingPhotoEntries.size) { setMessage('仍有照片等待上传，请完成上传或移除后再保存、提交。'); return }
+      if (activitiesError) { setMessage(activitiesError); return }
+      if (action === 'submit' && activities) { const error = validateActivities(activities); if (error) { setMessage(error); return } }
+    }
     if (conflictingLocalDraft && (action === 'save' || action === 'submit')) {
       setMessage('服务器日报草稿与本机内容不一致，请先选择要继续使用的版本。')
       return
@@ -316,8 +342,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
         savedDraftRef.current = submittedDraft
         await removeResumableDraft(localDraftKey)
       }
-      await onChanged()
-      if (action === 'save') setDraftNotice('草稿已保存到服务器')
+      await onChanged(action === 'save' ? '草稿已保存到服务器' : undefined)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) { setConflict(true); setMessage('服务器已有新版本；你的本地填写内容仍保留。请查看最新版本后重新应用修改。') }
       else setMessage(error instanceof Error ? error.message : '操作失败')
@@ -330,6 +355,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
     return <section className={styles.section}><div className="inline-warning"><strong>发现两个版本的未提交日报</strong><p>服务器日报已在其他页面或设备更新，本机仍保留一份未提交内容。请选择一个版本后再继续，系统不会自动覆盖。</p><div className={styles.actions}><button className="secondary" onClick={chooseServerDraft}>使用服务器最新草稿</button><button className="secondary" onClick={chooseLocalDraft}>恢复本机未提交内容</button></div></div></section>
   }
   if (housekeeping) return <HousekeepingReportForm report={report} values={values} editable={editable} busy={command.busy}
+    identity={identity} activities={activities} activitiesError={activitiesError} onActivitiesChange={updateActivities} onPhotosPending={onPhotosPending} photosPending={pendingPhotoEntries.size > 0}
     catalogue={usageCatalogue} inventoryValue={inventoryValue} notice={draftNotice} message={message} conflict={conflict}
     missingRequiredCount={currentMissingRequiredCount} setValue={(key,value) => setValues(current => ({ ...current, [key]: value }))}
     onRefreshCatalogue={() => void refreshCatalogue()} onLegacyDraft={() => go('my-work', { expectationId: report.inventoryContext!.expectationId, entry: 'legacy' })}

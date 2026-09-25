@@ -113,6 +113,7 @@ import {
 import { AllFunctionsPage } from './shared/MobileAppNavigation'
 
 const icpRecordNumber = (import.meta.env.VITE_ICP_RECORD_NUMBER ?? '').trim()
+const loginWorkbenchTitle = '贵州四方馆酒店管理有限公司工作台'
 
 const DailyReportFeature = lazy(() => import('./features/dailyReports/DailyReportRoutes').then((module) => ({ default: module.DailyReportRoutes })))
 const DailyReportTemplateFeature = lazy(() => import('./features/dailyReportTemplates/DailyReportTemplateRoutes').then((module) => ({ default: module.DailyReportTemplateRoutes })))
@@ -138,6 +139,7 @@ const StoreResourceFeature = lazy(() => import('./features/storeResources/StoreR
 const AcademyFeature = lazy(() => import('./features/academy/AcademyRoutes'))
 const FinanceFeature = lazy(() => import('./features/finance/FinanceRoutes'))
 const ProcurementFeature = lazy(() => import('./features/procurement/ProcurementRoutes'))
+const LostPropertyFeature = lazy(() => import('./features/lostProperties/LostPropertyRoutes'))
 const initialWecomTaskEntry = consumeWecomTaskEntry()
 const initialWecomBindingEntry = consumeWecomBindingEntry()
 
@@ -1235,7 +1237,8 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
       setOpening(true)
       loadExpectation(identity, routeParams.expectationId).then(result => {
         if (!active) return
-        if (result.data.itemCode === 'HKA_DAILY_REPORT' && routeParams.entry !== 'legacy') {
+        if ((result.data.itemCode === 'HKA_DAILY_REPORT' && routeParams.entry !== 'legacy')
+          || (['HKA_GUEST_SERVICE_EVENT', 'HKA_LOST_PROPERTY'].includes(result.data.itemCode ?? '') && !result.data.recordId)) {
           go('daily-reports-my', { businessDate: result.data.businessDate, open: 'today' })
         } else if (result.data.itemCode === 'GM_W_EMPLOYEE') {
           go('workbench', { cycle: 'WEEK', cycleDate: result.data.businessDate, assessmentId: result.data.id })
@@ -1748,10 +1751,9 @@ function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => v
   }
   return <main className={`login-auth-screen${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <div className="login-auth-layout">
-      <section className="login-auth-brand" aria-label={product.name}>
-        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
-        <div className="login-auth-intro"><h1>{product.name}</h1><p>以真实账号进入门店管理闭环。系统按组织、任职与角色自动隔离数据。</p></div>
-        <small className="login-auth-version">{product.version}</small>
+      <section className="login-auth-brand" aria-label={loginWorkbenchTitle}>
+        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong></span></div>
+        <div className="login-auth-intro"><h1>{loginWorkbenchTitle}</h1></div>
       </section>
       <section className="login-auth-panel">
         <form className="login-auth-card" aria-label="中台账号登录" aria-busy={busy} onSubmit={submit}>
@@ -1761,7 +1763,6 @@ function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => v
           {error && <div id="login-error" className="inline-error" role="alert" aria-live="polite">{error}</div>}
           <button className="primary login-auth-submit" disabled={busy || !loginName.trim() || !password}>{busy ? '正在验证…' : '登录中台'}</button>
           {onWecomLogin && <button className="secondary" type="button" disabled={busy} onClick={onWecomLogin}>改用企业微信登录</button>}
-          <small>内部测试系统 · 关键操作均记录账号、组织和时间</small>
         </form>
       </section>
     </div>
@@ -1776,10 +1777,9 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
 }) {
   return <main className={`login-auth-screen${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <div className="login-auth-layout">
-      <section className="login-auth-brand" aria-label={product.name}>
-        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
-        <div className="login-auth-intro"><h1>{product.name}</h1><p>系统正在根据登录账号解析组织、任职与功能权限。</p></div>
-        <small className="login-auth-version">{product.version}</small>
+      <section className="login-auth-brand" aria-label={loginWorkbenchTitle}>
+        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong></span></div>
+        <div className="login-auth-intro"><h1>{loginWorkbenchTitle}</h1></div>
       </section>
       <section className="login-auth-panel">
         <div className="login-auth-card" role="status" aria-live="polite">
@@ -1884,10 +1884,15 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   const [selectedAssignmentId, setSelectedAssignmentId] = useState(() => bootstrapAssignmentId(authMode, identity.businessActorAssignmentId))
   const [changingPassword, setChangingPassword] = useState(false)
   const compatibleAssignments = useMemo(() => me.data.assignments, [me.data.assignments])
+  const custodyEntryId = view === 'lost-properties' ? routeParams.id : undefined
+  const custodyEntry = useScopedResource<{ assignmentId?: string }>(`${identity.key}:${me.data.accountId}:${!me.loading}:custody-entry:${custodyEntryId ?? ''}`,
+    signal => custodyEntryId && !me.loading && !me.error ? apiRequest(`/lost-properties/${encodeURIComponent(custodyEntryId)}/entry-assignment`,
+      { ...identity, actorId: me.data.accountId, businessActorAssignmentId: undefined }, { signal }) : Promise.resolve({}), {})
   useEffect(() => {
-    const preferred = compatibleAssignments.find((item) => item.primary) ?? compatibleAssignments[0]
+    const preferred = compatibleAssignments.find((item) => item.id === custodyEntry.data.assignmentId)
+      ?? compatibleAssignments.find((item) => item.primary) ?? compatibleAssignments[0]
     setSelectedAssignmentId(preferred?.id ?? bootstrapAssignmentId(authMode, identity.businessActorAssignmentId))
-  }, [identity.key, compatibleAssignments])
+  }, [identity.key, compatibleAssignments, custodyEntry.data.assignmentId])
   const selectedAssignment = compatibleAssignments.find((item) => item.id === selectedAssignmentId)
     ?? compatibleAssignments.find((item) => item.primary)
     ?? compatibleAssignments[0]
@@ -1995,6 +2000,8 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     || !useRoleDefaultsFallback
     || isRouteAllowedByRoleDefaults(presentationRoleCode, view, true)
   const page = useMemo(() => {
+    if (custodyEntryId && custodyEntry.loading) return <div className="state-card" role="status">正在核对遗留物接收任职…</div>
+    if (custodyEntryId && custodyEntry.error) return <div className="state-card"><strong>暂时无法打开这条遗留物记录</strong><p>{custodyEntry.error instanceof Error ? custodyEntry.error.message : '请重试或联系管理员核对接收权限。'}</p><button className="secondary" onClick={() => void custodyEntry.reload()}>重新加载</button></div>
     if (!canRenderAuthenticatedShell(authMode, me.loading, me.error)) {
       return <section className="page-section"><div className="empty-state"><strong>{me.error ? '身份与权限读取失败' : '正在读取身份与权限'}</strong><span>{me.error ?? '系统将在权限解析完成后加载业务页面，避免使用错误的岗位或组织范围。'}</span></div></section>
     }
@@ -2057,6 +2064,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       case 'academy': legacyPage = <AcademyFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'finance': legacyPage = <FinanceFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'procurement': legacyPage = <ProcurementFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
+      case 'lost-properties': legacyPage = <LostPropertyFeature key={activeIdentity.key} identity={activeIdentity} params={routeParams} go={navigate} />; break
       case 'data-retention': legacyPage = <DataRetentionAdministration identity={activeIdentity} />; break
       case 'ai-data': legacyPage = <AiDataFeature key={activeIdentity.key} identity={activeIdentity} />; break
       case 'wecom-webhooks': legacyPage = <WecomStoreWebhookConfiguration identity={activeIdentity} permissions={activePermissions} />; break
@@ -2086,7 +2094,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
     >
       <Suspense fallback={<div className="state-card"><div className="spinner" /><strong>正在加载当前岗位功能</strong></div>}>{legacyPage}</Suspense>
     </PageAccessBoundary>
-  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation, activeCenter, sectionId, storeResourcesAvailable, dailyReportsAvailable, unreadCount])
+  }, [view, routeParams, activeIdentity, activePermissions, executiveTasksEnabled, isChairmanContext, isDataRetentionAdministrator, isPlatformAdmin, me.error, me.loading, presentationPolicy.key, presentationRoleCode, routePresentationAllowed, visibleNavigation, activeCenter, sectionId, storeResourcesAvailable, dailyReportsAvailable, unreadCount, custodyEntryId, custodyEntry.loading, custodyEntry.error])
   const changeRole = (key: string) => {
     const next = roleContexts.find((role) => role.key === key)
     if (!next) return
@@ -2102,7 +2110,11 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   return <div className={`shell${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <aside className="sidebar"><div className="brand-mark"><div>四</div><span><strong>{product.name}</strong><small>{product.edition} · {product.editionLabel}</small></span></div>
       <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} />
-      <div className="sidebar-footer"><span>{product.version}</span><small>标准 → 工作 → 任务 → 执行 → 验收</small></div>
+      <div className="sidebar-footer">
+        <span>{product.version}</span>
+        <small>标准 → 工作 → 任务 → 执行 → 验收</small>
+        <IcpFooter recordNumber={icpRecordNumber} placement="sidebar" />
+      </div>
     </aside>
     <main><header className="topbar"><div className="mobile-top-brand" aria-label={product.name}><span>四</span></div><div className={`connection ${me.error ? 'offline' : pilotDemoMode ? 'demo' : ''}`}><span className="live-dot" />{pilotDemoMode ? 'Pilot 演示数据' : me.error ? '身份接口异常' : '服务端权限已解析'}<small>{pilotDemoMode ? '仅用于界面与流程走查，不代表真实业务数据或权限' : authMode === 'dev-header' ? '本地验收账号 · 权限由数据库决定' : 'JWT/SSO 会话身份'}</small></div><span className="pilot-badge">{product.editionLabel}</span>
       {authMode === 'dev-header' && <label className="context-select account-context"><span>验收账号</span><select value={identity.key} onChange={(event) => changeRole(event.target.value)}>{roleContexts.map((role) => <option value={role.key} key={role.key}>{role.label} · {role.userName}</option>)}</select></label>}
@@ -2119,7 +2131,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       <MainCenterNavigation centers={navigationCenters} activeCenter={activeCenterId} go={navigate} resolveTarget={navigationTarget} mobile />
       {changingPassword && <ChangePasswordDialog identity={activeIdentity} onClose={() => setChangingPassword(false)} onChanged={() => { setChangingPassword(false); onLogout?.() }} />}
     </main>
-    <IcpFooter recordNumber={icpRecordNumber} />
+    <IcpFooter recordNumber={icpRecordNumber} placement="mobile" />
   </div>
 }
 

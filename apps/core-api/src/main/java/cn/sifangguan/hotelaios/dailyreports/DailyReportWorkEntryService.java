@@ -106,10 +106,30 @@ public class DailyReportWorkEntryService {
             if(snapshot.hasNonNull("inventoryQuantities")) {
                 JsonNode input=snapshot.path("inventoryQuantities");
                 var referenced=usage.detail((UUID)existing.getFirst().get("id"));
-                if(!Set.of("PENDING","APPROVED").contains(Objects.toString(referenced.get("status"),""))
-                        || !Objects.toString(referenced.get("work_record_id"),"").equals(input.path("referenceRecordId").asText())
-                        || input.has("lines") || input.path("schemaVersion").asInt()!=1)
+                boolean reviewable=Set.of("PENDING","APPROVED").contains(Objects.toString(referenced.get("status"),""));
+                boolean referenceMatches=Objects.toString(referenced.get("work_record_id"),"").equals(input.path("referenceRecordId").asText())
+                        && !input.has("lines") && input.path("schemaVersion").asInt()==1;
+                // A correction may change only the service/lost-property section. Reuse the exact
+                // previous report quantities, but never silently accept edited or unrelated quantities.
+                boolean unchangedCorrection=reviewable&&!referenceMatches&&Boolean.TRUE.equals(jdbc.queryForObject("""
+                        select exists(select 1 from daily_report d
+                          join daily_report_revision current on current.tenant_id=d.tenant_id and current.id=d.current_revision_id
+                          join daily_report_revision previous on previous.tenant_id=d.tenant_id and previous.id=current.supersedes_revision_id and previous.report_id=d.id
+                          join work_record w on w.tenant_id=d.tenant_id and w.id=:record
+                          where d.tenant_id=:tenantId and d.id=:reportId and current.revision_type='CORRECTION'
+                            and previous.payload_snapshot->'inventoryQuantities'=cast(:input as jsonb)
+                            and w.payload->>'dailyReportId'=d.id::text)
+                        """,params(reportId).addValue("record",existing.getFirst().get("id")).addValue("input",input.toString()),Boolean.class));
+                if(!reviewable||(!referenceMatches&&!unchangedCorrection))
                     throw new IllegalArgumentException("日报工作已提交，请刷新关联用量；数量更正须通过耗用审核人留痕处理");
+                if(unchangedCorrection) {
+                    var reference=mapper.createObjectNode().put("schemaVersion",1).put("referenceRecordId",existing.getFirst().get("id").toString());
+                    jdbc.update("""
+                            update daily_report_revision r set payload_snapshot=jsonb_set(r.payload_snapshot,'{inventoryQuantities}',cast(:reference as jsonb)),row_version=r.row_version+1
+                            from daily_report d where d.tenant_id=:tenantId and d.id=:reportId
+                              and r.tenant_id=d.tenant_id and r.id=d.current_revision_id and r.revision_status='DRAFT'
+                            """,params(reportId).addValue("reference",reference.toString()));
+                }
             }
             return;
         }

@@ -16,7 +16,38 @@ public class StoreItemUsageScopes {
     public StoreItemUsageScopes(NamedParameterJdbcTemplate jdbc) { this.jdbc = jdbc; }
 
     public record Option(UUID id, String code, String name) { }
-    public record Options(List<Option> departments, List<Option> positions) { }
+    public record Options(List<Option> departments, List<Option> positions, PrefixConfig prefixConfig) {
+        public Options(List<Option> departments, List<Option> positions) { this(departments,positions,null); }
+    }
+
+    public record PrefixRule(String prefix, String defaultName, UUID departmentId) { }
+    public record PrefixConfig(long rowVersion, List<PrefixRule> rules) { }
+
+    public PrefixConfig prefixConfig(UUID tenantId, UUID hotelId, Options options) {
+        var rows = jdbc.queryForList("select * from store_department_prefix_config where tenant_id=:tenantId and hotel_org_unit_id=:hotelId",params(tenantId,hotelId));
+        var stored = rows.isEmpty() ? null : rows.getFirst();
+        var rules = new ArrayList<PrefixRule>();
+        for (var entry : List.of(Map.entry("QT","前厅部"),Map.entry("KF","客房部"),Map.entry("WX","维修部"))) {
+            var matches = options.departments().stream().filter(d -> d.name().equals(entry.getValue())).toList();
+            UUID id = stored == null ? (matches.size()==1 ? matches.getFirst().id() : null)
+                    : (UUID)stored.get(entry.getKey().toLowerCase(Locale.ROOT)+"_department_id");
+            // Stale mappings never infer a disabled or foreign department.
+            if (id != null) { UUID selected=id; if (options.departments().stream().noneMatch(d -> d.id().equals(selected))) id=null; }
+            rules.add(new PrefixRule(entry.getKey(),entry.getValue(),id));
+        }
+        return new PrefixConfig(stored==null ? -1 : ((Number)stored.get("row_version")).longValue(),rules);
+    }
+
+    public static UUID inferredDepartment(String code, PrefixConfig config) {
+        String normalized = Objects.toString(code, "").trim().toUpperCase(Locale.ROOT);
+        return config.rules().stream().filter(rule -> normalized.startsWith(rule.prefix()+"-"))
+                .map(PrefixRule::departmentId).filter(Objects::nonNull).findFirst().orElse(null);
+    }
+
+    public UsageScopeInput infer(UUID tenantId, UUID hotelId, String code, Options options) {
+        UUID department = inferredDepartment(code,prefixConfig(tenantId,hotelId,options));
+        return department == null ? null : new UsageScopeInput("DEPARTMENTS",List.of(department),List.of());
+    }
 
     // Callers have already applied tenant context and checked the hotel/action permission.
     public Options options(UUID tenantId, UUID hotelId, boolean lock) {
@@ -40,7 +71,8 @@ public class StoreItemUsageScopes {
                 order by p.id
                 """ + (lock ? " for share of p" : ""), params,
                 (rs, n) -> new Option(rs.getObject("id", UUID.class), rs.getString("code"), rs.getString("name")));
-        return new Options(departments, positions);
+        var choices = new Options(departments, positions);
+        return new Options(departments,positions,prefixConfig(tenantId,hotelId,choices));
     }
 
     public UsageScopeInput validate(UsageScopeInput input, Options options) {
@@ -59,6 +91,7 @@ public class StoreItemUsageScopes {
     }
 
     public UsageScopeInput parse(String departmentNames, String positionNames, Options options) {
+        if ("不限岗位".equals(positionNames.trim())) positionNames = "";
         if (departmentNames.isBlank()) throw invalid("适用部门", "请填写全店通用或本门店有效部门名称/编码");
         List<String> departments = split(departmentNames, "适用部门");
         boolean all = departments.contains("全店通用");
@@ -109,6 +142,38 @@ public class StoreItemUsageScopes {
         jdbc.update("delete from store_item_usage_position where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and item_id=:itemId", params);
         for (UUID id : input.departmentIds()) jdbc.update("insert into store_item_usage_department(tenant_id,hotel_org_unit_id,item_id,department_id) values(:tenantId,:hotelId,:itemId,:id)", params.addValue("id", id));
         for (UUID id : input.positionIds()) jdbc.update("insert into store_item_usage_position(tenant_id,hotel_org_unit_id,item_id,position_id) values(:tenantId,:hotelId,:itemId,:id)", params.addValue("id", id));
+    }
+
+    public void saveAsset(UUID tenantId, UUID hotelId, UUID assetId, UsageScopeInput input) {
+        if (input == null) return;
+        var p = params(tenantId, hotelId).addValue("assetId",assetId).addValue("mode",input.mode());
+        jdbc.update("update store_fixed_asset set usage_scope_mode=:mode where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and id=:assetId",p);
+        jdbc.update("delete from store_asset_usage_department where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and asset_id=:assetId",p);
+        jdbc.update("delete from store_asset_usage_position where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and asset_id=:assetId",p);
+        for (UUID id:input.departmentIds()) jdbc.update("insert into store_asset_usage_department values(:tenantId,:hotelId,:assetId,:id)",p.addValue("id",id));
+        for (UUID id:input.positionIds()) jdbc.update("insert into store_asset_usage_position values(:tenantId,:hotelId,:assetId,:id)",p.addValue("id",id));
+    }
+
+    public List<Map<String,Object>> decorateAssets(UUID tenantId,UUID hotelId,List<Map<String,Object>> assets) {
+        if(assets.isEmpty()) return assets;
+        var p=params(tenantId,hotelId).addValue("ids",assets.stream().map(a->a.get("id")).toList());
+        var deps=group(jdbc.queryForList("""
+            select s.asset_id as item_id,d.id,d.code,d.name from store_asset_usage_department s
+            join org_unit d on d.tenant_id=s.tenant_id and d.id=s.department_id
+            where s.tenant_id=:tenantId and s.hotel_org_unit_id=:hotelId and s.asset_id in (:ids) order by d.name,d.id
+            """,p));
+        var positions=group(jdbc.queryForList("""
+            select s.asset_id as item_id,d.id,d.code,d.name from store_asset_usage_position s
+            join position_definition d on d.tenant_id=s.tenant_id and d.id=s.position_id
+            where s.tenant_id=:tenantId and s.hotel_org_unit_id=:hotelId and s.asset_id in (:ids) order by d.name,d.id
+            """,p));
+        for(var asset:assets) {
+            var d=deps.getOrDefault(asset.get("id"),List.of());var v=positions.getOrDefault(asset.get("id"),List.of());
+            asset.put("usage_scope",Map.of("mode",asset.getOrDefault("usage_scope_mode","LEGACY"),
+                "departmentIds",d.stream().map(Option::id).toList(),"positionIds",v.stream().map(Option::id).toList(),
+                "departments",d,"positions",v));
+        }
+        return assets;
     }
 
     public List<Map<String, Object>> decorate(UUID tenantId, UUID hotelId, List<Map<String, Object>> items) {

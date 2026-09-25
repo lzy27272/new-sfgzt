@@ -1545,6 +1545,7 @@ public class WorkPackageService {
                   and v.effective_from::date <= :businessDate
                   and (v.effective_to is null or v.effective_to::date >= :businessDate)
                   and i.period_type = :periodType
+                  and i.item_code not in ('HKA_GUEST_SERVICE_EVENT','HKA_LOST_PROPERTY')
                   and coalesce((i.execution_policy ->> 'enabled')::boolean, true)
                   and (cardinality(i.weekdays) = 0
                        or extract(isodow from cast(:businessDate as date))::smallint = any(i.weekdays))

@@ -77,9 +77,10 @@ test('renders all common rows without picker, labelled numeric inputs and explic
 test('one housekeeping form merges manual text, retains hygiene, history and a single submit action', () => {
   const report={ status:'DRAFT',plannedHygieneSupported:true,allowedActions:['EDIT','SUBMIT'], blockedActionReasons:{},
     roomCounts:{}, currentRevision:{sections:[{id:'s',name:'客房服务员岗位日报 V2',applicable:true,items:[{id:'manual',templateItemId:'template',code:'manualOtherWork',label:'其他工作与手工汇报',dataSource:'EMPLOYEE',required:false,evidence:[]}]}]},revisions:[],aiRecommendations:[] }
-  const html=renderToStaticMarkup(React.createElement(HousekeepingReportForm,{report,values:{manual:'交接事项'},editable:true,busy:false,catalogue,inventoryValue:null,missingRequiredCount:0,conflict:false,setValue(){},onRefreshCatalogue(){},onLegacyDraft(){},onSave(){},onSubmit(){}}))
+  const html=renderToStaticMarkup(React.createElement(HousekeepingReportForm,{identity:{tenantId:'tenant',actorId:'actor'},activities:{schemaVersion:1,serviceCases:[],lostProperties:[],lostPropertyOccurred:null},onActivitiesChange(){},onPhotosPending(){},photosPending:false,report,values:{manual:'交接事项'},editable:true,busy:false,catalogue,inventoryValue:null,missingRequiredCount:0,conflict:false,setValue(){},onRefreshCatalogue(){},onLegacyDraft(){},onSave(){},onSubmit(){}}))
   assert.doesNotMatch(html,/客房服务员岗位日报 V2|补充填报内容/)
   assert.match(html,/其他工作与补充说明/); assert.match(html,/交接事项/); assert.match(html,/计划卫生/)
   assert.equal((html.match(/>提交日报</g)||[]).length,1)
   assert.doesNotMatch(html,/草稿已暂存/)
+  assert.match(html,/服务案例/);assert.match(html,/遗留物品/);assert.match(html,/与日报同时提醒、同时填报/)
 })
