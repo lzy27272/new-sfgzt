@@ -46,7 +46,8 @@ public class StoreItemUsageScopes {
 
     public UsageScopeInput infer(UUID tenantId, UUID hotelId, String code, Options options) {
         UUID department = inferredDepartment(code,prefixConfig(tenantId,hotelId,options));
-        return department == null ? null : new UsageScopeInput("DEPARTMENTS",List.of(department),List.of());
+        return department == null ? new UsageScopeInput("ALL_DEPARTMENTS",List.of(),List.of())
+                : new UsageScopeInput("DEPARTMENTS",List.of(department),List.of());
     }
 
     // Callers have already applied tenant context and checked the hotel/action permission.

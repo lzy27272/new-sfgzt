@@ -30,7 +30,7 @@ public class StoreDepartmentPrefixService {
         this.jdbc=jdbc;this.access=access;this.context=context;this.scopes=scopes;this.audit=audit;this.commands=commands;this.mapper=mapper;
     }
     public record RulesInput(long expectedVersion, UUID qtDepartmentId, UUID kfDepartmentId, UUID wxDepartmentId) { }
-    public record Selection(@NotBlank String type, @NotNull UUID id, long expectedVersion, @NotNull UUID departmentId) { }
+    public record Selection(@NotBlank String type, @NotNull UUID id, long expectedVersion, UUID departmentId) { }
     public record ApplyInput(long configVersion, @NotEmpty @Size(max=200) List<@NotNull @Valid Selection> selections) { }
 
     @Transactional(readOnly=true)
@@ -48,9 +48,10 @@ public class StoreDepartmentPrefixService {
                 row.put("type",type);
                 UUID inferred=StoreItemUsageScopes.inferredDepartment((String)row.get("code"),config);
                 row.put("inferred_department_id",inferred);
+                row.put("inferred_scope_mode",inferred==null ? "ALL_DEPARTMENTS" : "DEPARTMENTS");
                 var scope=(Map<?,?>)row.get("usage_scope");
                 row.put("action",!"LEGACY".equals(row.get("usage_scope_mode")) || !((List<?>)scope.get("departmentIds")).isEmpty()
-                        ? "PRESERVE" : inferred==null ? "MANUAL" : "FILL");
+                        ? "PRESERVE" : "FILL");
                 rows.add(row);
             }
         }
@@ -105,7 +106,7 @@ public class StoreDepartmentPrefixService {
         if(config.rowVersion()!=input.configVersion()) throw conflict();
         for(var row:selected) {
             var before=snapshots.get(row.type()+row.id());
-            if(!row.departmentId().equals(StoreItemUsageScopes.inferredDepartment((String)before.get("code"),config))) throw conflict();
+            if(!Objects.equals(row.departmentId(),StoreItemUsageScopes.inferredDepartment((String)before.get("code"),config))) throw conflict();
             boolean asset=row.type().equals("ASSET");
             String table=asset ? "store_fixed_asset" : "store_resource_item";
             String mapping=asset ? "store_asset_usage_department" : "store_item_usage_department";
@@ -113,9 +114,12 @@ public class StoreDepartmentPrefixService {
             var parameters=params(p,hotelId).addValue("id",row.id()).addValue("department",row.departmentId());
             // Position restrictions stay untouched; even legacy position restrictions are preserved.
             jdbc.update("delete from "+mapping+" where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and "+idColumn+"=:id",parameters);
-            jdbc.update("insert into "+mapping+"(tenant_id,hotel_org_unit_id,"+idColumn+",department_id) values(:tenantId,:hotelId,:id,:department)",parameters);
-            jdbc.update("update "+table+" set usage_scope_mode='DEPARTMENTS',row_version=row_version+1 where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and id=:id",parameters);
-            audit.record("STORE_DEPARTMENT_PREFIX_FILLED",asset ? "STORE_FIXED_ASSET" : "STORE_RESOURCE_ITEM",row.id(),json(Map.of("before",before,"departmentId",row.departmentId())));
+            if(row.departmentId()!=null) jdbc.update("insert into "+mapping+"(tenant_id,hotel_org_unit_id,"+idColumn+",department_id) values(:tenantId,:hotelId,:id,:department)",parameters);
+            parameters.addValue("scopeMode",row.departmentId()==null ? "ALL_DEPARTMENTS" : "DEPARTMENTS");
+            jdbc.update("update "+table+" set usage_scope_mode=:scopeMode,row_version=row_version+1 where tenant_id=:tenantId and hotel_org_unit_id=:hotelId and id=:id",parameters);
+            var after=new LinkedHashMap<String,Object>();
+            after.put("before",before); after.put("departmentId",row.departmentId()); after.put("scopeMode",parameters.getValue("scopeMode"));
+            audit.record("STORE_DEPARTMENT_PREFIX_FILLED",asset ? "STORE_FIXED_ASSET" : "STORE_RESOURCE_ITEM",row.id(),json(after));
         }
         var result=Map.of("updated",selected.size());
         commands.succeed(reservation,"ORG_UNIT",hotelId,200,result);

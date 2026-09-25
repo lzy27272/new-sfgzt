@@ -879,6 +879,37 @@ class StoreWorkUsageIntegrationTest {
         }
     }
 
+    @Test void upgrading83UnconfiguredItemsMakesThemSelectableWithoutChangingStock() throws Exception {
+        usageItemCode="HKA_ITEM_ISSUE"; setup();
+        List<String> ids=new ArrayList<>();
+        for(int i=0;i<83;i++) {
+            String id=UUID.randomUUID().toString(); ids.add(id);
+            jdbc.update("insert into store_resource_item(id,tenant_id,hotel_org_unit_id,sku,name,category,unit,employee_usage_enabled,usage_scope_mode) values(?::uuid,?::uuid,?::uuid,?,'旧物品','CONSUMABLE','支',true,'LEGACY')",id,T,H,(i==0 ? "QT-" : i==1 ? "KF-" : "COMMON-")+id);
+        }
+        String disabled=ids.get(82);
+        jdbc.update("update store_resource_item set employee_usage_enabled=false where id=?::uuid",disabled);
+        String endpoint="/api/v1/store-resources/usage-catalog";
+        var before=call(get(endpoint).param("orgUnitId",H).param("itemCode",usageItemCode),EMP,null,200);
+        for(String id:ids) assertThat(before.path("items").toString()).doesNotContain(id);
+        jdbc.execute(new org.springframework.core.io.ClassPathResource("db/migration/V86__store_item_department_defaults.sql").getContentAsString(java.nio.charset.StandardCharsets.UTF_8));
+        var after=call(get(endpoint).param("orgUnitId",H).param("itemCode",usageItemCode),EMP,null,200);
+        assertThat(after.path("unconfigured_item_count").asInt()).isZero();
+        assertThat(after.path("items").toString()).doesNotContain(disabled);
+        for(String id:ids.subList(0,82)) assertThat(after.path("items").toString()).contains(id);
+        for(JsonNode row:after.path("items")) {
+            String id=row.path("id").asText();
+            if(id.equals(ids.get(1))) assertThat(row.path("applicable_to_assignment").asBoolean()).isFalse();
+            if(id.equals(ids.get(2))) {
+                assertThat(row.path("usage_scope_mode").asText()).isEqualTo("ALL_DEPARTMENTS");
+                assertThat(row.path("applicable_to_assignment").asBoolean()).isTrue();
+            }
+        }
+        String record=submit(List.of(line(ids.get(1),"1","支",1),line(ids.get(2),"2","支",1)),false,201).path("id").asText();
+        assertThat(movements(record)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from store_cost_entry where source_parent_id=?::uuid",Integer.class,record)).isZero();
+        call(get(endpoint).param("orgUnitId",OTHER_H).param("itemCode",usageItemCode),EMP,null,403);
+    }
+
     @Test void crossDepartmentIssueCanBeSubmittedButDoesNotPostStockOrCost() throws Exception {
         usageItemCode="HKA_ITEM_ISSUE"; setup();
         String item=item("CONSUMABLE","支","支",1,10,2);
