@@ -64,7 +64,9 @@ public class ImageRetentionController {
         String filter="o.tenant_id=:tenant and (:search='' or strpos(o.original_name,:search)>0 or o.id::text=:search)";
         var items=jdbc.queryForList("""
                 select o.id,o.source_type,o.source_id,o.original_name,o.size_bytes,o.uploaded_at,
-                       o.uploaded_at + p.image_retention_days * interval '24 hours' as expires_at,
+                       case when o.source_type <> 'ai_evidence_sample'
+                            then o.uploaded_at + p.image_retention_days * interval '24 hours' end as expires_at,
+                       (o.source_type = 'ai_evidence_sample') as permanent_retention,
                        o.legal_hold,o.hold_reason,o.state,o.last_error,o.row_version,
                        (select org.name from attachment a join work_record w on w.tenant_id=a.tenant_id and w.id=a.work_record_id
                         join org_unit org on org.tenant_id=w.tenant_id and org.id=w.target_org_unit_id
@@ -91,6 +93,9 @@ public class ImageRetentionController {
         var row=rows.getFirst();
         if ("DELETED".equals(row.get("state")) || ((Number)row.get("row_version")).longValue()!=request.expectedVersion()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,"图片已清理或状态已变化，请刷新");
+        }
+        if ("ai_evidence_sample".equals(row.get("source_type"))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"规范样例照片长期保留，不参与自动清理，无需设置或解除保留");
         }
         Path file=root.resolve((String)row.get("object_key")).normalize();
         if (!file.startsWith(root) || !Files.isRegularFile(file,java.nio.file.LinkOption.NOFOLLOW_LINKS)) {

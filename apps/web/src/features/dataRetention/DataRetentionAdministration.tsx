@@ -95,7 +95,7 @@ function PreviewPanel({ preview, loading, onRefresh }: {
 }) {
   return <article className={styles.previewPanel}>
     <header>
-      <div><span>DELETION PREVIEW</span><h2>到期图片候选预览</h2><p>统计上传后已到期、未标记重要证据且尚未删除的图片，包括未审核图片。</p></div>
+      <div><span>DELETION PREVIEW</span><h2>到期图片候选预览</h2><p>统计上传后已到期、未标记重要证据且尚未删除的普通工作图片，包括未审核图片；规范样例不参与清理。</p></div>
       <button className="secondary" disabled={loading} onClick={onRefresh}>{loading ? '刷新中…' : '刷新预览'}</button>
     </header>
     <div className={styles.previewNotice}><strong>预览不会删除文件</strong><span>自动清理由后台执行；文件位置或指纹异常时停止删除并记录失败。</span></div>

@@ -117,7 +117,7 @@ public class AiEvidenceService {
         if(c.sampleIds()!=null) for(UUID id:new HashSet<>(c.sampleIds())) {
             one("select id from ai_evidence_sample where tenant_id=:tenant and id=:id and position_id=:position",
                     params().addValue("id",id).addValue("position",request.positionId()));
-            sampleContent(id); // A reference must still be readable; never silently revive expired bytes.
+            sampleContent(id); // Permanent retention does not revive deleted or missing sample bytes.
         }
     }
     @Transactional

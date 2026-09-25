@@ -4,6 +4,7 @@ import cn.sifangguan.hotelaios.PlatformAdminTestFixture;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.security.EffectiveIdentityService;
 import cn.sifangguan.hotelaios.workdata.AttachmentMalwareScanner;
+import cn.sifangguan.hotelaios.workdata.AttachmentService;
 import com.fasterxml.jackson.databind.*;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.*;
@@ -47,6 +48,7 @@ class AiEvidenceIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired ObjectMapper json;
     @Autowired AiEvidenceService service;
+    @Autowired AttachmentService files;
     @Autowired EffectiveIdentityService identities;
     @MockitoBean AiVisionGateway gateway;
     @MockitoBean AttachmentMalwareScanner scanner;
@@ -71,6 +73,7 @@ class AiEvidenceIntegrationTest {
         for(String table:List.of("ai_evidence_event","ai_evidence_check","ai_evidence_photo","ai_evidence_sample","ai_evidence_rule"))
             jdbc.update("delete from "+table);
         PlatformAdminTestFixture.ensure(jdbc,TENANT,CEO);
+        jdbc.update("update data_retention_policy set image_retention_days=5,image_cleanup_enabled=false where tenant_id=?::uuid",TENANT);
         when(gateway.ready()).thenReturn(false);
         when(scanner.scan(any())).thenReturn("CLEAN");
         when(scanner.canDownload(anyString())).thenReturn(true);
@@ -116,6 +119,17 @@ class AiEvidenceIntegrationTest {
     String upload(UUID record) throws Exception {
         return response(as(multipart("/api/v1/ai-evidence/records/{id}/photos",record)
             .file(new MockMultipartFile("file","synthetic.png","image/png",photo())).param("captureSource","CAMERA"),MANAGER),200).path("id").asText();
+    }
+    String sample() throws Exception {
+        return response(as(multipart("/api/v1/ai-evidence/samples")
+            .file(new MockMultipartFile("file","sample.png","image/png",photo()))
+            .param("positionId",position()).param("kind","PASS"),PlatformAdminTestFixture.ACCOUNT_ID),200).path("id").asText();
+    }
+    String sampleKey(String id) {
+        return jdbc.queryForObject("select object_key from ai_evidence_sample where id=?::uuid",String.class,id);
+    }
+    void ageImage(String id,int days) {
+        jdbc.update("update image_retention_object set uploaded_at=now()-?*interval '24 hours' where source_id=?::uuid",days,id);
     }
     JsonNode request(UUID record,String photo,String previous,int expected) throws Exception {
         return response(as(post("/api/v1/ai-evidence/records/{id}/checks",record),MANAGER).contentType(MediaType.APPLICATION_JSON)
@@ -242,6 +256,54 @@ class AiEvidenceIntegrationTest {
             .param("positionId",position()).param("kind","PASS"),PlatformAdminTestFixture.ACCOUNT_ID),200);
         mvc.perform(as(get("/api/v1/ai-evidence/samples/{id}/content",sample.path("id").asText()),MANAGER)).andExpect(status().isForbidden());
         mvc.perform(as(get("/api/v1/ai-evidence/samples/{id}/content",sample.path("id").asText()),PlatformAdminTestFixture.ACCOUNT_ID)).andExpect(status().isOk());
+    }
+    @Test void oldSamplesRemainReadableAndUnlinkingPreservesOriginalAndHistoricalRule() throws Exception {
+        String sample=sample();
+        var config=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(config());
+        config.putArray("sampleIds").add(sample);
+        var historical=rule(true,config.toString());
+        // Both pre-existing and newly uploaded samples use their registered source type, not an upload-age bypass.
+        ageImage(sample,3650);
+        jdbc.update("update data_retention_policy set image_cleanup_enabled=true where tenant_id=?::uuid",TENANT);
+        mvc.perform(as(get("/api/v1/ai-evidence/samples/{id}/content",sample),PlatformAdminTestFixture.ACCOUNT_ID)).andExpect(status().isOk());
+        mvc.perform(as(get("/api/v1/ai-evidence/samples/{id}/content",sample),MANAGER)).andExpect(status().isForbidden());
+        assertThat(rule(false,config.toString()).path("configuration").path("sampleIds").get(0).asText()).isEqualTo(sample);
+        var unlinked=rule(true);
+        assertThat(unlinked.path("configuration").path("sampleIds")).isEmpty();
+        assertThat(json.readTree(jdbc.queryForObject("select configuration::text from ai_evidence_rule where id=?::uuid",String.class,
+            historical.path("id").asText())).path("sampleIds").get(0).asText()).isEqualTo(sample);
+        assertThat(Files.exists(PHOTOS.resolve(sampleKey(sample)))).isTrue();
+        mvc.perform(as(get("/api/v1/ai-evidence/samples/{id}/content",sample),PlatformAdminTestFixture.ACCOUNT_ID)).andExpect(status().isOk());
+    }
+    @Test void permanentSampleIsUsableByModelButExpiredEmployeeEvidenceIsStillBlocked() throws Exception {
+        String sample=sample();ageImage(sample,3650);
+        var config=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(config());config.putArray("sampleIds").add(sample);
+        rule(true,config.toString());when(gateway.ready()).thenReturn(true);
+        jdbc.update("update data_retention_policy set image_cleanup_enabled=true where tenant_id=?::uuid",TENANT);
+        UUID record=record(HOTEL);String photo=upload(record);var check=request(record,photo,null,200);
+        principal();var job=service.claim(UUID.fromString(check.path("id").asText()));
+        assertThat(service.images(job)).hasSize(2); // Builds in-memory inputs only, never calls the external model.
+        ageImage(photo,6);
+        mvc.perform(as(get("/api/v1/ai-evidence/photos/{id}/content",photo),MANAGER)).andExpect(status().isGone());
+        principal();assertThatThrownBy(()->service.images(job)).isInstanceOf(RuntimeException.class);
+        verify(gateway,never()).inspect(any(),any());
+    }
+    @Test void committedSampleCannotBeDeletedButUncommittedUploadCleanupStillWorks() throws Exception {
+        String sample=sample(),key=sampleKey(sample);
+        TenantContext.set(identities.resolve(UUID.fromString(TENANT),UUID.fromString(PlatformAdminTestFixture.ACCOUNT_ID),UUID.randomUUID(),null));
+        assertThatThrownBy(()->files.removeStoredObject(key)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("规范样例照片长期保留");
+        assertThat(Files.exists(PHOTOS.resolve(key))).isTrue();
+        String orphanKey=TENANT+"/ai-evidence-samples/"+UUID.randomUUID();
+        files.storeObject(orphanKey,new MockMultipartFile("file","uncommitted.png","image/png",photo()));
+        files.removeStoredObject(orphanKey);
+        assertThat(Files.exists(PHOTOS.resolve(orphanKey))).isFalse();
+    }
+    @Test void permanentPolicyDoesNotReviveDeletedOrMissingSampleBytes() throws Exception {
+        String deleted=sample();
+        jdbc.update("update image_retention_object set state='DELETED',deleted_at=now() where source_id=?::uuid",deleted);
+        mvc.perform(as(get("/api/v1/ai-evidence/samples/{id}/content",deleted),PlatformAdminTestFixture.ACCOUNT_ID)).andExpect(status().isGone());
+        String missing=sample();Files.delete(PHOTOS.resolve(sampleKey(missing)));
+        mvc.perform(as(get("/api/v1/ai-evidence/samples/{id}/content",missing),PlatformAdminTestFixture.ACCOUNT_ID)).andExpect(status().isBadRequest());
     }
     @Test void workerStoresValidatedSuggestionsDeduplicatesClaimsAndCapsCalls() throws Exception {
         rule(true);when(gateway.ready()).thenReturn(true);

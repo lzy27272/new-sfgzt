@@ -83,6 +83,35 @@ class ImageRetentionWorkerIntegrationTest {
         assertThat(worker.processTenant(TENANT)).isZero();
         assertThat(Files.exists(file(old))).isTrue();
     }
+    @Test void permanentSamplesNeverExpireOrEnterCleanupEvenAfterAnOldFailedAttempt() throws Exception {
+        UUID sample=image(3650,false), failedSample=image(3650,false), ordinary=image(6,false);
+        jdbc.update("update image_retention_object set source_type='ai_evidence_sample' where id in (?,?)",sample,failedSample);
+        jdbc.update("update image_retention_object set state='DELETE_FAILED',last_error='UNSAFE_OBJECT_NAMESPACE' where id=?",failedSample);
+        jdbc.update("update data_retention_policy set image_retention_days=5 where tenant_id=?",TENANT);
+        mvc.perform(get("/api/v1/admin/data-retention-preview").header("X-Tenant-Id",TENANT)
+                .header("X-Actor-Id",PlatformAdminTestFixture.ACCOUNT_ID))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.candidateCount").value(1));
+        mvc.perform(get("/api/v1/admin/image-retention").param("search",sample.toString())
+                .header("X-Tenant-Id",TENANT).header("X-Actor-Id",PlatformAdminTestFixture.ACCOUNT_ID))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.items[0].permanent_retention").value(true))
+                .andExpect(jsonPath("$.items[0].expires_at").doesNotExist());
+        assertThat(worker.processTenant(TENANT)).isEqualTo(1);
+        assertThat(state(ordinary)).isEqualTo("DELETED");
+        assertThat(Files.exists(file(sample))).isTrue();assertThat(Files.exists(file(failedSample))).isTrue();
+        assertThat(state(sample)).isEqualTo("AVAILABLE");assertThat(state(failedSample)).isEqualTo("DELETE_FAILED");
+        assertThat(worker.processTenant(TENANT)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from audit_log where resource_id in (?,?) and action='IMAGE_RETENTION_DELETED'",
+                Integer.class,sample,failedSample)).isZero();
+    }
+    @Test void samplePermanentRetentionCannotBeReleasedThroughTheOrdinaryHoldApi() throws Exception {
+        UUID sample=image(40,false);
+        jdbc.update("update image_retention_object set source_type='ai_evidence_sample' where id=?",sample);
+        mvc.perform(put("/api/v1/admin/image-retention/"+sample+"/hold").header("X-Tenant-Id",TENANT)
+                .header("X-Actor-Id",PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"enabled\":false,\"reason\":\"尝试解除\",\"expectedVersion\":0}"))
+                .andExpect(status().isConflict());
+        assertThat(worker.processTenant(TENANT)).isZero();assertThat(Files.exists(file(sample))).isTrue();
+    }
     @Test void corruptOrMissingFilesAreHandledWithoutDeletingOtherObjects() throws Exception {
         UUID corrupt=image(40,false), missing=image(40,false);
         Files.writeString(file(corrupt),"changed"); Files.delete(file(missing));

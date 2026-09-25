@@ -382,9 +382,12 @@ public class AttachmentService {
             return;
         }
         var retention = jdbc.queryForList("""
-                select legal_hold from image_retention_object
+                select legal_hold,source_type from image_retention_object
                 where tenant_id=:tenantId and object_key=:key for update
                 """, base(accessPolicy.principal()).addValue("key", objectKey));
+        if (retention.stream().anyMatch(row -> "ai_evidence_sample".equals(row.get("source_type")))) {
+            throw new IllegalArgumentException("规范样例照片长期保留，不允许删除文件；可移除规则中的关联");
+        }
         if (retention.stream().anyMatch(row -> Boolean.TRUE.equals(row.get("legal_hold")))) {
             throw new IllegalArgumentException("重要证据已标记保留，请先由管理员解除保留");
         }
@@ -519,12 +522,17 @@ public class AttachmentService {
     private void requireImageReadable(String objectKey, String mediaType) {
         if (!mediaType.startsWith("image/")) return;
         var states = jdbc.queryForList("""
-                select o.state, (p.image_cleanup_enabled and not o.legal_hold
+                select o.state,o.source_type, (o.source_type <> 'ai_evidence_sample' and p.image_cleanup_enabled and not o.legal_hold
                     and o.uploaded_at <= now() - p.image_retention_days * interval '24 hours') as expired
                 from image_retention_object o join data_retention_policy p using(tenant_id)
                 where o.tenant_id=:tenantId and o.object_key=:key
                 """, base(accessPolicy.principal()).addValue("key",objectKey));
         if (states.isEmpty()) throw new IllegalArgumentException("图片留存状态尚未登记，暂不可下载");
+        if ("DELETED".equals(states.getFirst().get("state"))
+                && "ai_evidence_sample".equals(states.getFirst().get("source_type"))) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.GONE,"样例原文件已被清理，无法自动恢复，请重新上传");
+        }
         if ("DELETED".equals(states.getFirst().get("state")) || Boolean.TRUE.equals(states.getFirst().get("expired"))) {
             throw new org.springframework.web.server.ResponseStatusException(
                     org.springframework.http.HttpStatus.GONE,"图片已超过保存期限，工作记录与经营数据仍然保留");

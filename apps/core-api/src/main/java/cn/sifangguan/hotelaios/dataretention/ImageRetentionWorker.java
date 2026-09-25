@@ -61,6 +61,7 @@ public class ImageRetentionWorker {
             return jdbc.queryForList("""
                     select o.id from image_retention_object o join data_retention_policy p using(tenant_id)
                     where o.tenant_id=:tenant and p.image_cleanup_enabled and not o.legal_hold
+                      and o.source_type <> 'ai_evidence_sample'
                       and o.state <> 'DELETED'
                       and o.uploaded_at <= now() - p.image_retention_days * interval '24 hours'
                       and (o.last_attempt_at is null or o.last_attempt_at < now() - interval '30 minutes')
@@ -78,7 +79,8 @@ public class ImageRetentionWorker {
         context.apply(tenantId);
         var params = new MapSqlParameterSource("tenant", tenantId).addValue("id", id);
         // The policy lock serializes a concurrent OFF switch; the object lock
-        // serializes important-evidence marking. One small local file per tx.
+        // serializes important-evidence marking. Recheck permanent samples here
+        // as well as in candidate selection. One small local file per tx.
         Boolean active = jdbc.queryForObject("select image_cleanup_enabled from data_retention_policy "
                 + "where tenant_id=:tenant for share", params, Boolean.class);
         if (!Boolean.TRUE.equals(active)) return false;
@@ -86,6 +88,7 @@ public class ImageRetentionWorker {
                 select o.object_key,o.size_bytes,o.sha256 from image_retention_object o
                 join data_retention_policy p using(tenant_id)
                 where o.tenant_id=:tenant and o.id=:id and not o.legal_hold and o.state <> 'DELETED'
+                  and o.source_type <> 'ai_evidence_sample'
                   and o.uploaded_at <= now() - p.image_retention_days * interval '24 hours'
                 for update of o skip locked
                 """, params);

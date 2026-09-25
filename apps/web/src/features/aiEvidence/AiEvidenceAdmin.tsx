@@ -118,7 +118,7 @@ function RuleEditor({ identity, onClose, position, setPosition, options }: Props
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17V3m-5 5 5-5 5 5M5 17v4h14v-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
           <strong>上传{kind === 'PASS' ? '合格' : '不合格'}样例</strong><small>使用门店已确认的规范样例</small><input aria-label={`上传${kind === 'PASS' ? '合格' : '不合格'}样例`} type="file" accept="image/jpeg,image/png" disabled={!position || disabled || config.sampleIds.length >= 6} onChange={e => { void sample(kind, e.target.files?.[0]); e.currentTarget.value = '' }} /></label>)}</div>
           {!!config.sampleIds.length && <div className="ai-evidence-grid">{config.sampleIds.map((id, index) => <div key={id}><EvidencePhoto identity={identity} item={{ id, source: 'SAMPLE', media_type: 'image/jpeg', original_name: `规范样例 ${index + 1}` }} /><button type="button" className="secondary" disabled={disabled} onClick={() => update(current => ({ ...current, sampleIds: current.sampleIds.filter(value => value !== id) }))}>移除样例 {index + 1} 关联</button></div>)}</div>}
-          <p className="ai-warning">样例用于对照规范，不用于识别人脸；沿用照片留存策略。到期后需重新提供。</p>
+          <p className="ai-warning">规范样例照片长期保留，不会过期或自动删除。移除关联只取消当前规则的引用，不删除原照片和历史版本；样例仅用于对照规范，不用于识别人脸。</p>
         </section>
         {active && statusKnown && <section className="ai-card ai-next-steps"><h2>下一步</h2><ol><li>原提交人在工作详情选择照片发起检查</li><li>主管在“仪容仪表复核”查看建议</li></ol></section>}
       </div>
@@ -131,7 +131,7 @@ function RuleEditor({ identity, onClose, position, setPosition, options }: Props
           {!options.loading && !options.error && !options.data.providerReady && <p className="ai-warning">模型服务尚未接通；可以保存规则，但暂不能发送照片检查，请人工复核。</p>}
         </section>
         <section className="ai-card"><h2>识别边界</h2><dl className="ai-definitions"><div><dt>疑似不符合</dt><dd>主管核实</dd></div><div><dt>无法判断</dt><dd>补拍或人工复核</dd></div><div><dt>服务异常</dt><dd>明确提示，可重试</dd></div></dl><p className="ai-warning">妆容看不清，不等于未化妆。</p></section>
-        <section className="ai-card"><h2>试点与留存</h2><ul className="ai-retention-list"><li>仅限后台批准的试点门店：{options.data.hotels.map(hotel => hotel.name).join('、') || '待读取'}</li><li>试点门店合计每天最多 {options.data.dailyRequestLimit || '—'} 次（含重试）</li><li>普通照片保留 5 天，沿用后台留存策略</li><li>不改变正式工作状态或 KPI。</li></ul></section>
+        <section className="ai-card"><h2>试点与留存</h2><ul className="ai-retention-list"><li>仅限后台批准的试点门店：{options.data.hotels.map(hotel => hotel.name).join('、') || '待读取'}</li><li>试点门店合计每天最多 {options.data.dailyRequestLimit || '—'} 次（含重试）</li><li>规范样例长期保留，不过期、不自动删除；员工工作照片仍按后台策略保留 5 天</li><li>不改变正式工作状态或 KPI。</li></ul></section>
         {!!versions.data.length && <section className="ai-card"><details><summary>规则版本</summary><div className="ai-version-list">{versions.data.map(rule => <span className="ai-pill" key={rule.id}>V{rule.version_no} · {rule.state === 'SHADOW' ? '已启用' : rule.state === 'DRAFT' ? '草稿' : '已停用'}</span>)}</div></details></section>}
         </div>
       </aside>

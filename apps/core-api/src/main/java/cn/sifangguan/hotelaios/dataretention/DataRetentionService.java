@@ -125,6 +125,7 @@ public class DataRetentionService {
                 where attachment_item.tenant_id = :tenantId
                   and attachment_item.state <> 'DELETED'
                   and attachment_item.legal_hold = false
+                  and attachment_item.source_type <> 'ai_evidence_sample'
                   and attachment_item.uploaded_at <= now() - policy.image_retention_days * interval '24 hours'
                 """, base(principal), (rs, rowNum) -> new DataRetentionModels.CleanupPreview(
                 rs.getLong("candidate_count"),
