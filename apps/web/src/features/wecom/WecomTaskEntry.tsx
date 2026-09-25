@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { establishFederatedSession } from '../../api/client'
 import { product } from '../../product'
+import { SelfRegistrationButton } from './SelfRegistrationButton'
 import { exchangeWecomCode } from './api'
 import { buildAppHashLocation, safeTaskDeepLink, wecomLoginRestartPath, type WecomTaskEntry } from './entryRoute'
 
@@ -39,6 +40,7 @@ export function WecomTaskEntryPage({ entry, onAuthenticated, onCancel }: Props) 
         <div className="inline-error">{error}</div>
         <a className="primary wecom-entry-action" href={wecomLoginRestartPath()}>重新通过企业微信验证</a>
         <button className="secondary wecom-entry-action" type="button" onClick={onCancel}>返回中台登录</button>
+        <SelfRegistrationButton />
         <small>请勿转发包含一次性凭证的链接，也不要向任何人提供企业微信验证码。</small>
       </> : <>
         <div className="wecom-entry-progress"><div className="spinner" /><strong>正在建立安全会话</strong><span>请保持页面打开，无需输入中台密码。</span></div>

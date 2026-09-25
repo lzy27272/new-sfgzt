@@ -387,10 +387,15 @@ export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyRep
     exceptionCount: autoSummary.exceptionCount === undefined ? allItems.filter((item) => item.exception).length : number(autoSummary.exceptionCount),
     evidenceCount: currentEvidenceRows.length,
   })
-  const allowedActions = Array.isArray(source.allowedActions)
+  let allowedActions = Array.isArray(source.allowedActions)
     ? source.allowedActions.map(String)
     : derivedActions(identity, summary, currentRevision)
   const blockedActionReasons = row(source.blockedActionReasons) as Record<string, string>
+  const reviewEligibility = row(source.reviewEligibility)
+  if (reviewEligibility.canReview !== true) {
+    allowedActions = allowedActions.filter(action => !['REVIEW_APPROVE', 'REVIEW_REJECT'].includes(action))
+    blockedActionReasons.REVIEW = text(reviewEligibility.reason) || '暂时无法确认审核权限，请刷新重试'
+  }
   if (missingRequiredCount > 0 && !blockedActionReasons.SUBMIT) {
     blockedActionReasons.SUBMIT = `仍有 ${missingRequiredCount} 个必填项未完成`
   }

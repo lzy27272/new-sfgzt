@@ -10,6 +10,7 @@ import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
 import cn.sifangguan.hotelaios.shared.security.WorkVisibilityPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -1680,26 +1681,28 @@ public class WorkDataService {
             return;
         }
 
-        UUID directManagerAssignmentId = jdbc.query("""
-                select manager.id
-                from employee_position_assignment executor
-                join employee_position_assignment manager
-                  on manager.tenant_id = executor.tenant_id
-                 and manager.id = executor.manager_assignment_id
-                where executor.tenant_id = :tenantId
-                  and executor.id = :assignmentId
-                  and manager.status = 'ACTIVE'
-                  and manager.valid_from <= :businessDate
-                  and (manager.valid_to is null or manager.valid_to >= :businessDate)
-                """, base(principal)
-                .addValue("assignmentId", record.assignmentId())
-                .addValue("businessDate", record.businessDate()),
-                rs -> rs.next() ? rs.getObject("id", UUID.class) : null);
-        if (directManagerAssignmentId == null) {
-            throw new AccessDeniedException("当前事项未配置有效的直属主管任职，暂不能复核");
+        if (!new WorkReviewPolicy(jdbc).canManage(principal, record.assignmentId(), record.targetOrgUnitId())) {
+            throw new AccessDeniedException("当前任职不是该员工的有效主管或授权门店管理者，请核对任职和负责门店配置");
         }
-        if (!principal.assignmentIds().contains(directManagerAssignmentId)) {
-            throw new AccessDeniedException("仅该事项执行人的直属主管可以复核");
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> reviewEligibility(UUID recordId) {
+        TenantPrincipal principal = prepare();
+        accessPolicy.requireAnyPermission("work-record.read", "work-record.review", "work-record.team-read", "manager-cycle.review");
+        workVisibility.requireRecord(principal, recordId);
+        RecordAccess record = recordAccess(principal, recordId);
+        if (!"SUBMITTED".equals(record.status())) return Map.of("canReview", false, "reason", "仅已提交、待复核的记录可以审核");
+        if (principal.actorId().equals(record.submittedByAccountId())) return Map.of("canReview", false, "reason", "不能审核自己提交的工作");
+        try {
+            accessPolicy.requireOrgScope(record.targetOrgUnitId());
+            accessPolicy.requireAnyPermission("work-record.review", "manager-cycle.review");
+            if (!isManagerCycle(principal, record.workPackageItemId())) accessPolicy.requirePermission("work-record.review");
+            if (usageService.hasUsage(recordId)) usageService.requireReviewer(recordId);
+            else requireConfiguredReviewer(principal, record);
+            return Map.of("canReview", true, "reason", "");
+        } catch (AccessDeniedException denied) {
+            return Map.of("canReview", false, "reason", denied.getMessage());
         }
     }
 
@@ -1761,65 +1764,23 @@ public class WorkDataService {
         if (context == null || !context.directManagerReviewConfigured()) {
             return;
         }
-        if (context.managerAssignmentId() == null) {
-            recordMissingSupervisorAudit(recordId, "DIRECT_MANAGER_ASSIGNMENT_UNRESOLVED");
-            return;
+        // Review authority may come from the hotel portfolio instead of the legacy direct link.
+        // Use the write policy and live role permissions for every recipient.
+        var recipients = supervisors.ordinaryReviewers(principal, "work-record.review", record.assignmentId(), record.targetOrgUnitId());
+        for (var recipient : recipients) {
+            jdbc.update("""
+                    insert into notification(tenant_id,recipient_account_id,recipient_assignment_id,notification_type,
+                      title,content,source_type,source_id,idempotency_key)
+                    values(:tenantId,:account,:assignment,'WORK_RECORD_REVIEW_PENDING','工作记录待复核',
+                      :content,'WORK_RECORD',:record,:key)
+                    on conflict(tenant_id,recipient_account_id,idempotency_key) do nothing
+                    """, base(principal).addValue("account", recipient.accountId()).addValue("assignment", recipient.assignmentId())
+                    .addValue("content", context.businessDate() + " 的“" + context.itemName() + "”已提交，请及时审核。")
+                    .addValue("record", recordId).addValue("key", "work-record:review-pending:" + recordId));
         }
-        UUID notificationId = UUID.randomUUID();
-        String idempotencyKey = "work-record:review-pending:" + recordId;
-        int inserted = jdbc.update("""
-                insert into notification
-                    (id, tenant_id, recipient_account_id, recipient_assignment_id,
-                     notification_type, title, content, source_type, source_id, idempotency_key)
-                select :id, :tenantId, manager_employee.account_id, manager.id,
-                       'WORK_RECORD_REVIEW_PENDING', '工作记录待复核', :content,
-                       'WORK_RECORD', :recordId, :idempotencyKey
-                from employee_position_assignment manager
-                join employee manager_employee
-                  on manager_employee.tenant_id = manager.tenant_id
-                 and manager_employee.id = manager.employee_id
-                where manager.tenant_id = :tenantId and manager.id = :managerAssignmentId
-                  and manager.status = 'ACTIVE'
-                  and manager.valid_from <= :businessDate
-                  and (manager.valid_to is null or manager.valid_to >= :businessDate)
-                  and manager_employee.employment_status = 'ACTIVE'
-                  and manager_employee.account_id is not null
-                on conflict (tenant_id, recipient_account_id, idempotency_key) do nothing
-                """, base(principal)
-                .addValue("id", notificationId)
-                .addValue("recordId", recordId)
-                .addValue("managerAssignmentId", context.managerAssignmentId())
-                .addValue("businessDate", context.businessDate())
-                .addValue("content", context.businessDate() + " 的“" + context.itemName()
-                        + "”已提交，请及时审核。")
-                .addValue("idempotencyKey", idempotencyKey));
-        if (inserted == 1) {
-            auditWriter.record(
-                    "NOTIFICATION_CREATED",
-                    "NOTIFICATION",
-                    notificationId,
-                    "{\"type\":\"WORK_RECORD_REVIEW_PENDING\"}");
-        } else if (!reviewNotificationExists(principal, context.managerAssignmentId(), idempotencyKey)) {
-            // Reporting lines can change between resolution and insert. An insert-select makes
-            // that race a no-op instead of an exception that could roll back the submission.
-            recordMissingSupervisorAudit(recordId, "DIRECT_MANAGER_RECIPIENT_UNAVAILABLE");
-        }
+        if (recipients.isEmpty()) recordMissingSupervisorAudit(recordId, "AUTHORIZED_REVIEWER_UNRESOLVED");
     }
 
-    private boolean reviewNotificationExists(
-            TenantPrincipal principal,
-            UUID managerAssignmentId,
-            String idempotencyKey
-    ) {
-        Integer count = jdbc.queryForObject("""
-                select count(*) from notification
-                where tenant_id = :tenantId and recipient_assignment_id = :managerAssignmentId
-                  and idempotency_key = :idempotencyKey
-                """, base(principal)
-                .addValue("managerAssignmentId", managerAssignmentId)
-                .addValue("idempotencyKey", idempotencyKey), Integer.class);
-        return count != null && count > 0;
-    }
 
     private void recordMissingSupervisorAudit(UUID recordId, String reason) {
         auditWriter.record(

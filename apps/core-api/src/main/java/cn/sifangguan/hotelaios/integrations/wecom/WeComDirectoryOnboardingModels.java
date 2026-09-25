@@ -68,7 +68,9 @@ public final class WeComDirectoryOnboardingModels {
             boolean requiresAccountRegistration,
             String invitationSource,
             List<HotelOption> hotels,
-            long rowVersion
+            long rowVersion,
+            String requestedOrganizationName,
+            String requestedPositionName
     ) { }
 
     public record HotelOption(

@@ -99,6 +99,7 @@ import { WecomTaskEntryPage } from './features/wecom/WecomTaskEntry'
 import { buildAppHashLocation, consumeWecomSessionBootstrap, consumeWecomTaskEntry } from './features/wecom/entryRoute'
 import { consumeWecomBindingEntry } from './features/wecom/bindingEntryRoute'
 import { WecomBindingEnrollmentEntry } from './features/wecom/WecomBindingEnrollmentEntry'
+import { SelfRegistrationButton } from './features/wecom/SelfRegistrationButton'
 import { buildWeComSilentAuthUrl, isWeComBrowser } from './features/wecom/silentAuth'
 import {
   buildResumableDraftKey,
@@ -1763,6 +1764,7 @@ function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => v
           {error && <div id="login-error" className="inline-error" role="alert" aria-live="polite">{error}</div>}
           <button className="primary login-auth-submit" disabled={busy || !loginName.trim() || !password}>{busy ? '正在验证…' : '登录中台'}</button>
           {onWecomLogin && <button className="secondary" type="button" disabled={busy} onClick={onWecomLogin}>改用企业微信登录</button>}
+          <SelfRegistrationButton />
         </form>
       </section>
     </div>
@@ -1794,13 +1796,6 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
     </div>
     <IcpFooter recordNumber={icpRecordNumber} />
   </main>
-}
-
-function WeComSilentLoginRedirect({ onReturnToLogin }: { onReturnToLogin: () => void }) {
-  useEffect(() => {
-    window.location.replace(buildWeComSilentAuthUrl())
-  }, [])
-  return <SessionBootstrapPage error={undefined} onRetry={() => window.location.replace(buildWeComSilentAuthUrl())} onReturnToLogin={onReturnToLogin} />
 }
 
 function ChangePasswordDialog({ identity, onClose, onChanged }: { identity: RoleContext; onClose: () => void; onChanged: () => void }) {
@@ -2179,7 +2174,6 @@ export default function App() {
     entry={wecomBindingEntry}
     onReturn={cancelWecomTaskEntry}
   />
-  if (!authenticated && !manualLogin && authMode === 'bearer' && isWeComBrowser()) return <WeComSilentLoginRedirect onReturnToLogin={cancelWecomTaskEntry} />
   if (!authenticated) return <LoginPage onAuthenticated={() => {
     window.history.replaceState(null, '', buildAppHashLocation('#/workbench', import.meta.env.BASE_URL))
     setAuthenticated(true)

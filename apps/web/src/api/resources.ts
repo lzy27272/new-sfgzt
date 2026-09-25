@@ -575,11 +575,17 @@ export async function loadTeamWorkCase(identity: ApiIdentity, initial: WorkExpec
     const recordId = selectTeamRecordId(expectation, selectedRecordId)
     const record = recordId ? normalizeWorkRecord(object(await apiRequest<unknown>(`/work-data/records/${recordId}`, identity))) : undefined
     if (selectedRecordId && record?.workExpectationId !== expectation.id) throw new Error('所选记录不属于此工作，请刷新后重试')
+    let reviewEligibility: TeamWorkCase['reviewEligibility']
     if (record) {
-      const attachments = await apiRequest<unknown>(`/work-data/records/${record.id}/attachments`, identity).catch(() => record.attachments)
+      const [attachments, eligibility] = await Promise.all([
+        apiRequest<unknown>(`/work-data/records/${record.id}/attachments`, identity).catch(() => record.attachments),
+        apiRequest<NonNullable<TeamWorkCase['reviewEligibility']>>(`/work-data/records/${record.id}/review-eligibility`, identity)
+          .catch(() => ({ canReview: false, reason: '暂时无法确认审核权限，请刷新重试' })),
+      ])
       record.attachments = asList<JsonObject>(attachments).map(normalizeAttachment)
+      reviewEligibility = eligibility
     }
-    return { expectation, record }
+    return { expectation, record, reviewEligibility }
   }, { expectation: initial, record: demoRecord(initial) })
 }
 

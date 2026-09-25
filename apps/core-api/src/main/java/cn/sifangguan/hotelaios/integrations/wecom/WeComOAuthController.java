@@ -48,7 +48,11 @@ public class WeComOAuthController {
             @CookieValue(name = BINDING_VERIFIER_COOKIE, required = false) String bindingBrowserVerifier
     ) {
         if (isBlank(code) && isBlank(state)) {
-            return startResponse(service.start("#/workbench"), true);
+            return noStore(ResponseEntity.status(HttpStatus.FOUND))
+                    .header(HttpHeaders.LOCATION, service.frontendEntryLocation().toString())
+                    .header(HttpHeaders.SET_COOKIE, clearVerifierCookie(VERIFIER_COOKIE).toString())
+                    .header(HttpHeaders.SET_COOKIE, clearVerifierCookie(BINDING_VERIFIER_COOKIE).toString())
+                    .build();
         }
         if (isBlank(code) || isBlank(state)) {
             return unauthorizedResponse();

@@ -2,6 +2,7 @@ package cn.sifangguan.hotelaios.dailyreports;
 
 import cn.sifangguan.hotelaios.dailyreporttemplates.DailyReportTemplateService;
 import cn.sifangguan.hotelaios.notifications.NotificationService;
+import cn.sifangguan.hotelaios.notifications.StoreManagerSupervisorResolver;
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
@@ -44,6 +45,7 @@ public class DailyReportDispatchTransactionService {
     private final AuditWriter auditWriter;
     private final ObjectMapper objectMapper;
     private final DailyReportRoutineProjectionService routineProjectionService;
+    private final StoreManagerSupervisorResolver supervisors;
 
     public DailyReportDispatchTransactionService(
             NamedParameterJdbcTemplate jdbc,
@@ -55,7 +57,8 @@ public class DailyReportDispatchTransactionService {
             BusinessEventPublisher eventPublisher,
             AuditWriter auditWriter,
             ObjectMapper objectMapper,
-            DailyReportRoutineProjectionService routineProjectionService
+            DailyReportRoutineProjectionService routineProjectionService,
+            StoreManagerSupervisorResolver supervisors
     ) {
         this.jdbc = jdbc;
         this.databaseContext = databaseContext;
@@ -67,6 +70,7 @@ public class DailyReportDispatchTransactionService {
         this.auditWriter = auditWriter;
         this.objectMapper = objectMapper;
         this.routineProjectionService = routineProjectionService;
+        this.supervisors = supervisors;
     }
 
     @Transactional(readOnly = true)
@@ -396,115 +400,32 @@ public class DailyReportDispatchTransactionService {
     }
 
     private void notifyManagerOfPendingReviews(
-            TenantPrincipal principal,
-            UUID reportId,
-            PolicyAssignment policy,
-            LocalDate businessDate
+            TenantPrincipal principal, UUID reportId, PolicyAssignment policy, LocalDate businessDate
     ) {
-        Integer pendingReviews = jdbc.queryForObject("""
-                select count(*)
-                from daily_report report
-                join daily_report_item_result result
-                  on result.tenant_id = report.tenant_id
-                 and result.revision_id = report.current_revision_id
-                 and result.result_status = 'PENDING'
-                 and result.system_prefilled
-                 and result.source_summary ->> 'sourceType' in ('WORK_RECORD', 'WORK_RECORD_COLLECTION')
-                join daily_report_template_item template_item
-                  on template_item.tenant_id = result.tenant_id
-                 and template_item.id = result.template_item_id
-                where report.tenant_id = :tenantId and report.id = :reportId
-                  and exists (
-                    select 1
-                    from work_package_item_responsibility responsibility
-                    where responsibility.tenant_id = template_item.tenant_id
-                      and responsibility.work_package_item_id = template_item.work_package_item_id
-                      and responsibility.participant_type in ('REVIEWER', 'ACCEPTOR')
-                      and responsibility.resolver_type = 'DIRECT_MANAGER_ASSIGNMENT'
-                  )
-                """, base(principal).addValue("reportId", reportId), Integer.class);
-        if (pendingReviews == null || pendingReviews == 0) {
-            return;
+        Integer pending = jdbc.queryForObject("""
+                select count(*) from work_record record
+                where record.tenant_id=:tenantId and record.position_assignment_id=:assignment
+                  and record.business_date=:day and record.status='SUBMITTED'
+                  and exists (select 1 from work_package_item_responsibility responsibility
+                    where responsibility.tenant_id=record.tenant_id and responsibility.work_package_item_id=record.work_package_item_id
+                      and responsibility.participant_type in ('REVIEWER','ACCEPTOR') and responsibility.resolver_type='DIRECT_MANAGER_ASSIGNMENT')
+                  and not exists (select 1 from store_work_usage usage
+                    where usage.tenant_id=record.tenant_id and usage.work_record_id=record.id)
+                """, base(principal).addValue("assignment",policy.positionAssignmentId()).addValue("day",businessDate), Integer.class);
+        if (pending == null || pending == 0) return;
+        var recipients = supervisors.ordinaryReviewers(principal, "work-record.review", policy.positionAssignmentId(), policy.orgUnitId());
+        if (recipients.isEmpty()) recordPendingReviewReminderSkippedOnce(principal,reportId,"AUTHORIZED_REVIEWER_UNRESOLVED");
+        for (var recipient : recipients) {
+            jdbc.update("""
+                    insert into notification(tenant_id,recipient_account_id,recipient_assignment_id,notification_type,
+                      title,content,source_type,source_id,idempotency_key)
+                    values(:tenantId,:account,:assignment,'DAILY_REPORT_REVIEW_PENDING','当日工作待复核',
+                      :content,'DAILY_REPORT',:report,:key)
+                    on conflict(tenant_id,recipient_account_id,idempotency_key) do nothing
+                    """,base(principal).addValue("account",recipient.accountId()).addValue("assignment",recipient.assignmentId())
+                    .addValue("content",businessDate+" 共有 "+pending+" 项普通工作待复核，请查看日报来源记录。")
+                    .addValue("report",reportId).addValue("key","daily-report:review-pending:"+reportId+":"+pending));
         }
-        UUID managerAssignmentId = jdbc.query("""
-                select manager.id
-                from employee_position_assignment executor
-                join employee_position_assignment manager
-                  on manager.tenant_id = executor.tenant_id
-                 and manager.id = executor.manager_assignment_id
-                join employee manager_employee
-                  on manager_employee.tenant_id = manager.tenant_id
-                 and manager_employee.id = manager.employee_id
-                where executor.tenant_id = :tenantId and executor.id = :assignmentId
-                  and manager.status = 'ACTIVE'
-                  and manager.valid_from <= :businessDate
-                  and (manager.valid_to is null or manager.valid_to >= :businessDate)
-                  and manager_employee.employment_status = 'ACTIVE'
-                  and manager_employee.account_id is not null
-                limit 1
-                """, base(principal)
-                .addValue("assignmentId", policy.positionAssignmentId())
-                .addValue("businessDate", businessDate),
-                rs -> rs.next() ? rs.getObject("id", UUID.class) : null);
-        if (managerAssignmentId == null) {
-            recordPendingReviewReminderSkippedOnce(
-                    principal, reportId, "DIRECT_MANAGER_ASSIGNMENT_UNRESOLVED");
-            return;
-        }
-        UUID notificationId = UUID.randomUUID();
-        String idempotencyKey = "daily-report:review-pending:" + reportId + ":" + pendingReviews;
-        int inserted = jdbc.update("""
-                insert into notification
-                    (id, tenant_id, recipient_account_id, recipient_assignment_id,
-                     notification_type, title, content, source_type, source_id, idempotency_key)
-                select :id, :tenantId, manager_employee.account_id, manager.id,
-                       'DAILY_REPORT_REVIEW_PENDING', '当日工作待复核', :content,
-                       'DAILY_REPORT', :reportId, :idempotencyKey
-                from employee_position_assignment manager
-                join employee manager_employee
-                  on manager_employee.tenant_id = manager.tenant_id
-                 and manager_employee.id = manager.employee_id
-                where manager.tenant_id = :tenantId and manager.id = :managerAssignmentId
-                  and manager.status = 'ACTIVE'
-                  and manager.valid_from <= :businessDate
-                  and (manager.valid_to is null or manager.valid_to >= :businessDate)
-                  and manager_employee.employment_status = 'ACTIVE'
-                  and manager_employee.account_id is not null
-                on conflict (tenant_id, recipient_account_id, idempotency_key) do nothing
-                """, base(principal)
-                .addValue("id", notificationId)
-                .addValue("managerAssignmentId", managerAssignmentId)
-                .addValue("businessDate", businessDate)
-                .addValue("content", businessDate + " 共有 " + pendingReviews
-                        + " 项工作已提交待审核，请复核后确认日报汇总。")
-                .addValue("reportId", reportId)
-                .addValue("idempotencyKey", idempotencyKey));
-        if (inserted == 1) {
-            auditWriter.record(
-                    "NOTIFICATION_CREATED",
-                    "NOTIFICATION",
-                    notificationId,
-                    "{\"type\":\"DAILY_REPORT_REVIEW_PENDING\"}");
-        } else if (!pendingReviewNotificationExists(
-                principal, managerAssignmentId, idempotencyKey)) {
-            recordPendingReviewReminderSkippedOnce(
-                    principal, reportId, "DIRECT_MANAGER_RECIPIENT_UNAVAILABLE");
-        }
-    }
-
-    private boolean pendingReviewNotificationExists(
-            TenantPrincipal principal,
-            UUID managerAssignmentId,
-            String idempotencyKey
-    ) {
-        Integer count = jdbc.queryForObject("""
-                select count(*) from notification
-                where tenant_id = :tenantId and recipient_assignment_id = :managerAssignmentId
-                  and idempotency_key = :idempotencyKey
-                """, base(principal)
-                .addValue("managerAssignmentId", managerAssignmentId)
-                .addValue("idempotencyKey", idempotencyKey), Integer.class);
-        return count != null && count > 0;
     }
 
     private void recordPendingReviewReminderSkippedOnce(

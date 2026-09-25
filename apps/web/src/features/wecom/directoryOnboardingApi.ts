@@ -1,4 +1,5 @@
 import { apiBase, apiRequest, ApiError } from '../../api/client'
+import { withRequestDeadline } from '../../api/requestDeadline'
 import type { RoleContext } from '../../domain'
 
 export type DirectoryOnboardingStatus = 'WAITING_PROFILE' | 'PENDING_APPROVAL' | 'CONFLICT' | 'APPROVED' | 'REJECTED' | 'CANCELLED' | 'EXPIRED'
@@ -21,9 +22,11 @@ export type DirectoryOnboardingContext = {
   displayName: string
   loginName?: string
   requiresAccountRegistration: boolean
-  invitationSource?: 'DIRECTORY_EVENT' | 'MANUAL_LINK'
+  invitationSource?: 'DIRECTORY_EVENT' | 'MANUAL_LINK' | 'SELF_SERVICE'
   hotels: DirectoryHotelOption[]
   rowVersion: number
+  requestedOrganizationName?: string
+  requestedPositionName?: string
 }
 export type DirectoryOnboardingSubmitResponse = {
   candidateId: string
@@ -42,7 +45,7 @@ export type DirectoryCandidate = {
   requestedDepartmentName?: string
   requestedPositionId?: string
   requestedPositionName?: string
-  invitationSource?: 'DIRECTORY_EVENT' | 'MANUAL_LINK'
+  invitationSource?: 'DIRECTORY_EVENT' | 'MANUAL_LINK' | 'SELF_SERVICE'
   status: DirectoryOnboardingStatus
   failureCode?: string
   invitationExpiresAt?: string
@@ -105,27 +108,43 @@ export type DirectoryEventRetryResponse = {
 }
 
 async function publicPost<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, {
-    method: 'POST', credentials: 'include',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({ detail: response.statusText })) as Record<string, unknown>
-    throw new ApiError(response.status, String(problem.detail ?? problem.message ?? '企业微信入职处理失败'), problem)
-  }
-  return response.json() as Promise<T>
+  return withRequestDeadline(async (signal) => {
+    const response = await fetch(`${apiBase}${path}`, {
+      method: 'POST', credentials: 'include', signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Correlation-Id': crypto.randomUUID() },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) {
+      const problem = await response.json().catch(() => ({ detail: response.statusText })) as Record<string, unknown>
+      throw new ApiError(response.status, String(problem.detail ?? problem.message ?? '企业微信入职处理失败'), problem)
+    }
+    return response.json() as Promise<T>
+  }, '请求超时，请检查网络后重试；若已提交申请，请重新验证并查询进度，避免重复注册。')
 }
 
 export async function startDirectoryOnboarding(invitationToken: string): Promise<string> {
   const result = await publicPost<{ authorizationUri: string }>('/integrations/wecom/directory-onboarding/start', { invitationToken })
-  const target = new URL(result.authorizationUri)
+  return checkedAuthorizationUri(result.authorizationUri)
+}
+
+export async function startSelfServiceOnboarding(): Promise<string> {
+  const result = await publicPost<{ authorizationUri: string }>('/integrations/wecom/directory-onboarding/self-service/start', {})
+  return checkedAuthorizationUri(result.authorizationUri)
+}
+
+function checkedAuthorizationUri(uri: string): string {
+  const target = new URL(uri)
   if (target.protocol !== 'https:' || target.hostname !== 'open.weixin.qq.com') throw new Error('服务端返回的企业微信授权地址无效，系统已停止跳转。')
   return target.toString()
 }
 
+const enrollmentExchanges = new Map<string, Promise<{ sessionToken: string; expiresAt: string; status: DirectoryOnboardingStatus }>>()
 export function exchangeDirectoryOnboarding(exchangeCode: string) {
-  return publicPost<{ sessionToken: string; expiresAt: string; status: DirectoryOnboardingStatus }>('/integrations/wecom/directory-onboarding/exchange', { exchangeCode })
+  const existing = enrollmentExchanges.get(exchangeCode)
+  if (existing) return existing
+  const request = publicPost<{ sessionToken: string; expiresAt: string; status: DirectoryOnboardingStatus }>('/integrations/wecom/directory-onboarding/exchange', { exchangeCode })
+  enrollmentExchanges.set(exchangeCode, request)
+  return request
 }
 
 export function loadDirectoryOnboardingContext(sessionToken: string) {

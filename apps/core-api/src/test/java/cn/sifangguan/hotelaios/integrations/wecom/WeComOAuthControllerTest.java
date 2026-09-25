@@ -97,26 +97,24 @@ class WeComOAuthControllerTest {
     }
 
     @Test
-    void callbackWithoutProviderParametersStartsSafeWorkbenchOAuth() throws Exception {
+    void callbackWithoutProviderParametersOffersLoginAndRegistrationInsteadOfForcedOAuth() throws Exception {
         WeComOAuthService service = mock(WeComOAuthService.class);
         WeComBindingEnrollmentService enrollmentService = mock(WeComBindingEnrollmentService.class);
-        when(service.start("#/workbench"))
-                .thenReturn(new WeComOAuthService.Start(URI.create("https://open.weixin.qq.com/authorize"),
-                        "fresh-browser-verifier", 600));
+        when(service.frontendEntryLocation()).thenReturn(URI.create("https://www.sfgzt.cn/#/login"));
         MockMvc mvc = MockMvcBuilders.standaloneSetup(new WeComOAuthController(service, enrollmentService)).build();
 
         mvc.perform(get("/api/v1/integrations/wecom/oauth/callback")
                         .cookie(new Cookie(WeComOAuthController.BINDING_VERIFIER_COOKIE, "stale-binding-verifier")))
                 .andExpect(status().isFound())
-                .andExpect(header().string("Location", "https://open.weixin.qq.com/authorize"))
+                .andExpect(header().string("Location", "https://www.sfgzt.cn/#/login"))
                 .andExpect(header().string("Cache-Control", "no-store, private"))
                 .andExpect(header().stringValues("Set-Cookie", hasItem(containsString(
-                        "__Host-wecom_oauth_verifier=fresh-browser-verifier"))))
+                        "__Host-wecom_oauth_verifier=;"))))
                 .andExpect(header().stringValues("Set-Cookie", hasItem(containsString(
                         "__Host-wecom_binding_verifier=;"))))
                 .andExpect(header().stringValues("Set-Cookie", hasItem(containsString("Max-Age=0"))))
                 .andExpect(header().doesNotExist("Content-Disposition"));
-        verify(service).start("#/workbench");
+        verify(service, never()).start(org.mockito.ArgumentMatchers.any());
         verify(service, never()).callback(org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         verify(enrollmentService, never()).callback(org.mockito.ArgumentMatchers.any(),

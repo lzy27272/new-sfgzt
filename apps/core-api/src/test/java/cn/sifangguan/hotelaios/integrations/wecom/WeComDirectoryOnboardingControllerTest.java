@@ -22,6 +22,22 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 class WeComDirectoryOnboardingControllerTest {
     @Test
+    void selfServiceRequiresNoInvitationButIssuesOnlyBrowserBoundOAuth() throws Exception {
+        var employee = mock(WeComDirectoryOnboardingService.class);
+        when(employee.startSelfService()).thenReturn(new WeComDirectoryOnboardingService.Start(
+                URI.create("https://open.weixin.qq.com/authorize"), "browser-verifier", 600));
+        var mvc = MockMvcBuilders.standaloneSetup(new WeComDirectoryOnboardingController(employee,
+                mock(WeComDirectoryOnboardingAdministrationService.class), mock(WeComDirectoryProperties.class))).build();
+        mvc.perform(post("/api/v1/integrations/wecom/directory-onboarding/self-service/start"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store, private"))
+                .andExpect(header().string("Set-Cookie", containsString("HttpOnly")))
+                .andExpect(header().string("Set-Cookie", containsString("Secure")))
+                .andExpect(jsonPath("$.authorizationUri").value("https://open.weixin.qq.com/authorize"))
+                .andExpect(jsonPath("$.accessToken").doesNotExist());
+    }
+
+    @Test
     void administratorCanCreateAnEmployeeSelfRegistrationInvitation() throws Exception {
         WeComDirectoryOnboardingService employeeService = mock(WeComDirectoryOnboardingService.class);
         WeComDirectoryOnboardingAdministrationService administrationService =

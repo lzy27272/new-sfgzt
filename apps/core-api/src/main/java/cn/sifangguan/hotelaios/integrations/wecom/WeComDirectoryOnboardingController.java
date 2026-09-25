@@ -45,6 +45,15 @@ public class WeComDirectoryOnboardingController {
             @Valid @RequestBody InvitationStartRequest request
     ) {
         WeComDirectoryOnboardingService.Start start = employeeService.start(request.invitationToken());
+        return authorizationResponse(start);
+    }
+
+    @PostMapping("/self-service/start")
+    public ResponseEntity<AuthorizationResponse> startSelfService() {
+        return authorizationResponse(employeeService.startSelfService());
+    }
+
+    private ResponseEntity<AuthorizationResponse> authorizationResponse(WeComDirectoryOnboardingService.Start start) {
         ResponseCookie verifier = ResponseCookie.from(VERIFIER_COOKIE, start.browserVerifier())
                 .httpOnly(true).secure(true).sameSite("Lax").path("/")
                 .maxAge(start.maxAgeSeconds()).build();

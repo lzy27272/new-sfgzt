@@ -180,10 +180,9 @@ class HeadquartersSupervisionIntegrationTest {
             assertThatThrownBy(() -> records.record(peerRecord)).isInstanceOf(AccessDeniedException.class);
             assertThatThrownBy(() -> attachments.list(peerRecord)).isInstanceOf(AccessDeniedException.class);
             var update = new WorkDataModels.UpdateDraft(mapper.createObjectNode(), "本人完成", null, null, null, 0);
-            // Scope ownership cannot create operation permissions. The default VP
-            // profile is read-only for these records; grant writing only in this
-            // isolated fixture to also exercise explicitly configured personal work.
-            assertThatThrownBy(() -> records.records()).isInstanceOf(AccessDeniedException.class);
+            // The management profile now grants read/review, but not employee draft writes.
+            // Listing must keep the same peer and assignment boundaries as detail access.
+            assertThat(records.records()).extracting(row -> row.get("id")).contains(ownRecord).doesNotContain(peerRecord);
             assertThatThrownBy(() -> records.updateDraft(ownRecord, update)).isInstanceOf(AccessDeniedException.class);
             jdbc.update("""
                     insert into position_function_profile_permission (tenant_id, profile_version_id, permission_id)

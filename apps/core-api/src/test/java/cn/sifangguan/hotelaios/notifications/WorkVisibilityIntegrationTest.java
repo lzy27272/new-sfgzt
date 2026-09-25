@@ -58,6 +58,7 @@ class WorkVisibilityIntegrationTest {
     @Autowired DailyReportService reports;
     @Autowired ObjectMapper mapper;
     @Autowired cn.sifangguan.hotelaios.dashboard.DashboardService dashboards;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
@@ -339,6 +340,132 @@ class WorkVisibilityIntegrationTest {
         return assignment;
     }
 
+    @ParameterizedTest
+    @CsvSource({"GENERAL_MANAGER,ASSISTANT_GENERAL_MANAGER", "GENERAL_MANAGER,HOUSEKEEPING_ATTENDANT", "GROUP_VICE_PRESIDENT,GENERAL_MANAGER"})
+    void managersReviewHistoricalOrdinaryWorkWithoutLegacyReportingLink(String reviewerRole, String employeeRole) {
+        UUID account = UUID.randomUUID(), employeeAccount = UUID.randomUUID();
+        UUID reviewer = actor(account, reviewerRole.equals("GROUP_VICE_PRESIDENT") ? GROUP : HOTEL, reviewerRole, true);
+        UUID employee = actor(employeeAccount, HOTEL, employeeRole, true);
+        jdbc.update("insert into employee_assignment_hotel_scope(tenant_id,assignment_id,hotel_org_unit_id) values(?,?,?)", TENANT, reviewer, HOTEL);
+        UUID expected = expectation(employee, HOTEL);
+        UUID record = draftRecord(employee, HOTEL, expected);
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now(),business_date=current_date-3 where id=?", employeeAccount, record);
+        jdbc.update("update work_expectation set status='SUBMITTED' where id=?", expected);
+        var identity = identities.resolve(TENANT, account, UUID.randomUUID(), reviewer);
+        TenantContext.set(identity);
+        assertThat(identity.hasPermission("work-record.review")).isTrue();
+        assertThat(records.record(record).get("id")).isEqualTo(record);
+        assertThat(records.reviewEligibility(record)).containsEntry("canReview", true);
+        assertThat(records.review(record, new cn.sifangguan.hotelaios.workdata.WorkDataModels.ReviewRecord("APPROVED", "已核对证据", 0)))
+                .containsEntry("status", "APPROVED");
+        assertThat(records.reviewEligibility(record)).containsEntry("canReview", false);
+        assertThatThrownBy(() -> records.review(record, new cn.sifangguan.hotelaios.workdata.WorkDataModels.ReviewRecord("APPROVED", "重复", 0)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(jdbc.queryForObject("select count(*) from audit_log where resource_id=? and action='WORK_RECORD_APPROVED'", Integer.class, record)).isEqualTo(1);
+    }
+
+    @Test
+    void ordinaryReviewPolicyRejectsPeerSelfWrongSelectedAssignmentAndRevokedPortfolio() {
+        UUID account = UUID.randomUUID();
+        UUID vp = actor(account, GROUP, "GROUP_VICE_PRESIDENT", true);
+        UUID ownOther = actor(account, OTHER_HOTEL, "FRONT_DESK", false);
+        UUID manager = actor(UUID.randomUUID(), HOTEL, "GENERAL_MANAGER", true);
+        var policy = new cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy(new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc));
+        jdbc.update("insert into employee_assignment_hotel_scope(tenant_id,assignment_id,hotel_org_unit_id) values(?,?,?)", TENANT, vp, HOTEL);
+        var identity = identities.resolve(TENANT, account, UUID.randomUUID(), vp);
+        assertThat(policy.canManage(identity, manager, HOTEL)).isTrue();
+        assertThat(policy.canManage(identity, vp, HOTEL)).isFalse();
+        assertThat(policy.canManage(identity, ownOther, OTHER_HOTEL)).isFalse();
+        assertThat(policy.canManage(identities.resolve(TENANT, account, UUID.randomUUID(), ownOther), manager, HOTEL)).isFalse();
+        UUID peer = actor(UUID.randomUUID(), HOTEL, "GROUP_VICE_PRESIDENT", true);
+        assertThat(policy.canManage(identity, peer, HOTEL)).isFalse();
+        jdbc.update("delete from employee_assignment_hotel_scope where assignment_id=?", vp);
+        assertThat(policy.canManage(identity, manager, HOTEL)).isFalse();
+        jdbc.update("update employee_position_assignment set status='INACTIVE',valid_to=current_date where id=?", vp);
+        assertThat(policy.canManage(identity, manager, HOTEL)).isFalse();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"GENERAL_MANAGER,ASSISTANT_GENERAL_MANAGER", "GENERAL_MANAGER,HOUSEKEEPING_ATTENDANT", "GROUP_VICE_PRESIDENT,GENERAL_MANAGER"})
+    void ordinaryDailyReportReviewUsesTheSameManagedHotelBoundary(String reviewerRole, String employeeRole) {
+        UUID account = UUID.randomUUID(), owner = UUID.randomUUID();
+        UUID reviewer = actor(account, reviewerRole.equals("GROUP_VICE_PRESIDENT") ? GROUP : HOTEL, reviewerRole, true);
+        UUID employee = actor(owner, HOTEL, employeeRole, true);
+        jdbc.update("insert into employee_assignment_hotel_scope(tenant_id,assignment_id,hotel_org_unit_id) values(?,?,?)", TENANT, reviewer, HOTEL);
+        UUID report = projectedReport(employee, draftRecord(employee, HOTEL, expectation(employee, HOTEL)));
+        jdbc.update("update daily_report set report_status='SUBMITTED',review_status='PENDING',submitted_at=now() where id=?", report);
+        jdbc.update("update daily_report_revision set revision_status='SUBMITTED',content_hash=repeat('a',64),submitted_at=now(),submitted_by_account_id=? where report_id=?", owner, report);
+        TenantContext.set(identities.resolve(TENANT, account, UUID.randomUUID(), reviewer));
+        assertThat(mapper.valueToTree(reports.detail(report)).path("reviewEligibility").path("canReview").asBoolean()).isTrue();
+        assertThat(reports.review(report, new cn.sifangguan.hotelaios.dailyreports.DailyReportModels.Review("APPROVED", "已核对日报", reviewer, 0), "review-" + report))
+                .containsEntry("reviewStatus", "APPROVED");
+        assertThat(mapper.valueToTree(reports.detail(report)).path("reviewEligibility").path("canReview").asBoolean()).isFalse();
+    }
+
+    @Test
+    void workReviewWriteEndpointRejectsUnassignedHotelsAndRevokedPermission() {
+        UUID account = UUID.randomUUID(), owner = UUID.randomUUID();
+        UUID reviewer = actor(account, GROUP, "GROUP_VICE_PRESIDENT", true);
+        UUID employee = actor(owner, HOTEL, "GENERAL_MANAGER", true);
+        UUID record = draftRecord(employee, HOTEL, expectation(employee, HOTEL));
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now() where id=?", owner, record);
+        TenantContext.set(identities.resolve(TENANT, account, UUID.randomUUID(), reviewer));
+        var review = new cn.sifangguan.hotelaios.workdata.WorkDataModels.ReviewRecord("APPROVED", "越权检查", 0);
+        assertThatThrownBy(() -> records.review(record, review)).isInstanceOf(AccessDeniedException.class);
+        jdbc.update("insert into employee_assignment_hotel_scope(tenant_id,assignment_id,hotel_org_unit_id) values(?,?,?)", TENANT, reviewer, HOTEL);
+        jdbc.update("""
+                delete from position_function_profile_permission grant_row using position_function_profile_version version,
+                  position_function_profile profile,position_definition position,permission permission
+                where grant_row.profile_version_id=version.id and version.profile_id=profile.id and profile.position_id=position.id
+                  and grant_row.permission_id=permission.id and permission.code='work-record.review'
+                  and position.tenant_id=? and position.code='GROUP_VICE_PRESIDENT' and version.lifecycle_status='PUBLISHED'
+                """, TENANT);
+        TenantContext.set(identities.resolve(TENANT, account, UUID.randomUUID(), reviewer));
+        assertThat(records.reviewEligibility(record)).containsEntry("canReview", false);
+        assertThatThrownBy(() -> records.review(record, review)).isInstanceOf(AccessDeniedException.class);
+        assertThat(jdbc.queryForObject("select status from work_record where id=?", String.class, record)).isEqualTo("SUBMITTED");
+    }
+
+    @Test
+    void fallbackManagerReceivesReviewNotificationAndWecomReportRemindersDiscardStaleRevisions() {
+        UUID owner = UUID.randomUUID();
+        UUID employee = actor(owner, HOTEL, "HOUSEKEEPING_ATTENDANT", true);
+        UUID record = draftRecord(employee, HOTEL, expectation(employee, HOTEL));
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now() where id=?", owner, record);
+        TenantContext.set(identities.resolve(TENANT, owner, UUID.randomUUID(), employee));
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(records, "notifySubmittedForReview", TenantContext.require(), record);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(records, "notifySubmittedForReview", TenantContext.require(), record);
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_id=? and recipient_assignment_id=? and notification_type='WORK_RECORD_REVIEW_PENDING'", Integer.class, record, MANAGER)).isOne();
+        UUID managerAccount = jdbc.queryForObject("select e.account_id from employee e join employee_position_assignment a on a.employee_id=e.id where a.id=?", UUID.class, MANAGER);
+        UUID report = projectedReport(employee, record);
+        jdbc.update("update daily_report set report_status='SUBMITTED',review_status='PENDING',submitted_at=now() where id=?", report);
+        jdbc.update("update daily_report_revision set revision_status='SUBMITTED',content_hash=repeat('a',64),submitted_at=now(),submitted_by_account_id=? where report_id=?", owner, report);
+        UUID revision = jdbc.queryForObject("select current_revision_id from daily_report where id=?", UUID.class, report);
+        UUID currentNotice = UUID.randomUUID(), staleNotice = UUID.randomUUID();
+        for (UUID notice : List.of(currentNotice, staleNotice)) jdbc.update("""
+                insert into notification(id,tenant_id,recipient_account_id,recipient_assignment_id,notification_type,title,content,source_type,source_id,idempotency_key)
+                values(?,?,?,?,'DAILY_REPORT_REVIEW_PENDING','本地审核测试','本地审核测试','DAILY_REPORT',?,?)
+                """, notice,TENANT,managerAccount,MANAGER,report,"report-review:"+report+":"+(notice.equals(currentNotice)?revision:UUID.randomUUID()));
+        jdbc.update("""
+                insert into wecom_user_binding(tenant_id,corp_id,wecom_user_id,account_id,preferred_assignment_id,user_id_fingerprint)
+                values(?,'qa-review-corp','qa-member',?,?,repeat('b',64))
+                """,TENANT,managerAccount,MANAGER);
+        var properties = org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComProperties.class);
+        org.mockito.Mockito.when(properties.tenantId()).thenReturn(TENANT);
+        org.mockito.Mockito.when(properties.corpId()).thenReturn("qa-review-corp");
+        var worker = new cn.sifangguan.hotelaios.integrations.wecom.WeComDeliveryWorker(
+                new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
+                new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc,true),
+                new org.springframework.transaction.support.TransactionTemplate(transactions),
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,200);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery where notification_id=?",Integer.class,currentNotice)).isOne();
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery where notification_id=?",Integer.class,staleNotice)).isZero();
+        jdbc.update("update daily_report set review_status='APPROVED' where id=?", report);
+        List<?> claimed = org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"claim");
+        assertThat(claimed).extracting("sourceId").doesNotContain(report);
+    }
+
     private UUID expectation(UUID assignment, UUID org) {
         return expectation(assignment, org, ITEM);
     }
@@ -397,6 +524,7 @@ class WorkVisibilityIntegrationTest {
                 values (?, ?, ?, 'SHARED_TEST', '共享工作', 'INSPECTION', 'DAY', 'TENANT', '23:59', ?,
                   '{"allowedPositionCodes":["ASSISTANT_GENERAL_MANAGER"],"sharedKey":"TEST-SHARED"}'::jsonb)
                 """, SHARED_ITEM, TENANT, VERSION, FORM_VERSION);
+        jdbc.update("insert into work_package_item_responsibility(tenant_id,work_package_item_id,participant_type,resolver_type) values(?,?,'REVIEWER','DIRECT_MANAGER_ASSIGNMENT')", TENANT, ITEM);
         jdbc.update("""
                 update work_package_version set lifecycle_status = 'PUBLISHED', content_hash = repeat('a',64),
                   effective_from = now() - interval '1 day', published_at = now()
