@@ -33,6 +33,15 @@ test('login layout has explicit desktop and mobile contracts', () => {
   assert.match(loginSource, /<\/div>\s*<IcpFooter recordNumber=\{icpRecordNumber\} \/>\s*<\/main>/)
 })
 
+test('login and session validation share the requested workbench title without pilot copy', () => {
+  assert.match(appSource, /const loginWorkbenchTitle = '贵州四方馆酒店管理有限公司工作台'/u)
+  assert.equal((loginSource.match(/<h1>\{loginWorkbenchTitle\}<\/h1>/g) ?? []).length, 2)
+  assert.equal((loginSource.match(/aria-label=\{loginWorkbenchTitle\}/g) ?? []).length, 2)
+  assert.doesNotMatch(loginSource, /product\.(?:editionLabel|version|name)|login-auth-version|以真实账号进入门店管理闭环|关键操作均记录|内部测试系统/u)
+  assert.match(loginSource, /<strong>\{product.shortName\}<\/strong>/)
+  assert.match(appSource, /<div className="sidebar-footer">\s*<span>\{product.version\}<\/span>/)
+})
+
 test('WeCom enrollment surfaces remain on their existing login-screen contract', () => {
   assert.match(appSource, /className=\{`login-auth-screen\$\{/)
   assert.doesNotMatch(loginSource, /className="login-screen"/)

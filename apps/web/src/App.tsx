@@ -112,6 +112,7 @@ import {
 import { AllFunctionsPage } from './shared/MobileAppNavigation'
 
 const icpRecordNumber = (import.meta.env.VITE_ICP_RECORD_NUMBER ?? '').trim()
+const loginWorkbenchTitle = '贵州四方馆酒店管理有限公司工作台'
 
 const DailyReportFeature = lazy(() => import('./features/dailyReports/DailyReportRoutes').then((module) => ({ default: module.DailyReportRoutes })))
 const DailyReportTemplateFeature = lazy(() => import('./features/dailyReportTemplates/DailyReportTemplateRoutes').then((module) => ({ default: module.DailyReportTemplateRoutes })))
@@ -1748,10 +1749,9 @@ function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => v
   }
   return <main className={`login-auth-screen${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <div className="login-auth-layout">
-      <section className="login-auth-brand" aria-label={product.name}>
-        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
-        <div className="login-auth-intro"><h1>{product.name}</h1><p>以真实账号进入门店管理闭环。系统按组织、任职与角色自动隔离数据。</p></div>
-        <small className="login-auth-version">{product.version}</small>
+      <section className="login-auth-brand" aria-label={loginWorkbenchTitle}>
+        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong></span></div>
+        <div className="login-auth-intro"><h1>{loginWorkbenchTitle}</h1></div>
       </section>
       <section className="login-auth-panel">
         <form className="login-auth-card" aria-label="中台账号登录" aria-busy={busy} onSubmit={submit}>
@@ -1761,7 +1761,6 @@ function LoginPage({ onAuthenticated, onWecomLogin }: { onAuthenticated: () => v
           {error && <div id="login-error" className="inline-error" role="alert" aria-live="polite">{error}</div>}
           <button className="primary login-auth-submit" disabled={busy || !loginName.trim() || !password}>{busy ? '正在验证…' : '登录中台'}</button>
           {onWecomLogin && <button className="secondary" type="button" disabled={busy} onClick={onWecomLogin}>改用企业微信登录</button>}
-          <small>内部测试系统 · 关键操作均记录账号、组织和时间</small>
         </form>
       </section>
     </div>
@@ -1776,10 +1775,9 @@ function SessionBootstrapPage({ error, onRetry, onReturnToLogin }: {
 }) {
   return <main className={`login-auth-screen${icpRecordNumber ? ' has-icp-footer' : ''}`}>
     <div className="login-auth-layout">
-      <section className="login-auth-brand" aria-label={product.name}>
-        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong><small>{product.editionLabel}</small></span></div>
-        <div className="login-auth-intro"><h1>{product.name}</h1><p>系统正在根据登录账号解析组织、任职与功能权限。</p></div>
-        <small className="login-auth-version">{product.version}</small>
+      <section className="login-auth-brand" aria-label={loginWorkbenchTitle}>
+        <div className="login-auth-brandmark"><div>四</div><span><strong>{product.shortName}</strong></span></div>
+        <div className="login-auth-intro"><h1>{loginWorkbenchTitle}</h1></div>
       </section>
       <section className="login-auth-panel">
         <div className="login-auth-card" role="status" aria-live="polite">
