@@ -27,6 +27,7 @@ import { UsageEvidenceSummary } from './features/storeResources/WorkUsagePanel'
 import type { NavigationParams } from './domain'
 import { useWorkBoard, WorkDateToolbar, WorkStatusCards, CompletionRates, WorkQueueAlerts, WorkBoardList } from './features/workbench/WorkBoard'
 import { withBoardParams } from './features/workbench/workBoardModel'
+import { AiEvidenceRecord, AiEvidenceTeam } from './features/aiEvidence/AiEvidenceReview'
 
 const statusLabels: Record<string, string> = {
   PLANNED: '待开放', AVAILABLE: '可填报', PENDING: '待完成', IN_PROGRESS: '执行中',
@@ -76,6 +77,7 @@ function PageHeader({ eyebrow, title, description, source, actions }: { eyebrow:
 }
 
 export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { identity: RoleContext; permissions: string[]; routeParams?: RouteParams; go: Navigate }) {
+  const [aiReviewOpen, setAiReviewOpen] = useState(false)
   const resource = useWorkBoard(identity, 'team', routeParams)
   const [selected, setSelected] = useState<WorkExpectation>()
   const [detailError, setDetailError] = useState<string>()
@@ -91,9 +93,10 @@ export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { 
   }, [identity.key, routeParams.expectationId])
   const departmentGroups = resource.data.groups.filter(group => group.dimension === 'department' && group.group_id)
   const employeeGroups = resource.data.groups.filter(group => group.dimension === 'employee' && group.group_id)
+  if (aiReviewOpen) return <AiEvidenceTeam key={identity.key} identity={identity} hotelId={routeParams.hotelId} permissions={permissions} onClose={() => setAiReviewOpen(false)} />
   return <section className="wb-page">
     <header className="wb-page-heading"><div><h1>团队工作看板</h1><p>按原工作日期汇总；待审核独立于完成，补交保留完整证据链。</p></div>
-      <button className="secondary" onClick={() => go('workbench', withBoardParams(routeParams, { status: undefined, queue: undefined, departmentId: undefined, assignmentId: undefined }))}>返回工作台</button></header>
+      <div className="page-actions"><button className="secondary" onClick={() => setAiReviewOpen(true)}>仪容仪表复核</button><button className="secondary" onClick={() => go('workbench', withBoardParams(routeParams, { status: undefined, queue: undefined, departmentId: undefined, assignmentId: undefined }))}>返回工作台</button></div></header>
     <WorkDateToolbar params={routeParams} businessDate={resource.data.businessDate} onChange={change} />
     <div className="wb-scope-filters">
       <label>部门 <select aria-label="部门筛选" value={routeParams.departmentId || ''} onChange={event => change({ departmentId: event.target.value || undefined, assignmentId: undefined })}>
@@ -471,6 +474,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
         {!record ? <div className="inline-warning">该工作期望尚未形成可复核的工作记录。</div> : <>
           {record.inventoryUsage && <UsageEvidenceSummary usage={record.inventoryUsage} />}<section className="detail-section"><h3>记录事实</h3><dl><div><dt>提交员工</dt><dd>{record.employeeName}</dd></div><div><dt>执行岗位</dt><dd>{record.positionName}</dd></div><div><dt>记录状态</dt><dd>{label(record.status)}</dd></div><div><dt>提交时间</dt><dd>{formatDate(record.submittedAt)}</dd></div></dl>{payloadFields.length ? <div className="payload-grid">{payloadFields.map((field) => <span key={field.key}><small>{field.label}</small><strong>{field.value}</strong></span>)}</div> : <p className="muted">本次提交没有额外的表单记录。</p>}{record.reviewReason && <div className="inline-warning">上次复核意见：{record.reviewReason}</div>}</section>
 
+          <AiEvidenceRecord key={record.id} identity={identity} recordId={record.id} review canDecide={allows('work-record.review')} />
           <section className="detail-section"><h3>现场图片与附件</h3>
             <p className="muted">图片按检查区域直接展示；竖拍照片以竖向画框陈列，横拍照片以横向画框陈列。附件补充和删除仍由记录所属员工完成。</p>
             {!record.attachments.length && <p className="muted">尚未上传现场图片或附件。</p>}

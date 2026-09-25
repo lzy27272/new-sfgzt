@@ -16,7 +16,38 @@ public class StoreItemUsageScopes {
     public StoreItemUsageScopes(NamedParameterJdbcTemplate jdbc) { this.jdbc = jdbc; }
 
     public record Option(UUID id, String code, String name) { }
-    public record Options(List<Option> departments, List<Option> positions) { }
+    public record Options(List<Option> departments, List<Option> positions, PrefixConfig prefixConfig) {
+        public Options(List<Option> departments, List<Option> positions) { this(departments,positions,null); }
+    }
+
+    public record PrefixRule(String prefix, String defaultName, UUID departmentId) { }
+    public record PrefixConfig(long rowVersion, List<PrefixRule> rules) { }
+
+    public PrefixConfig prefixConfig(UUID tenantId, UUID hotelId, Options options) {
+        var rows = jdbc.queryForList("select * from store_department_prefix_config where tenant_id=:tenantId and hotel_org_unit_id=:hotelId",params(tenantId,hotelId));
+        var stored = rows.isEmpty() ? null : rows.getFirst();
+        var rules = new ArrayList<PrefixRule>();
+        for (var entry : List.of(Map.entry("QT","前厅部"),Map.entry("KF","客房部"),Map.entry("WX","维修部"))) {
+            var matches = options.departments().stream().filter(d -> d.name().equals(entry.getValue())).toList();
+            UUID id = stored == null ? (matches.size()==1 ? matches.getFirst().id() : null)
+                    : (UUID)stored.get(entry.getKey().toLowerCase(Locale.ROOT)+"_department_id");
+            // Stale mappings never infer a disabled or foreign department.
+            if (id != null) { UUID selected=id; if (options.departments().stream().noneMatch(d -> d.id().equals(selected))) id=null; }
+            rules.add(new PrefixRule(entry.getKey(),entry.getValue(),id));
+        }
+        return new PrefixConfig(stored==null ? -1 : ((Number)stored.get("row_version")).longValue(),rules);
+    }
+
+    public static UUID inferredDepartment(String code, PrefixConfig config) {
+        String normalized = Objects.toString(code, "").trim().toUpperCase(Locale.ROOT);
+        return config.rules().stream().filter(rule -> normalized.startsWith(rule.prefix()+"-"))
+                .map(PrefixRule::departmentId).filter(Objects::nonNull).findFirst().orElse(null);
+    }
+
+    public UsageScopeInput infer(UUID tenantId, UUID hotelId, String code, Options options) {
+        UUID department = inferredDepartment(code,prefixConfig(tenantId,hotelId,options));
+        return department == null ? null : new UsageScopeInput("DEPARTMENTS",List.of(department),List.of());
+    }
 
     // Callers have already applied tenant context and checked the hotel/action permission.
     public Options options(UUID tenantId, UUID hotelId, boolean lock) {
@@ -40,7 +71,8 @@ public class StoreItemUsageScopes {
                 order by p.id
                 """ + (lock ? " for share of p" : ""), params,
                 (rs, n) -> new Option(rs.getObject("id", UUID.class), rs.getString("code"), rs.getString("name")));
-        return new Options(departments, positions);
+        var choices = new Options(departments, positions);
+        return new Options(departments,positions,prefixConfig(tenantId,hotelId,choices));
     }
 
     public UsageScopeInput validate(UsageScopeInput input, Options options) {

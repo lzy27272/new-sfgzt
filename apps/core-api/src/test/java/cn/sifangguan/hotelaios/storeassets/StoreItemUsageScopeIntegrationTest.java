@@ -66,7 +66,7 @@ class StoreItemUsageScopeIntegrationTest {
         assertThat(response(get("/api/v1/store-resources/hotels/" + OTHER_HOTEL + "/usage-scope-options"), 200)
                 .path("departments").isEmpty()).isTrue();
         var download = mvc.perform(admin(get(API + "/imports/template"))).andExpect(status().isOk()).andReturn().getResponse();
-        assertThat(download.getHeader("Content-Disposition")).contains("V4.xlsx");
+        assertThat(download.getHeader("Content-Disposition")).contains("V5.xlsx");
         var book = workbook.read(download.getContentAsByteArray());
         assertThat(book.sheet("物品与期初库存").rows().getFirst()).contains("使用部门*", "适用岗位", "采购换算比例");
         assertThat(book.sheet("固定资产").rows().getFirst()).contains("使用部门*", "适用岗位");
@@ -100,6 +100,74 @@ class StoreItemUsageScopeIntegrationTest {
         assertThat(jdbc.queryForObject("select count(*) from store_inventory_movement where item_id=?::uuid", Integer.class, id)).isOne();
         assertThat(jdbc.queryForObject("select count(*) from store_item_usage_department where item_id=?::uuid", Integer.class, id)).isZero();
         assertThat(jdbc.queryForObject("select count(*) from audit_log where resource_id=?::uuid and action='STORE_RESOURCE_ITEM_UPDATED'", Integer.class, id)).isEqualTo(2);
+    }
+
+    @Test void prefixesInferBlankDepartmentsButPreserveExplicitScopeInCreateAndImport() throws Exception {
+        ObjectNode inferred=itemInput(); inferred.put("sku","KF-"+UUID.randomUUID());
+        var created=response(post(API+"/items").contentType("application/json").content(inferred.toString()),201);
+        assertThat(created.path("usage_scope").path("departmentIds")).isEqualTo(mapper.valueToTree(List.of(HOUSEKEEPING)));
+        ObjectNode manual=itemInput(); manual.put("sku","QT-"+UUID.randomUUID()); manual.set("usageScope",scope("DEPARTMENTS",List.of(HOUSEKEEPING),List.of(POSITION)));
+        var explicit=response(post(API+"/items").contentType("application/json").content(manual.toString()),201);
+        assertThat(explicit.path("usage_scope").path("departmentIds")).isEqualTo(mapper.valueToTree(List.of(HOUSEKEEPING)));
+        String sku="QT-"+UUID.randomUUID();
+        var job=preview(file(List.of(row(sku,"","FRONT_DESK")),true));
+        assertThat(job.path("status").asText()).isEqualTo("READY");
+        assertThat(job.path("preview").path("items").get(0).path("usageScope").path("departmentIds")).isEqualTo(mapper.valueToTree(List.of(FRONT)));
+        apply(job.path("id").asText(),200);
+        assertThat(jdbc.queryForObject("select count(*) from store_item_usage_position p join store_resource_item i on i.id=p.item_id where i.sku=?",Integer.class,sku.toUpperCase(Locale.ROOT))).isOne();
+        var unknown=preview(file(List.of(row("XX-"+UUID.randomUUID(),"","")),true));
+        assertThat(unknown.path("status").asText()).isEqualTo("INVALID");
+    }
+
+    @Test void prefixBackfillIsPreviewedVersionedIdempotentAndMetadataOnly() throws Exception {
+        var created=response(post(API+"/items").contentType("application/json").content(itemInput().toString()),201);
+        String id=created.path("id").asText();
+        jdbc.update("update store_resource_item set sku=? where id=?::uuid","QT-"+UUID.randomUUID(),id);
+        jdbc.update("insert into store_item_usage_position values(?::uuid,?::uuid,?::uuid,?::uuid)",TENANT,HOTEL,id,POSITION);
+        var preview=response(get(API+"/department-prefix"),200);
+        JsonNode row=null;for(JsonNode entry:preview.path("rows")) if(entry.path("id").asText().equals(id))row=entry;
+        assertThat(row).isNotNull();assertThat(row.path("action").asText()).isEqualTo("FILL");
+        var body=mapper.createObjectNode().put("configVersion",preview.path("config").path("rowVersion").asLong());
+        body.set("selections",mapper.valueToTree(List.of(Map.of("type","ITEM","id",id,"expectedVersion",0,"departmentId",FRONT))));
+        String key=UUID.randomUUID().toString();
+        response(post(API+"/department-prefix/apply").header("Idempotency-Key",key).contentType("application/json").content(body.toString()),200);
+        response(post(API+"/department-prefix/apply").header("Idempotency-Key",key).contentType("application/json").content(body.toString()),200);
+        response(post(API+"/department-prefix/apply").header("Idempotency-Key",UUID.randomUUID().toString()).contentType("application/json").content(body.toString()),409);
+        assertThat(jdbc.queryForObject("select row_version from store_resource_item where id=?::uuid",Integer.class,id)).isOne();
+        assertThat(jdbc.queryForObject("select count(*) from store_item_usage_position where item_id=?::uuid",Integer.class,id)).isOne();
+        assertThat(jdbc.queryForObject("select quantity from store_inventory_balance where item_id=?::uuid",Integer.class,id)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from store_inventory_movement where item_id=?::uuid",Integer.class,id)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from audit_log where action='STORE_DEPARTMENT_PREFIX_FILLED' and resource_id=?::uuid",Integer.class,id)).isOne();
+        var wrong=mapper.createObjectNode().put("expectedVersion",-1).put("qtDepartmentId",OTHER_HOTEL);
+        response(put(API+"/department-prefix").contentType("application/json").content(wrong.toString()),400);
+    }
+
+    @Test void savedRulesAreStoreLocalAndStaleBackfillsCannotOverwriteNewerRules() throws Exception {
+        var original=response(get(API+"/department-prefix"),200).path("config");
+        long previous=original.path("rowVersion").asLong();
+        var rules=mapper.createObjectNode().put("expectedVersion",previous).put("qtDepartmentId",HOUSEKEEPING).put("kfDepartmentId",HOUSEKEEPING);
+        try {
+            var saved=response(put(API+"/department-prefix").contentType("application/json").content(rules.toString()),200);
+            assertThat(saved.path("config").path("rowVersion").asLong()).isEqualTo(previous+1);
+            response(put(API+"/department-prefix").contentType("application/json").content(rules.toString()),409);
+            ObjectNode input=itemInput();input.put("sku","QT-"+UUID.randomUUID());
+            var created=response(post(API+"/items").contentType("application/json").content(input.toString()),201);
+            assertThat(created.path("usage_scope").path("departmentIds")).isEqualTo(mapper.valueToTree(List.of(HOUSEKEEPING)));
+            var foreign=response(get("/api/v1/store-resources/hotels/"+OTHER_HOTEL+"/department-prefix"),200);
+            assertThat(foreign.path("config").path("rowVersion").asLong()).isEqualTo(-1);
+            var assetBody=mapper.createObjectNode().put("assetCode","ASSET-"+UUID.randomUUID()).put("name","旧资产").put("category","设备").put("unit","台").put("originalValue",980).put("responsibleAssignmentId","19200000-0000-0000-0000-000000000002");
+            String asset=response(post(API+"/assets").contentType("application/json").content(assetBody.toString()),201).path("id").asText();
+            jdbc.update("update store_fixed_asset set asset_code=? where id=?::uuid","QT-"+UUID.randomUUID(),asset);
+            var before=jdbc.queryForMap("select * from store_fixed_asset where id=?::uuid",asset);
+            var inputBody=mapper.createObjectNode().put("configVersion",previous);
+            inputBody.set("selections",mapper.valueToTree(List.of(Map.of("type","ASSET","id",asset,"expectedVersion",0,"departmentId",HOUSEKEEPING))));
+            response(post(API+"/department-prefix/apply").header("Idempotency-Key",UUID.randomUUID().toString()).contentType("application/json").content(inputBody.toString()),409);
+            inputBody.put("configVersion",previous+1);
+            response(post(API+"/department-prefix/apply").header("Idempotency-Key",UUID.randomUUID().toString()).contentType("application/json").content(inputBody.toString()),200);
+            var after=jdbc.queryForMap("select * from store_fixed_asset where id=?::uuid",asset);
+            for(String field:List.of("asset_code","original_value","responsible_assignment_id","status")) assertThat(after.get(field)).isEqualTo(before.get(field));
+            assertThat(after.get("usage_scope_mode")).isEqualTo("DEPARTMENTS");
+        } finally { jdbc.update("delete from store_department_prefix_config where tenant_id=?::uuid and hotel_org_unit_id=?::uuid",TENANT,HOTEL); }
     }
 
     @Test void scopeValidationRejectsInvalidCrossStoreDuplicateAndInactiveReferences() throws Exception {

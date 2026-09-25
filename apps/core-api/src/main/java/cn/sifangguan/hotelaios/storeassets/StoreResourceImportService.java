@@ -44,7 +44,7 @@ import java.util.UUID;
 public class StoreResourceImportService {
     private static final String IMPORT_TYPE = "STORE_RESOURCE_INITIALIZATION";
     private static final String SCOPE_IMPORT_TYPE = "STORE_RESOURCE_USAGE_SCOPE";
-    private static final int TEMPLATE_VERSION = 4;
+    private static final int TEMPLATE_VERSION = 5;
     private static final String ITEM_SHEET = "物品与期初库存";
     private static final String ASSET_SHEET = "固定资产";
     private static final String XLSX_MEDIA_TYPE =
@@ -106,7 +106,7 @@ public class StoreResourceImportService {
                 List.of("7", scopeOnly ? "本模板仅更新使用范围：按已有物品编码/资产编号匹配，不新增主档，不改变数量、成本、流水或责任人。上传时请选择仅更新使用范围。" : "本模板为新增模式：门店内重复物品编码或资产编号会被拦截。已有物品请改选仅更新使用范围后下载专用模板。"),
                 List.of("8", "规格和采购/领用耗用单位为选填；不填则沿用基础单位。1个采购或领用耗用单位=换算比例个基础单位；异名单位必须填比例，同名单位比例必须相同。"),
                 List.of("9", "例如基础单位支、采购单位箱、采购换算比例100；2箱期初库存请填200支，单支成本填0.5而非整箱50。旧V1/V2模板仍可导入，缺少使用范围的物品标为待配置，补齐后员工才能领用及填报，不自动改成全店通用。"),
-                List.of("10", "使用部门必填（兼容旧列名适用部门）：全店通用，或参考表中的本门店有效部门名称/编码；多项用分号分隔。名称重名时请填写编码。固定资产使用范围与责任人分开配置。"),
+                List.of("10", "使用部门（兼容旧列名适用部门）：明确填写的部门优先。留空时按本门店编号规则识别QT-前厅部、KF-客房部、WX-维修部；未知编号或无法唯一匹配时须手工填写。多部门用分号分隔，可填全店通用。资产使用部门与责任人分开。"),
                 List.of("11", "适用岗位选填：使用集团有效岗位标准名称/编码，多项用分号分隔；留空表示所选部门内全部岗位，不表示全店所有部门。岗位定义不以当前是否有人任职为条件。"),
                 List.of("12", "参考表仅供填写，系统按后台当前有效数据校验。部门和岗位取交集；员工按当前任职过滤物品。此配置不拆分库存、不授予新权限。岗位也可填写不限岗位。")
         ));
@@ -119,7 +119,7 @@ public class StoreResourceImportService {
         options.departments().forEach(option -> references.add(List.of("部门", option.code(), option.name(), "当前门店有效部门")));
         options.positions().forEach(option -> references.add(List.of("岗位", option.code(), option.name(), "集团有效岗位标准；与所选部门取交集")));
         sheets.put("部门岗位参考", references);
-        return new ImportFile(scopeOnly ? "库存资产使用范围更新模板_V4.xlsx" : "库存与固定资产导入模板_V4.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
+        return new ImportFile(scopeOnly ? "库存资产使用范围更新模板_V5.xlsx" : "库存与固定资产导入模板_V5.xlsx", XLSX_MEDIA_TYPE, workbook.write(sheets));
     }
 
     @Transactional
@@ -545,7 +545,8 @@ public class StoreResourceImportService {
             }
             StoreResourceModels.UsageScopeInput usageScope = null;
             String departments = cell(row, columns, "适用部门"), positions = cell(row, columns, "适用岗位");
-            if (hasScope) {
+            departments = inferredDepartmentName(departments,sku,options);
+            if (hasScope || !departments.isBlank()) {
                 try { usageScope = usageScopes.parse(departments, positions, options); }
                 catch (StoreItemUsageScopes.ScopeValidationException exception) {
                     errors.add(new ImportError(ITEM_SHEET, rowNumber, exception.field(), exception.getMessage(),
@@ -605,14 +606,22 @@ public class StoreResourceImportService {
                 errors.add(new ImportError(ASSET_SHEET, rowNumber, "资产编号", "文件内资产编号重复", code));
             }
             String departments=cell(row,columns,"适用部门"),positions=cell(row,columns,"适用岗位");
+            departments=inferredDepartmentName(departments,code,options);
             StoreResourceModels.UsageScopeInput scope=null;
-            if(hasScope) try { scope=usageScopes.parse(departments,positions,options); }
+            if(hasScope || !departments.isBlank()) try { scope=usageScopes.parse(departments,positions,options); }
             catch(StoreItemUsageScopes.ScopeValidationException e) { errors.add(new ImportError(ASSET_SHEET,rowNumber,e.field(),e.getMessage(),"")); }
             result.add(new ImportedAssetDraft(rowNumber, text(code), text(name), text(category), specification,
                     serial, text(unit), value(originalValue), acquiredOn, location, employeeNo,
                     positionCode, text(status),scope,departments,positions));
         }
         return List.copyOf(result);
+    }
+
+    private String inferredDepartmentName(String explicit, String code, StoreItemUsageScopes.Options options) {
+        if(!explicit.isBlank() || options.prefixConfig()==null) return explicit;
+        UUID id=StoreItemUsageScopes.inferredDepartment(code,options.prefixConfig());
+        // A unique department code also disambiguates stores with duplicate display names.
+        return options.departments().stream().filter(d->d.id().equals(id)).map(StoreItemUsageScopes.Option::code).findFirst().orElse(explicit);
     }
 
     private List<ImportedAsset> resolveResponsibleAssignments(

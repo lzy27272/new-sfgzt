@@ -80,15 +80,30 @@ public class StoreWorkUsageService {
         boolean issue = ISSUE_ITEMS.contains(Objects.toString(itemCode, ""));
         result.put("mode", issue ? "ISSUE" : "USAGE");
         if (issue) result.put("enabled", true);
+        String selection = issue ? StoreEmployeeItemScope.CONFIGURED : "(" + StoreEmployeeItemScope.ELIGIBLE
+                + " or (" + StoreEmployeeItemScope.CONFIGURED + " and " + StoreEmployeeItemScope.ISSUED_TODAY + "))";
         // Employees must not receive financial values or unrestricted inventory balances.
-        var items = jdbc.queryForList("""
-                select i.id,i.sku,i.name,i.category,i.specification,i.unit,i.issue_unit,i.issue_factor,i.row_version,
+        var items = jdbc.queryForList("select (" + StoreEmployeeItemScope.ELIGIBLE + ") as applicable_to_assignment,("
+                + StoreEmployeeItemScope.ISSUED_TODAY + ") as issued_today," + """
+                i.id,i.sku,i.name,i.category,i.specification,i.unit,i.issue_unit,i.issue_factor,i.row_version,i.usage_scope_mode,
                   case when exists(select 1 from store_item_usage_position pos where pos.tenant_id=i.tenant_id and pos.item_id=i.id)
                     then 'POSITION' when i.usage_scope_mode='DEPARTMENTS' then 'DEPARTMENT' else 'SHARED' end as usage_scope_kind
                 from store_resource_item i where i.tenant_id=:tenantId and i.hotel_org_unit_id=:hotelId
                   and i.status='ACTIVE' and i.employee_usage_enabled and i.category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') and
-                """ + StoreEmployeeItemScope.ELIGIBLE + " order by case i.category when 'LINEN' then 0 when 'CONSUMABLE' then 1 else 2 end,i.name,i.id",
-                itemScope.parameters(p, hotelId, assignment));
+                """ + selection + " order by case i.category when 'LINEN' then 0 when 'CONSUMABLE' then 1 else 2 end,i.name,i.id",
+                itemScope.parameters(p, hotelId, assignment).addValue("businessDate",businessDate,java.sql.Types.DATE));
+        // Department labels are selection metadata, never inventory or financial values.
+        var departments = jdbc.queryForList("""
+                select d.id,d.name from org_unit d join org_unit_closure c on c.tenant_id=d.tenant_id and c.descendant_id=d.id
+                where d.tenant_id=:tenantId and c.ancestor_id=:hotelId and d.unit_type='DEPARTMENT' and d.status='ACTIVE'
+                order by d.name,d.id
+                """,base(p).addValue("hotelId",hotelId));
+        result.put("departments",departments);
+        var itemDepartments = jdbc.queryForList("select item_id,department_id from store_item_usage_department where tenant_id=:tenantId and hotel_org_unit_id=:hotelId",
+                base(p).addValue("hotelId",hotelId));
+        Map<Object,List<Object>> departmentIds = new HashMap<>();
+        itemDepartments.forEach(row -> departmentIds.computeIfAbsent(row.get("item_id"), key -> new ArrayList<>()).add(row.get("department_id")));
+        items.forEach(item -> item.put("department_ids",departmentIds.getOrDefault(item.get("id"),List.of())));
         result.put("items", items);
         result.put("department_configured", assignment.get("department_configured"));
         result.put("unconfigured_item_count", jdbc.queryForObject("""
@@ -101,7 +116,7 @@ public class StoreWorkUsageService {
             List<?> configuredIds = (List<?>)quick.get("item_ids");
             quick.put("item_ids", Boolean.TRUE.equals(quick.get("configured"))
                     ? configuredIds.stream().filter(eligible::contains).toList()
-                    : items.stream().limit(100).map(row -> row.get("id")).toList());
+                    : items.stream().filter(row -> Boolean.TRUE.equals(row.get("applicable_to_assignment"))).limit(100).map(row -> row.get("id")).toList());
             result.put("quick_list", quick);
         }
         if (businessDate != null && SHARED_ITEMS.contains(Objects.toString(itemCode, ""))) {
@@ -306,7 +321,8 @@ public class StoreWorkUsageService {
             return; // Legacy pilot stores retain their existing reporting flow until enabled.
         }
         var assignment = itemScope.assignment(p, hotelId, (UUID)record.get("position_assignment_id"), false);
-        if (input.path("schemaVersion").asInt() == 2) input = normalizeDailyUsage(p, hotelId, assignment, input);
+        LocalDate usageDate = ((java.sql.Date)record.get("business_date")).toLocalDate();
+        if (input.path("schemaVersion").asInt() == 2) input = normalizeDailyUsage(p, hotelId, assignment, input, usageDate);
         if (!typed || !input.path("noUsage").isBoolean() || !input.path("lines").isArray()) {
             throw new IllegalArgumentException("请按门店物品清单填写实际耗用数量，或明确勾选本次无耗用");
         }
@@ -338,7 +354,7 @@ public class StoreWorkUsageService {
                       and id=:itemId and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for update
                     """, base(p).addValue("hotelId", hotelId).addValue("itemId", itemId));
             if (items.isEmpty()) throw new IllegalArgumentException("所选物品已停用或不属于本门店，请刷新物品清单");
-            itemScope.requireEligible(p, hotelId, assignment, itemId);
+            itemScope.requireUsageEligible(p, hotelId, assignment, itemId, usageDate);
             Map<String, Object> item = items.getFirst();
             long itemVersion = ((Number) item.get("row_version")).longValue();
             if (!line.path("expectedItemVersion").isIntegralNumber()
@@ -368,7 +384,7 @@ public class StoreWorkUsageService {
         notifyReviewer(p, recordId, reviewerId);
     }
 
-    private JsonNode normalizeDailyUsage(TenantPrincipal p, UUID hotelId, Map<String,Object> assignment, JsonNode input) {
+    private JsonNode normalizeDailyUsage(TenantPrincipal p, UUID hotelId, Map<String,Object> assignment, JsonNode input, LocalDate usageDate) {
         JsonNode normalized = DailyUsageInput.normalize(input);
         // Check even zero/blank rows: old units, disabled and foreign items are never silently discarded.
         List<JsonNode> lines = new ArrayList<>();
@@ -381,7 +397,7 @@ public class StoreWorkUsageService {
                       and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for update
                     """,base(p).addValue("hotelId",hotelId).addValue("itemId",UUID.fromString(line.path("itemId").asText())));
             if (items.isEmpty()) throw conflict("清单中有已停用或不属于本门店的物品，请刷新后核对");
-            itemScope.requireEligible(p, hotelId, assignment, UUID.fromString(line.path("itemId").asText()));
+            itemScope.requireUsageEligible(p, hotelId, assignment, UUID.fromString(line.path("itemId").asText()), usageDate);
             var item = items.getFirst();
             if (!line.path("expectedItemVersion").isIntegralNumber() || !line.path("expectedItemVersion").canConvertToLong()
                     || line.path("expectedItemVersion").asLong(-1) != ((Number)item.get("row_version")).longValue())
@@ -419,7 +435,7 @@ public class StoreWorkUsageService {
                       and id=:itemId and status='ACTIVE' and employee_usage_enabled and category in ('CONSUMABLE','CLEANING_SUPPLY','LINEN') for share
                     """, base(p).addValue("hotelId", hotelId).addValue("itemId", itemId));
             if (items.isEmpty()) throw new IllegalArgumentException("所选物品不可用或不属于本门店");
-            itemScope.requireEligible(p, hotelId, assignment, itemId);
+            itemScope.requireIssueEligible(p, hotelId, itemId);
             Map<String, Object> item = items.getFirst();
             if (!line.path("expectedItemVersion").isIntegralNumber()
                     || line.path("expectedItemVersion").asLong(-1) != ((Number) item.get("row_version")).longValue())

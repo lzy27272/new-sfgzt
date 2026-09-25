@@ -1,11 +1,19 @@
 export type UsageScopeOption = { id: string; code: string; name: string }
-export type UsageScopeOptions = { departments: UsageScopeOption[]; positions: UsageScopeOption[] }
+export type PrefixConfig = { rowVersion: number; rules: Array<{ prefix: string; defaultName: string; departmentId: string | null }> }
+export type UsageScopeOptions = { departments: UsageScopeOption[]; positions: UsageScopeOption[]; prefixConfig?: PrefixConfig }
 export type ItemUsageScope = {
   mode: 'LEGACY' | 'ALL_DEPARTMENTS' | 'DEPARTMENTS'
   departmentIds: string[]
   positionIds: string[]
   departments?: UsageScopeOption[]
   positions?: UsageScopeOption[]
+}
+
+export function inferUsageScope(code: string, options: UsageScopeOptions): ItemUsageScope | undefined {
+  const normalized = code.trim().toUpperCase()
+  const rule = options.prefixConfig?.rules.find(row => normalized.startsWith(`${row.prefix}-`))
+  if (!rule?.departmentId || !options.departments.some(d => d.id === rule.departmentId)) return
+  return { mode: 'DEPARTMENTS', departmentIds: [rule.departmentId], positionIds: [] }
 }
 
 export function usageScopeValidation(scope: ItemUsageScope, options: UsageScopeOptions): string | undefined {
