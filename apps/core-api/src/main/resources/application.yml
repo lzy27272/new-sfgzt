@@ -46,6 +46,7 @@ app:
     model: ${AI_EVIDENCE_MODEL:}
     endpoint: ${AI_EVIDENCE_ENDPOINT:}
     tenant-ids: ${AI_EVIDENCE_TENANT_IDS:}
+    pilot-hotel-ids: ${AI_EVIDENCE_PILOT_HOTEL_IDS:}
     daily-request-limit: ${AI_EVIDENCE_DAILY_REQUEST_LIMIT:100}
     fixed-delay-ms: ${AI_EVIDENCE_FIXED_DELAY_MS:10000}
   academy:

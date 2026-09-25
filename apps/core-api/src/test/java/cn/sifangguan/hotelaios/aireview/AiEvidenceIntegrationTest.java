@@ -60,6 +60,7 @@ class AiEvidenceIntegrationTest {
         r.add("app.attachments.root",PHOTOS::toString);
         r.add("app.ai-evidence.enabled",()->false);
         r.add("app.ai-evidence.daily-request-limit",()->2);
+        r.add("app.ai-evidence.pilot-hotel-ids",()->HOTEL);
     }
     static EmbeddedPostgres postgres() { try { return EmbeddedPostgres.builder().start(); } catch(Exception e) { throw new ExceptionInInitializerError(e); } }
     static Path temp() { try { return Files.createTempDirectory("ai-evidence-test-"); } catch(Exception e) { throw new ExceptionInInitializerError(e); } }
@@ -180,6 +181,15 @@ class AiEvidenceIntegrationTest {
         var published=rule(true);
         assertThat(jdbc.queryForObject("select state from ai_evidence_rule where id=?::uuid",String.class,first.path("id").asText())).isEqualTo("RETIRED");
         assertThat(published.path("configuration")).isEqualTo(first.path("configuration"));
+    }
+    @Test void serverPilotAllowlistCannotBeExpandedByAnAdministratorRule() throws Exception {
+        var options=response(as(get("/api/v1/ai-evidence/options"),PlatformAdminTestFixture.ACCOUNT_ID),200);
+        assertThat(options.path("hotels").size()).isEqualTo(1);
+        assertThat(options.path("hotels").get(0).path("id").asText()).isEqualTo(HOTEL);
+        response(as(post("/api/v1/ai-evidence/rules"),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON)
+            .content("{\"positionId\":\""+position()+"\",\"shadow\":true,\"configuration\":"+config().replace(HOTEL,OTHER_HOTEL)+"}"),403);
+        assertThat(jdbc.queryForObject("select count(*) from ai_evidence_rule",Integer.class)).isZero();
+        verify(gateway,never()).inspect(any(),any());
     }
     @Test void supplementsAreOneChainAndSampleContentIsAdminOnly() throws Exception {
         rule(true);UUID id=record(HOTEL);String photo=upload(id);var check=request(id,photo,null,200);

@@ -30,12 +30,20 @@ public class AiEvidenceService {
     private final ObjectMapper json;
     private final AiVisionGateway gateway;
     private final int dailyLimit;
+    private final Set<UUID> pilotHotels;
 
     public AiEvidenceService(NamedParameterJdbcTemplate jdbc,TenantDatabaseContext db,AccessPolicy access,
             WorkVisibilityPolicy visibility,AuditWriter audit,AttachmentService files,ObjectMapper json,
-            AiVisionGateway gateway,@Value("${app.ai-evidence.daily-request-limit:100}") int dailyLimit) {
+            AiVisionGateway gateway,@Value("${app.ai-evidence.daily-request-limit:100}") int dailyLimit,
+            @Value("${app.ai-evidence.pilot-hotel-ids:}") String pilotHotels) {
         this.jdbc=jdbc;this.db=db;this.access=access;this.visibility=visibility;this.audit=audit;
         this.files=files;this.json=json;this.gateway=gateway;this.dailyLimit=Math.max(1,Math.min(10000,dailyLimit));
+        this.pilotHotels=Set.copyOf(Arrays.stream(pilotHotels.split(",")).map(String::trim)
+                .filter(s->!s.isEmpty()).map(UUID::fromString).toList());
+    }
+    private boolean pilotHotel(Object id) { return pilotHotels.isEmpty() || pilotHotels.contains(id); }
+    private void requirePilotHotel(Object id) {
+        if(!pilotHotel(id)) throw new AccessDeniedException("此门店不在已批准的AI试点范围");
     }
     private TenantPrincipal prepare() { var p=access.principal();db.apply(p.tenantId());return p; }
     private MapSqlParameterSource params() { var p=access.principal();return new MapSqlParameterSource("tenant",p.tenantId())
@@ -65,7 +73,7 @@ public class AiEvidenceService {
     @Transactional(readOnly=true)
     public Map<String,Object> options() {
         prepare();admin();
-        return Map.of("hotels",jdbc.queryForList("select id,name from org_unit where tenant_id=:tenant and unit_type='HOTEL' and status='ACTIVE' order by name",params()),
+        return Map.of("hotels",jdbc.queryForList("select id,name from org_unit where tenant_id=:tenant and unit_type='HOTEL' and status='ACTIVE' order by name",params()).stream().filter(h->pilotHotel(h.get("id"))).toList(),
                 "positions",jdbc.queryForList("select id,name from position_definition where tenant_id=:tenant and status='ACTIVE' order by name",params()),
                 "items",jdbc.queryForList("""
                     select distinct i.item_code as code,i.name from work_package_item i
@@ -93,6 +101,7 @@ public class AiEvidenceService {
         }
         if(c.criteria().stream().noneMatch(AiEvidenceModels.Criterion::enabled)) throw new IllegalArgumentException("至少启用一项客观检查");
         for(UUID hotel:new HashSet<>(c.hotelIds())) {
+            requirePilotHotel(hotel);
             one("select id from org_unit where tenant_id=:tenant and id=:id and unit_type='HOTEL' and status='ACTIVE'",params().addValue("id",hotel));
         }
         for(String code:new HashSet<>(c.itemCodes())) {
@@ -235,14 +244,14 @@ public class AiEvidenceService {
         var activeRules=jdbc.queryForList("select position_id,configuration from ai_evidence_rule where tenant_id=:tenant and state='SHADOW'",params());
         var people=subjects(recordId).stream().map(subject->{
             var row=new LinkedHashMap<>(subject);
-            row.put("configured",activeRules.stream().filter(rule->subject.get("position_id").equals(rule.get("position_id")))
+            row.put("configured",pilotHotel(r.get("hotel_id")) && activeRules.stream().filter(rule->subject.get("position_id").equals(rule.get("position_id")))
                 .anyMatch(rule->{var c=node(rule.get("configuration"));return contains(c.path("hotelIds"),String.valueOf(r.get("hotel_id"))) && contains(c.path("itemCodes"),String.valueOf(r.get("item_code")));}));
             return row;
         }).toList();
         var photos=new ArrayList<>(files.list(recordId));
         photos.addAll(jdbc.queryForList("select id,original_name,media_type,'AI' as source from ai_evidence_photo where tenant_id=:tenant and work_record_id=:record order by created_at desc",params().addValue("record",recordId)));
         return Map.of("subjects",people,"checks",checks(recordId),"providerReady",gateway.ready(),
-                "attachments",photos,"canSubmit",(access.principal().hasPermission("work-record.submit") || access.principal().hasPermission("*"))
+                "attachments",photos,"canSubmit",pilotHotel(r.get("hotel_id")) && (access.principal().hasPermission("work-record.submit") || access.principal().hasPermission("*"))
                     && (access.principal().actorId().equals(r.get("account_id")) || access.principal().actorId().equals(r.get("submitted_by_account_id"))),
                 "defaultSubjectId",r.get("position_assignment_id"));
     }
@@ -304,6 +313,7 @@ public class AiEvidenceService {
         var r=record(recordId);access.requirePermission("work-record.submit");owner(r);
         jdbc.queryForObject("select pg_advisory_xact_lock(hashtextextended(:key,82))",params()
                 .addValue("key",access.principal().tenantId()+":"+recordId+":"+request.subjectAssignmentId()),Object.class);
+        requirePilotHotel(r.get("hotel_id"));
         if(!Set.of("SUBMITTED","APPROVED").contains(r.get("status"))) throw new IllegalArgumentException("请先提交原工作，再进行AI检查");
         var subject=subjects(recordId).stream().filter(s->request.subjectAssignmentId().equals(s.get("id"))).findFirst()
                 .orElseThrow(()->new AccessDeniedException("被检查人不在当前门店及授权人员范围"));
@@ -425,6 +435,7 @@ public class AiEvidenceService {
             return Map.of();
         }
         var r=record((UUID)c.get("work_record_id"));owner(r);access.requirePermission("work-record.submit");
+        requirePilotHotel(r.get("hotel_id"));
         if(subjects((UUID)c.get("work_record_id")).stream().noneMatch(s->c.get("subject_assignment_id").equals(s.get("id"))))
             throw new AccessDeniedException("被检查人任职或授权范围已变化");
         Long calls=jdbc.queryForObject("select count(*) from ai_evidence_event where tenant_id=:tenant and action='MODEL_STARTED' and created_at>=date_trunc('day',now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai'",params(),Long.class);
@@ -441,7 +452,7 @@ public class AiEvidenceService {
     }
     @Transactional(readOnly=true)
     public List<AiVisionGateway.Image> images(Map<String,Object> job) {
-        prepare();UUID recordId=(UUID)job.get("work_record_id");record(recordId);
+        prepare();UUID recordId=(UUID)job.get("work_record_id");requirePilotHotel(record(recordId).get("hotel_id"));
         var images=new ArrayList<AiVisionGateway.Image>();
         for(JsonNode evidence:node(job.get("evidence"))) {
             UUID id=UUID.fromString(evidence.path("id").asText());
