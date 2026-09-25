@@ -6,11 +6,11 @@ import java.util.*;
 
 public final class AiEvidenceModels {
     private AiEvidenceModels() {}
-    public record Criterion(@NotBlank @Pattern(regexp="UNIFORM|BADGE|EQUIPMENT") String code,
+    public record Criterion(@NotBlank @Pattern(regexp="UNIFORM|BADGE|EQUIPMENT|MAKEUP") String code,
                             boolean enabled, @Size(max=1000) String standard) {}
     public record Configuration(@NotEmpty @Size(max=100) List<@NotNull UUID> hotelIds,
                                 @NotEmpty @Size(max=30) List<@NotBlank @Size(max=120) String> itemCodes,
-                                @NotEmpty @Size(max=3) List<@NotNull @Valid Criterion> criteria,
+                                @NotEmpty @Size(max=4) List<@NotNull @Valid Criterion> criteria,
                                 @Size(max=1000) String exceptions,
                                 @Size(max=6) List<@NotNull UUID> sampleIds) {}
     public record SaveRule(@NotNull UUID positionId, UUID expectedLatestId,

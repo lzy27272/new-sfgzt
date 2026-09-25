@@ -84,7 +84,14 @@ public class AiEvidenceService {
     @Transactional(readOnly=true)
     public List<Map<String,Object>> rules(UUID positionId) {
         prepare();admin();
-        return jdbc.queryForList("select * from ai_evidence_rule where tenant_id=:tenant and position_id=:position order by version_no desc limit 50",
+        // An active version may precede many drafts; never report it as missing on the admin page.
+        return jdbc.queryForList("""
+                select * from (
+                    (select * from ai_evidence_rule where tenant_id=:tenant and position_id=:position order by version_no desc limit 50)
+                    union
+                    select * from ai_evidence_rule where tenant_id=:tenant and position_id=:position and state='SHADOW'
+                ) versions order by version_no desc
+                """,
                 params().addValue("position",positionId)).stream().map(this::decoded).toList();
     }
     private void position(UUID id) {

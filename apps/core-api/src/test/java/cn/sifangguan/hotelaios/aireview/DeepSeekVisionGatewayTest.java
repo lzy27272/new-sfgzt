@@ -54,7 +54,7 @@ class DeepSeekVisionGatewayTest {
         assertThat(request.has("enable_thinking")).isFalse();
         assertThat(request.at("/response_format/type").asText()).isEqualTo("json_object");
         assertThat(request.path("max_tokens").asInt()).isEqualTo(1200);
-        assertThat(request.at("/messages/0/content").asText()).contains("JSON", "不做人脸识别");
+        assertThat(request.at("/messages/0/content").asText()).contains("JSON", "不做人脸识别", "MAKEUP", "visibility", "不能将看不清当成未化妆");
         assertThat(request.at("/messages/1/role").asText()).isEqualTo("user");
         assertThat(request.at("/messages/1/content/2/image_url/url").asText()).startsWith("data:image/png;base64,");
         assertThat(request.toString()).doesNotContain("do-not-send", "Bearer", "tools", "file_id");

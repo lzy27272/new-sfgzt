@@ -27,6 +27,11 @@ public final class AiEvidenceResultValidator {
             String evidence=raw==null ? "":raw.path("evidenceId").asText();
             String observation=raw==null ? "模型未提供该项观察，请人工复核":raw.path("observation").asText();
             if(observation.length()>1200) throw new IllegalArgumentException("INVALID_MODEL_OUTPUT");
+            // Makeup cannot be treated as absent merely because the photograph is inconclusive.
+            if(code.equals("MAKEUP") && (raw==null || !raw.path("visibility").asText().equals("CLEAR"))) {
+                status="UNKNOWN";
+                observation="妆容证据清晰度不足或未确认；看不清不等于未化妆，请补充清晰正面近照或人工复核";
+            }
             if(!onePerson) { status="UNKNOWN"; observation="未能确认照片仅对应一名员工，请分人提供清晰证据"; }
             if(!evidenceIds.contains(evidence) || observation.isBlank()) {
                 status="UNKNOWN";
@@ -46,6 +51,6 @@ public final class AiEvidenceResultValidator {
             }
         }
         if(allowed.isEmpty()) throw new IllegalArgumentException("INVALID_RULE");
-        return safe.put("overall",overall).put("mode","SHADOW").put("promptVersion","appearance-v1");
+        return safe.put("overall",overall).put("mode","SHADOW").put("promptVersion","appearance-v2");
     }
 }

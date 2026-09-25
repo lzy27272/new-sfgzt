@@ -1,4 +1,4 @@
-export type CriterionCode = 'UNIFORM' | 'BADGE' | 'EQUIPMENT'
+export type CriterionCode = 'UNIFORM' | 'BADGE' | 'EQUIPMENT' | 'MAKEUP'
 export type Criterion = { code: CriterionCode; enabled: boolean; standard: string }
 export type RuleConfig = { hotelIds: string[]; itemCodes: string[]; criteria: Criterion[]; exceptions: string; sampleIds: string[] }
 export type Rule = { id: string; position_id: string; version_no: number; state: string; configuration: RuleConfig }
@@ -13,10 +13,32 @@ export type Check = {
   result: { overall?: string; checks?: Finding[] }; hotel_name?: string; business_date?: string;
 }
 export type ReviewContext = { subjects: (Option & { position_name: string; configured: boolean })[]; checks: Check[]; providerReady: boolean; attachments: Evidence[]; canSubmit: boolean; defaultSubjectId: string }
-export const criterionNames: Record<CriterionCode, string> = { UNIFORM: '制服', BADGE: '工牌', EQUIPMENT: '规定装备' }
+export const criterionNames: Record<CriterionCode, string> = { UNIFORM: '制服', BADGE: '工牌', EQUIPMENT: '规定装备', MAKEUP: '妆容' }
 export const emptyConfig = (): RuleConfig => ({ hotelIds: [], itemCodes: [], criteria: [
   { code: 'UNIFORM', enabled: true, standard: '' }, { code: 'BADGE', enabled: true, standard: '' }, { code: 'EQUIPMENT', enabled: true, standard: '' },
+  { code: 'MAKEUP', enabled: false, standard: '' },
 ], exceptions: '', sampleIds: [] })
+/** Old rules remain unchanged: newly available criteria must be explicitly enabled. */
+export function normalizeConfig(config?: RuleConfig): RuleConfig {
+  if (!config) return emptyConfig()
+  return { ...config, hotelIds: [...config.hotelIds], itemCodes: [...config.itemCodes],
+    sampleIds: [...(config.sampleIds ?? [])], exceptions: config.exceptions ?? '',
+    criteria: emptyConfig().criteria.map(item => ({ ...(config.criteria.find(c => c.code === item.code) ?? { ...item, enabled: false }) })),
+  }
+}
+export function withSavedRule(rules: Rule[], saved: Rule): Rule[] {
+  return [saved, ...rules.filter(rule => rule.id !== saved.id).map(rule =>
+    saved.state === 'SHADOW' && rule.state === 'SHADOW' ? { ...rule, state: 'RETIRED' } : rule)]
+}
+export function ruleStatus(rules: Rule[], dirty: boolean) {
+  const latest = rules[0], active = rules.find(rule => rule.state === 'SHADOW')
+  const activeText = active ? `V${active.version_no}` : '暂无'
+  if (dirty) return { tone: 'warning', title: '有未保存修改', detail: `修改尚未保存；线上生效版本：${activeText}。保存草稿不会启用新修改。` }
+  if (latest?.state === 'DRAFT') return { tone: 'warning', title: `草稿 V${latest.version_no} · 尚未启用`,
+    detail: `${active ? `线上仍使用 ${activeText}。` : '规则已保存。'}点击“保存并启用 AI 检查”后生效。` }
+  if (active) return { tone: 'success', title: `已启用 ${activeText} · 等待选图检查`, detail: '规则已生效；仅处理人工选定的照片，不追溯扫描历史照片。' }
+  return { tone: 'warning', title: '尚未启用 AI 检查', detail: '请选择岗位，填写并保存明确规范后启用。' }
+}
 export const statusText: Record<string, string> = {
   QUEUED: '等待检查', RUNNING: '正在检查', COMPLETE: '检查完成', UNAVAILABLE: '暂不可检查', FAILED: '检查未完成', STALE: '证据或结果待核对',
   PASS: '建议符合', CONCERN: '疑似不符合', UNKNOWN: '无法确认', PENDING: '待人工复核', RETAKE: '需要补拍', OVERTURNED: '误判已撤销',

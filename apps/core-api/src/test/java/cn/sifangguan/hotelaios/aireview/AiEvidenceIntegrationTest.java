@@ -88,10 +88,13 @@ class AiEvidenceIntegrationTest {
         {"hotelIds":["%s"],"itemCodes":["%s"],"criteria":[{"code":"BADGE","enabled":true,"standard":"制服胸前佩戴工牌"}],"sampleIds":[],"exceptions":""}
         """.formatted(HOTEL,itemCode()); }
     JsonNode rule(boolean shadow) throws Exception {
+        return rule(shadow,config());
+    }
+    JsonNode rule(boolean shadow,String configuration) throws Exception {
         var existing=response(as(get("/api/v1/ai-evidence/rules").param("positionId",position()),PlatformAdminTestFixture.ACCOUNT_ID),200);
         String expected=existing.isEmpty()?"null":"\""+existing.get(0).path("id").asText()+"\"";
         return response(as(post("/api/v1/ai-evidence/rules"),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON)
-            .content("{\"positionId\":\""+position()+"\",\"expectedLatestId\":"+expected+",\"shadow\":"+shadow+",\"configuration\":"+config()+"}"),200);
+            .content("{\"positionId\":\""+position()+"\",\"expectedLatestId\":"+expected+",\"shadow\":"+shadow+",\"configuration\":"+configuration+"}"),200);
     }
     UUID record(String org) {
         UUID id=UUID.randomUUID();
@@ -190,6 +193,42 @@ class AiEvidenceIntegrationTest {
             .content("{\"positionId\":\""+position()+"\",\"shadow\":true,\"configuration\":"+config().replace(HOTEL,OTHER_HOTEL)+"}"),403);
         assertThat(jdbc.queryForObject("select count(*) from ai_evidence_rule",Integer.class)).isZero();
         verify(gateway,never()).inspect(any(),any());
+    }
+    @Test void makeupDraftEnableReadbackAndWorkerRemainHumanReviewOnly() throws Exception {
+        var configuration=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(config());
+        var criteria=configuration.putArray("criteria");
+        for(String code:List.of("UNIFORM","BADGE","EQUIPMENT","MAKEUP"))
+            criteria.addObject().put("code",code).put("enabled",true).put("standard","门店已确认规范："+code);
+        var draft=rule(false,configuration.toString());
+        assertThat(draft.path("state").asText()).isEqualTo("DRAFT");
+        assertThat(draft.path("configuration").path("criteria")).hasSize(4);
+        var published=rule(true,configuration.toString());
+        assertThat(published.path("state").asText()).isEqualTo("SHADOW");
+        var readback=response(as(get("/api/v1/ai-evidence/rules").param("positionId",position()),PlatformAdminTestFixture.ACCOUNT_ID),200);
+        assertThat(readback.get(0).path("configuration")).isEqualTo(configuration);
+        when(gateway.ready()).thenReturn(true);
+        UUID id=record(HOTEL);var before=jdbc.queryForMap("select status,submitted_at,row_version from work_record where id=?",id);
+        var check=request(id,upload(id),null,200);principal();
+        var job=service.claim(UUID.fromString(check.path("id").asText()));
+        service.finish(job,new AiVisionGateway.Observation(json.readTree("{\"personCount\":1,\"checks\":[]}"),120,30,"offline-test"),null);
+        var result=(JsonNode)service.checks(id).getFirst().get("result");
+        assertThat(result.path("checks").get(3).path("code").asText()).isEqualTo("MAKEUP");
+        assertThat(result.path("checks").get(3).path("status").asText()).isEqualTo("UNKNOWN");
+        assertThat(jdbc.queryForMap("select status,submitted_at,row_version from work_record where id=?",id)).isEqualTo(before);
+        verify(gateway,never()).inspect(any(),any());
+    }
+    @Test void activeVersionRemainsVisibleEvenAfterFiftyNewDrafts() throws Exception {
+        var active=rule(true);
+        jdbc.update("""
+            insert into ai_evidence_rule(id,tenant_id,position_id,version_no,state,configuration,created_by)
+            select gen_random_uuid(),tenant_id,position_id,n,'DRAFT',configuration,created_by
+            from ai_evidence_rule cross join generate_series(2,52) n where id=?::uuid
+            """,active.path("id").asText());
+        var versions=response(as(get("/api/v1/ai-evidence/rules").param("positionId",position()),PlatformAdminTestFixture.ACCOUNT_ID),200);
+        assertThat(versions).hasSize(51);
+        assertThat(versions.get(0).path("version_no").asInt()).isEqualTo(52);
+        assertThat(versions.get(50).path("id")).isEqualTo(active.path("id"));
+        assertThat(versions.get(50).path("state").asText()).isEqualTo("SHADOW");
     }
     @Test void supplementsAreOneChainAndSampleContentIsAdminOnly() throws Exception {
         rule(true);UUID id=record(HOTEL);String photo=upload(id);var check=request(id,photo,null,200);
