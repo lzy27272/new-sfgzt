@@ -53,7 +53,7 @@
 | AI_EVIDENCE_PROVIDER | qwen | 可选 qwen / deepseek；保留原默认值，不暗中切换服务商 |
 | AI_EVIDENCE_API_KEY | 空 | 仅后端受控密钥，不进前端/仓库 |
 | AI_EVIDENCE_TENANT_IDS | 空 | 显式租户名单；启用总开关却未配置会拒绝启动 |
-| AI_EVIDENCE_PILOT_HOTEL_IDS | 空 | 生产必须配置批准的门店清单；配置、提交和模型取图均再次限制，不影响历史记录查阅 |
+| AI_EVIDENCE_PILOT_HOTEL_IDS | 空 | 生产必须配置批准的门店清单；为空时不允许照片外发。规则可向其他门店发布供只读参考，提交、领取检查和模型取图仍逐次校验清单，不影响历史记录查阅 |
 | AI_EVIDENCE_MODEL | 随服务商 | 空值时 qwen 使用 qwen3-vl-plus，deepseek 使用 deepseek-flash |
 | AI_EVIDENCE_ENDPOINT | 随服务商 | 空值时使用对应服务商官方接口；显式地址也必须匹配该服务商 HTTPS 白名单 |
 | AI_EVIDENCE_DAILY_REQUEST_LIMIT | 100 | 单租户北京时间自然日调用上限，包括重试 |

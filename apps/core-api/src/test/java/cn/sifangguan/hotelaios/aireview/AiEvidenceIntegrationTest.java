@@ -37,6 +37,9 @@ class AiEvidenceIntegrationTest {
     static final String CEO="19000000-0000-0000-0000-000000000001";
     static final String MANAGER="19000000-0000-0000-0000-000000000002";
     static final String FRONT="19000000-0000-0000-0000-000000000003";
+    static final String ASSISTANT="19000000-0000-0000-0000-000000000008";
+    static final String ASSISTANT_ASSIGNMENT="19200000-0000-0000-0000-000000000008";
+    static final String ASSISTANT_POSITION="14000000-0000-0000-0000-000000000007";
     static final String ASSIGNMENT="19200000-0000-0000-0000-000000000001";
     static final String HOTEL="12000000-0000-0000-0000-000000000003";
     static final String OTHER_HOTEL="12000000-0000-0000-0000-000000000004";
@@ -100,6 +103,9 @@ class AiEvidenceIntegrationTest {
             .content("{\"positionId\":\""+position()+"\",\"expectedLatestId\":"+expected+",\"shadow\":"+shadow+",\"configuration\":"+configuration+"}"),200);
     }
     UUID record(String org) {
+        return record(org,MANAGER,ASSIGNMENT,ITEM);
+    }
+    UUID record(String org,String actor,String assignment,String item) {
         UUID id=UUID.randomUUID();
         jdbc.update("""
             insert into work_record(id,tenant_id,org_unit_id,employee_id,position_assignment_id,form_version_id,
@@ -108,7 +114,7 @@ class AiEvidenceIntegrationTest {
             select ?,a.tenant_id,?::uuid,a.employee_id,a.id,i.form_version_id,current_date,'SUBMITTED','{}'::jsonb,
               now(),i.work_package_version_id,i.id,'INSPECTION',?::uuid,now(),?::uuid,1,repeat('b',64),'AI影子测试'
             from employee_position_assignment a cross join work_package_item i where a.id=?::uuid and i.id=?::uuid
-            """,id,org,org,MANAGER,ASSIGNMENT,ITEM);
+            """,id,org,org,actor,assignment,item);
         return id;
     }
     byte[] photo() throws Exception {
@@ -201,11 +207,17 @@ class AiEvidenceIntegrationTest {
     }
     @Test void serverPilotAllowlistCannotBeExpandedByAnAdministratorRule() throws Exception {
         var options=response(as(get("/api/v1/ai-evidence/options"),PlatformAdminTestFixture.ACCOUNT_ID),200);
-        assertThat(options.path("hotels").size()).isEqualTo(1);
-        assertThat(options.path("hotels").get(0).path("id").asText()).isEqualTo(HOTEL);
+        assertThat(options.path("hotels").size()).isGreaterThan(1);
+        assertThat(options.path("pilotHotels").size()).isEqualTo(1);
+        assertThat(options.path("pilotHotels").get(0).path("id").asText()).isEqualTo(HOTEL);
         response(as(post("/api/v1/ai-evidence/rules"),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON)
-            .content("{\"positionId\":\""+position()+"\",\"shadow\":true,\"configuration\":"+config().replace(HOTEL,OTHER_HOTEL)+"}"),403);
-        assertThat(jdbc.queryForObject("select count(*) from ai_evidence_rule",Integer.class)).isZero();
+            .content("{\"positionId\":\""+position()+"\",\"shadow\":true,\"configuration\":"+config().replace(HOTEL,OTHER_HOTEL)+"}"),200);
+        assertThat(jdbc.queryForObject("select count(*) from ai_evidence_rule",Integer.class)).isEqualTo(1);
+        var id=record(OTHER_HOTEL);
+        var context=response(as(get("/api/v1/ai-evidence/records/{id}",id),MANAGER),200);
+        assertThat(context.path("pilotEnabled").asBoolean()).isFalse();
+        assertThat(context.path("canSubmit").asBoolean()).isFalse();
+        request(id,UUID.randomUUID().toString(),null,403);
         verify(gateway,never()).inspect(any(),any());
     }
     @Test void makeupDraftEnableReadbackAndWorkerRemainHumanReviewOnly() throws Exception {
@@ -338,5 +350,92 @@ class AiEvidenceIntegrationTest {
         jdbc.update("update ai_evidence_check set state='RUNNING',lease_until=now()-interval '1 minute' where id=?::uuid",next.path("id").asText());
         service.pending(UUID.fromString(TENANT));
         assertThat(service.checks(id).getFirst().get("failure_code")).isEqualTo("WORKER_INTERRUPTED");
+    }
+
+    void copyAssistantMigration() throws Exception {
+        var script=new org.springframework.core.io.ClassPathResource("db/migration/V87__assistant_grooming_participant_rules.sql");
+        try(var input=script.getInputStream()) { jdbc.execute(new String(input.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8)); }
+    }
+    JsonNode assistantRule() throws Exception {
+        return response(as(get("/api/v1/ai-evidence/rules").param("positionId",ASSISTANT_POSITION),PlatformAdminTestFixture.ACCOUNT_ID),200).get(0);
+    }
+    UUID assistantRecord() {
+        var item=jdbc.queryForObject("select id::text from work_package_item where tenant_id=?::uuid and item_code='AGM_NS_APPEARANCE_MEETING' limit 1",String.class,TENANT);
+        return record(HOTEL,ASSISTANT,ASSISTANT_ASSIGNMENT,item);
+    }
+    @Test void migrationCopiesExactStandardsAndPermanentSamplesWithoutChangingSourceOrHistory() throws Exception {
+        String sample=sample();
+        var configuration=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(config());
+        configuration.put("exceptions","按已批准例外执行，不推断身份");
+        configuration.putArray("sampleIds").add(sample);
+        configuration.putArray("criteria").addObject().put("code","MAKEUP").put("enabled",true).put("standard","清晰近照；模糊不判违规");
+        var source=rule(true,configuration.toString());
+        var original=jdbc.queryForMap("select * from ai_evidence_rule where id=?::uuid",source.path("id").asText());
+        var history=record(HOTEL);var before=jdbc.queryForMap("select * from work_record where id=?",history);
+        copyAssistantMigration();var copied=assistantRule();
+        assertThat(copied.path("configuration").path("criteria")).isEqualTo(source.path("configuration").path("criteria"));
+        assertThat(copied.path("configuration").path("exceptions")).isEqualTo(configuration.path("exceptions"));
+        assertThat(copied.path("configuration").path("sampleIds")).isEqualTo(configuration.path("sampleIds"));
+        assertThat(copied.path("configuration").path("sourceRuleId")).isEqualTo(source.path("id"));
+        assertThat(copied.path("configuration").path("subjectScope").asText()).isEqualTo("WORK_PARTICIPANTS");
+        assertThat(copied.path("configuration").path("itemCodes").toString()).contains("AGM_WS_APPEARANCE_MEETING","AGM_NS_APPEARANCE_MEETING");
+        assertThat(copied.path("configuration").path("hotelIds").toString()).contains(HOTEL,OTHER_HOTEL);
+        assertThat(jdbc.queryForMap("select * from ai_evidence_rule where id=?::uuid",source.path("id").asText())).isEqualTo(original);
+        assertThat(jdbc.queryForMap("select * from work_record where id=?",history)).isEqualTo(before);
+        copyAssistantMigration();assertThat(assistantRule().path("id")).isEqualTo(copied.path("id"));
+        // Editing a copied version may reuse the linked samples but cannot attach arbitrary other-role samples.
+        var saved=response(as(post("/api/v1/ai-evidence/rules"),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON)
+            .content(json.writeValueAsString(Map.of("positionId",ASSISTANT_POSITION,"expectedLatestId",copied.path("id").asText(),
+                "configuration",copied.path("configuration"),"shadow",true))),200);
+        assertThat(saved.path("version_no").asInt()).isEqualTo(2);
+        assertThat(Files.exists(PHOTOS.resolve(sampleKey(sample)))).isTrue();
+        verify(gateway,never()).inspect(any(),any());
+    }
+    @Test void participantsReadStandardsAndSamplesButNotOtherEmployeePhotosOrAdminEditor() throws Exception {
+        String sample=sample(),unlinked=sample();
+        var configuration=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(config());configuration.putArray("sampleIds").add(sample);
+        rule(true,configuration.toString());copyAssistantMigration();var copied=assistantRule();
+        ageImage(sample,3650);
+        var mine=response(as(get("/api/v1/ai-evidence/my-rules"),FRONT),200);
+        assertThat(mine).hasSize(1);
+        assertThat(mine.get(0).path("id")).isEqualTo(copied.path("id"));
+        assertThat(mine.toString()).doesNotContain("object_key","created_by",OTHER_HOTEL);
+        mvc.perform(as(get("/api/v1/ai-evidence/rules/{r}/samples/{s}/content",copied.path("id").asText(),sample),FRONT)).andExpect(status().isOk());
+        mvc.perform(as(get("/api/v1/ai-evidence/rules/{r}/samples/{s}/content",copied.path("id").asText(),unlinked),FRONT)).andExpect(status().isForbidden());
+        mvc.perform(as(get("/api/v1/ai-evidence/samples/{s}/content",sample),FRONT)).andExpect(status().isForbidden());
+        response(as(get("/api/v1/ai-evidence/options"),FRONT),403);
+        UUID record=assistantRecord();
+        response(as(get("/api/v1/ai-evidence/records/{id}",record),FRONT),403);
+        response(as(get("/api/v1/ai-evidence/records/{id}/rules",record),FRONT),403);
+        mvc.perform(as(get("/api/v1/ai-evidence/rules/{r}/samples/{s}/content",copied.path("id").asText(),sample).param("recordId",record.toString()),FRONT)).andExpect(status().isForbidden());
+    }
+    @Test void assistantTaskChecksOtherPositionsWithoutCopyingTheirWorkAndRetakesKeepHistoricalRule() throws Exception {
+        rule(true);copyAssistantMigration();var copied=assistantRule();UUID record=assistantRecord();
+        var context=response(as(get("/api/v1/ai-evidence/records/{id}",record),ASSISTANT),200);
+        assertThat(context.path("participantScope").asBoolean()).isTrue();
+        var frontAssignment=jdbc.queryForObject("select a.id::text from employee_position_assignment a join employee e on e.id=a.employee_id where e.account_id=?::uuid limit 1",String.class,FRONT);
+        assertThat(context.path("subjects").toString()).contains(frontAssignment);
+        for(var subject:context.path("subjects")) assertThat(subject.path("configured").asBoolean()).isTrue();
+        var before=jdbc.queryForMap("select status,submitted_at,content_hash,row_version from work_record where id=?",record);
+        var photo=response(as(multipart("/api/v1/ai-evidence/records/{id}/photos",record)
+            .file(new MockMultipartFile("file","synthetic.png","image/png",photo())),ASSISTANT),200).path("id").asText();
+        var body=Map.of("subjectAssignmentId",frontAssignment,"attachmentIds",List.of(photo));
+        var check=response(as(post("/api/v1/ai-evidence/records/{id}/checks",record),ASSISTANT).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(body)),200);
+        assertThat(check.path("rule_id")).isEqualTo(copied.path("id"));
+        assertThat(check.path("state").asText()).isEqualTo("UNAVAILABLE");
+        assertThat(jdbc.queryForMap("select status,submitted_at,content_hash,row_version from work_record where id=?",record)).isEqualTo(before);
+        // A new version must not rewrite the standard attached to an existing check.
+        response(as(post("/api/v1/ai-evidence/rules"),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON)
+            .content(json.writeValueAsString(Map.of("positionId",ASSISTANT_POSITION,"expectedLatestId",copied.path("id").asText(),
+                "configuration",copied.path("configuration"),"shadow",true))),200);
+        var references=response(as(get("/api/v1/ai-evidence/records/{id}/rules",record),ASSISTANT),200);
+        assertThat(references).hasSize(2);
+        assertThat(references.toString()).contains(copied.path("id").asText(),"RETIRED","SHADOW");
+        var replacement=response(as(multipart("/api/v1/ai-evidence/records/{id}/photos",record)
+            .file(new MockMultipartFile("file","retake.png","image/png",photo())),ASSISTANT),200).path("id").asText();
+        var next=response(as(post("/api/v1/ai-evidence/records/{id}/checks",record),ASSISTANT).contentType(MediaType.APPLICATION_JSON)
+            .content(json.writeValueAsString(Map.of("subjectAssignmentId",frontAssignment,"attachmentIds",List.of(replacement),"supersedesId",check.path("id").asText()))),200);
+        assertThat(next.path("rule_id")).isEqualTo(copied.path("id"));
+        verify(gateway,never()).inspect(any(),any());
     }
 }

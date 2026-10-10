@@ -6,6 +6,7 @@ import { useScopedResource } from './shared/useScopedResource'
 import { IcpFooter } from './shared/IcpFooter'
 import { WorkUsageFields } from './features/storeResources/WorkUsageFields'
 import { AiEvidenceRecord } from './features/aiEvidence/AiEvidenceReview'
+import { AiRuleReference } from './features/aiEvidence/AiRuleReference'
 import { UsageEvidenceSummary } from './features/storeResources/WorkUsagePanel'
 import { loadUsageCatalogue, supportsWorkUsage, usageInput, usagePayload, usageValidation, type UsageCatalogue } from './features/storeResources/workUsage'
 import { clearManualLogin, rememberManualLogin, requestsManualLogin } from './app/manualLogin'
@@ -1141,6 +1142,7 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
   return <div className="modal-backdrop" role="presentation"><section className={`modal work-record-modal${issueEditor ? ' issue-work-record-modal' : ''}`} role="dialog" aria-modal="true">
     <header><div><span className="panel-kicker">WORK RECORD · REAL API</span><h2>{issueEditor ? '物品领用' : item.title}</h2></div><button className="close" aria-label="关闭" disabled={!!saving || validatingAttachments} onClick={onClose}>×</button></header>
     <div className="form-body">
+      {item.itemCode?.includes('APPEARANCE') && <AiRuleReference identity={identity} recordId={existing?.id} itemCode={item.itemCode} />}
       {!viewOnly && usageSupported && <section className="work-usage-slot">
         {usageCatalogue.loading && <p role="status">正在读取门店物品清单…</p>}
         {!!usageCatalogue.error && <div className="inline-error" role="alert">门店物品清单读取失败，暂不能提交。<button type="button" className="secondary" onClick={() => void usageCatalogue.reload()}>重新读取</button></div>}

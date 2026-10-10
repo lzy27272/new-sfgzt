@@ -7,7 +7,7 @@ import type { Option, Rule, RuleConfig } from './model'
 import { EvidencePhoto } from './AiEvidenceReview'
 import './aiEvidence.css'
 
-type Options = { hotels: Option[]; positions: Option[]; items: { code: string; name: string }[]; providerReady: boolean; dailyRequestLimit: number }
+type Options = { hotels: Option[]; pilotHotels?: Option[]; positions: Option[]; items: { code: string; name: string }[]; providerReady: boolean; dailyRequestLimit: number }
 const emptyOptions: Options = { hotels: [], positions: [], items: [], providerReady: false, dailyRequestLimit: 0 }
 type Props = { identity: RoleContext; onClose: () => void }
 export function AiEvidenceAdmin(props: Props) {
@@ -80,7 +80,7 @@ function RuleEditor({ identity, onClose, position, setPosition, options }: Props
       const body = new FormData(); body.append('file', file); body.append('positionId', position); body.append('kind', kind)
       const result = await apiRequest<{ id: string }>('/ai-evidence/samples', identity, { method: 'POST', body })
       setDraft({ ...config, sampleIds: [...config.sampleIds, result.id] })
-      setMessage('样例已上传；保存规则后关联，仍遵循现有图片保留期限。')
+      setMessage('样例已上传；保存规则后关联。规范样例永久保留，不自动过期或删除。')
     } catch (reason) { setError(errorText(reason)) } finally { setBusy(null) }
   }
   return <section className="ai-page ai-admin" aria-label="AI检查规则配置">
@@ -100,6 +100,9 @@ function RuleEditor({ identity, onClose, position, setPosition, options }: Props
           </button>
           <div className="ai-scope-fields">
             <label>适用岗位<select aria-label="适用岗位" value={position} disabled={!!busy || options.loading} onChange={e => setPosition(e.target.value)}><option value="">请选择岗位</option>{options.data.positions.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            <label>规则适用对象<select aria-label="规则适用对象" value={config.subjectScope ?? 'POSITION'} disabled={disabled || !position} onChange={event => update(current => ({ ...current, subjectScope: event.target.value as RuleConfig['subjectScope'] }))}><option value="POSITION">只检查该岗位员工</option><option value="WORK_PARTICIPANTS">该岗位负责的本店全员检查</option></select></label>
+            <p className="ai-muted">全员规则按执行任务匹配，不限被检查员工岗位；不会授予查看其他员工工作记录的权限。规则可在非试点门店查看，照片外发仍受服务端试点名单限制。</p>
+            {config.sourceRuleVersion && <p className="ai-banner">复制来源：店长规则 V{config.sourceRuleVersion}。这是独立版本，修改不影响原店长规则和历史检查。</p>}
             <fieldset><legend>适用门店</legend><div className="ai-choice-list">{options.data.hotels.map(hotel => <label className="ai-checkbox" key={hotel.id}><input type="checkbox" checked={config.hotelIds.includes(hotel.id)} disabled={disabled || !position} onChange={() => toggle('hotelIds', hotel.id)} />{hotel.name}</label>)}</div></fieldset>
             <fieldset><legend>关联原工作项</legend><input aria-label="搜索工作项" placeholder="搜索仪容仪表、晨会等工作" value={itemQuery} onChange={e => setItemQuery(e.target.value)} /><div className="ai-choice-list ai-scroll-options">{options.data.items.filter(item => item.name.includes(itemQuery) || config.itemCodes.includes(item.code)).map(item => <label className="ai-checkbox" key={`${item.code}:${item.name}`}><input type="checkbox" checked={config.itemCodes.includes(item.code)} onChange={() => toggle('itemCodes', item.code)} disabled={disabled || !position} />{item.name}</label>)}</div></fieldset>
           </div>
@@ -131,7 +134,7 @@ function RuleEditor({ identity, onClose, position, setPosition, options }: Props
           {!options.loading && !options.error && !options.data.providerReady && <p className="ai-warning">模型服务尚未接通；可以保存规则，但暂不能发送照片检查，请人工复核。</p>}
         </section>
         <section className="ai-card"><h2>识别边界</h2><dl className="ai-definitions"><div><dt>疑似不符合</dt><dd>主管核实</dd></div><div><dt>无法判断</dt><dd>补拍或人工复核</dd></div><div><dt>服务异常</dt><dd>明确提示，可重试</dd></div></dl><p className="ai-warning">妆容看不清，不等于未化妆。</p></section>
-        <section className="ai-card"><h2>试点与留存</h2><ul className="ai-retention-list"><li>仅限后台批准的试点门店：{options.data.hotels.map(hotel => hotel.name).join('、') || '待读取'}</li><li>试点门店合计每天最多 {options.data.dailyRequestLimit || '—'} 次（含重试）</li><li>规范样例长期保留，不过期、不自动删除；员工工作照片仍按后台策略保留 5 天</li><li>不改变正式工作状态或 KPI。</li></ul></section>
+        <section className="ai-card"><h2>试点与留存</h2><ul className="ai-retention-list"><li>照片外发仅限后台批准的试点门店：{options.data.pilotHotels?.map(hotel => hotel.name).join('、') || '待读取服务端名单'}</li><li>规则分发不会扩大 AI 外发范围</li><li>试点门店合计每天最多 {options.data.dailyRequestLimit || '—'} 次（含重试）</li><li>规范样例长期保留，不过期、不自动删除；员工工作照片仍按后台策略保留 5 天</li><li>不改变正式工作状态或 KPI。</li></ul></section>
         {!!versions.data.length && <section className="ai-card"><details><summary>规则版本</summary><div className="ai-version-list">{versions.data.map(rule => <span className="ai-pill" key={rule.id}>V{rule.version_no} · {rule.state === 'SHADOW' ? '已启用' : rule.state === 'DRAFT' ? '草稿' : '已停用'}</span>)}</div></details></section>}
         </div>
       </aside>

@@ -66,3 +66,33 @@ test('failure and uncertain states do not misrepresent employees as non-complian
   assert.match(failureText.WORKER_INTERRUPTED, /不影响原工作提交时间/)
   assert.match(failureText.DAILY_LIMIT, /限额/)
 })
+
+test('participant copy preserves exact manager standards, exceptions and source version', () => {
+  const original = { hotelIds: ['h1', 'h2'], itemCodes: ['AGM_NS_APPEARANCE_MEETING', 'AGM_WS_APPEARANCE_MEETING'],
+    criteria: [{ code: 'BADGE', enabled: true, standard: '无需工牌' }, { code: 'EQUIPMENT', enabled: true, standard: '无规定装备' },
+      { code: 'MAKEUP', enabled: true, standard: '按已确认规范\n看不清不等于未化妆' }],
+    exceptions: '按门店批准例外执行', sampleIds: ['source-sample'], subjectScope: 'WORK_PARTICIPANTS', sourceRuleId: 'manager-rule', sourceRuleVersion: 13 }
+  const normalized = normalizeConfig(original)
+  assert.equal(normalized.subjectScope, 'WORK_PARTICIPANTS')
+  assert.equal(normalized.sourceRuleId, 'manager-rule')
+  assert.equal(normalized.sourceRuleVersion, 13)
+  assert.equal(normalized.exceptions, original.exceptions)
+  assert.deepEqual(normalized.criteria.filter(c => c.enabled), original.criteria)
+  normalized.sampleIds.pop()
+  normalized.hotelIds.pop()
+  assert.deepEqual(original.sampleIds, ['source-sample'])
+  assert.deepEqual(original.hotelIds, ['h1', 'h2'])
+})
+
+test('participant rule edits and new versions cannot rewrite historical configurations', () => {
+  const old = { id: 'copy-v1', position_id: 'assistant', version_no: 1, state: 'SHADOW',
+    configuration: { ...emptyConfig(), subjectScope: 'WORK_PARTICIPANTS', sourceRuleId: 'manager-v13', sourceRuleVersion: 13 } }
+  const changed = normalizeConfig(old.configuration)
+  changed.criteria[0].standard = '新标准'
+  const next = { ...old, id: 'copy-v2', version_no: 2, configuration: changed }
+  const rules = withSavedRule([old], next)
+  assert.equal(rules[1].state, 'RETIRED')
+  assert.equal(rules[1].configuration.criteria[0].standard, '')
+  assert.equal(rules[0].configuration.sourceRuleVersion, 13)
+  assert.equal(old.state, 'SHADOW')
+})

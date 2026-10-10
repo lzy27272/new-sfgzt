@@ -1,6 +1,6 @@
 export type CriterionCode = 'UNIFORM' | 'BADGE' | 'EQUIPMENT' | 'MAKEUP'
 export type Criterion = { code: CriterionCode; enabled: boolean; standard: string }
-export type RuleConfig = { hotelIds: string[]; itemCodes: string[]; criteria: Criterion[]; exceptions: string; sampleIds: string[] }
+export type RuleConfig = { hotelIds: string[]; itemCodes: string[]; criteria: Criterion[]; exceptions: string; sampleIds: string[]; subjectScope?: 'POSITION' | 'WORK_PARTICIPANTS'; sourceRuleId?: string; sourceRuleVersion?: number }
 export type Rule = { id: string; position_id: string; version_no: number; state: string; configuration: RuleConfig }
 export type Option = { id: string; name: string }
 export type Evidence = { id: string; original_name: string; media_type: string; sha256?: string; source?: 'AI' | 'WORK' | 'SAMPLE' }
@@ -8,11 +8,12 @@ export type Finding = { code: CriterionCode; status: string; observation: string
 export type Check = {
   id: string; work_record_id: string; subject_assignment_id: string; subject_name?: string; position_name?: string;
   state: string; human_outcome: string; human_reason?: string; appeal_reason?: string; failure_code?: string;
-  requested_by?: string; row_version: number; rule_version?: number; created_at: string;
+  requested_by?: string; row_version: number; rule_id?: string; rule_version?: number; created_at: string;
   input_tokens?: number; output_tokens?: number; supersedes_id?: string; evidence: Evidence[];
   result: { overall?: string; checks?: Finding[] }; hotel_name?: string; business_date?: string;
 }
-export type ReviewContext = { subjects: (Option & { position_name: string; configured: boolean })[]; checks: Check[]; providerReady: boolean; attachments: Evidence[]; canSubmit: boolean; defaultSubjectId: string }
+export type ReviewContext = { subjects: (Option & { position_name: string; configured: boolean })[]; checks: Check[]; providerReady: boolean; attachments: Evidence[]; canSubmit: boolean; defaultSubjectId: string; pilotEnabled?: boolean; participantScope?: boolean }
+export type RuleReference = { id: string; version_no: number; state: string; position_name: string; source_position_name?: string; sourceRuleVersion?: number; subjectScope: 'POSITION' | 'WORK_PARTICIPANTS'; criteria: Criterion[]; exceptions: string; samples: Evidence[]; itemCodes: string[]; hotels: Option[]; pilotEnabled: boolean }
 export const criterionNames: Record<CriterionCode, string> = { UNIFORM: '制服', BADGE: '工牌', EQUIPMENT: '规定装备', MAKEUP: '妆容' }
 export const emptyConfig = (): RuleConfig => ({ hotelIds: [], itemCodes: [], criteria: [
   { code: 'UNIFORM', enabled: true, standard: '' }, { code: 'BADGE', enabled: true, standard: '' }, { code: 'EQUIPMENT', enabled: true, standard: '' },

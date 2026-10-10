@@ -41,7 +41,8 @@ public class AiEvidenceService {
         this.pilotHotels=Set.copyOf(Arrays.stream(pilotHotels.split(",")).map(String::trim)
                 .filter(s->!s.isEmpty()).map(UUID::fromString).toList());
     }
-    private boolean pilotHotel(Object id) { return pilotHotels.isEmpty() || pilotHotels.contains(id); }
+    // Distributing standards to all hotels must never implicitly authorize outbound photos.
+    private boolean pilotHotel(Object id) { return pilotHotels.contains(id); }
     private void requirePilotHotel(Object id) {
         if(!pilotHotel(id)) throw new AccessDeniedException("此门店不在已批准的AI试点范围");
     }
@@ -73,7 +74,8 @@ public class AiEvidenceService {
     @Transactional(readOnly=true)
     public Map<String,Object> options() {
         prepare();admin();
-        return Map.of("hotels",jdbc.queryForList("select id,name from org_unit where tenant_id=:tenant and unit_type='HOTEL' and status='ACTIVE' order by name",params()).stream().filter(h->pilotHotel(h.get("id"))).toList(),
+        var hotels=jdbc.queryForList("select id,name from org_unit where tenant_id=:tenant and unit_type='HOTEL' and status='ACTIVE' order by name",params());
+        return Map.of("hotels",hotels,"pilotHotels",hotels.stream().filter(h->pilotHotel(h.get("id"))).toList(),
                 "positions",jdbc.queryForList("select id,name from position_definition where tenant_id=:tenant and status='ACTIVE' order by name",params()),
                 "items",jdbc.queryForList("""
                     select distinct i.item_code as code,i.name from work_package_item i
@@ -108,16 +110,30 @@ public class AiEvidenceService {
         }
         if(c.criteria().stream().noneMatch(AiEvidenceModels.Criterion::enabled)) throw new IllegalArgumentException("至少启用一项客观检查");
         for(UUID hotel:new HashSet<>(c.hotelIds())) {
-            requirePilotHotel(hotel);
+            // Publishing a readable standard does not authorize sending photos externally.
+            // request(), claim() and images() still enforce the independent pilot allowlist.
             one("select id from org_unit where tenant_id=:tenant and id=:id and unit_type='HOTEL' and status='ACTIVE'",params().addValue("id",hotel));
         }
         for(String code:new HashSet<>(c.itemCodes())) {
             one("select id from work_package_item where tenant_id=:tenant and item_code=:code limit 1",params().addValue("code",code));
         }
         if(c.sampleIds()!=null) for(UUID id:new HashSet<>(c.sampleIds())) {
-            one("select id from ai_evidence_sample where tenant_id=:tenant and id=:id and position_id=:position",
+            one("""
+                    select s.id from ai_evidence_sample s where s.tenant_id=:tenant and s.id=:id
+                    and (s.position_id=:position or exists(select 1 from ai_evidence_rule r
+                      where r.tenant_id=s.tenant_id and r.position_id=:position
+                        and r.configuration->'sampleIds' @> jsonb_build_array(cast(:id as text))))
+                    """,
                     params().addValue("id",id).addValue("position",request.positionId()));
             sampleContent(id); // Permanent retention does not revive deleted or missing sample bytes.
+        }
+        if(c.sourceRuleId()!=null || c.sourceRuleVersion()!=null) {
+            one("""
+                    select id from ai_evidence_rule where tenant_id=:tenant and position_id=:position
+                      and configuration->>'sourceRuleId'=:source
+                      and configuration->>'sourceRuleVersion'=:version limit 1
+                    """,params().addValue("position",request.positionId()).addValue("source",String.valueOf(c.sourceRuleId()))
+                    .addValue("version",String.valueOf(c.sourceRuleVersion())));
         }
     }
     @Transactional
@@ -140,6 +156,108 @@ public class AiEvidenceService {
         audit.record("AI_EVIDENCE_RULE_VERSION_CREATED","AI_EVIDENCE_RULE",id,
                 encode(Map.of("version",version,"mode",request.shadow()?"SHADOW":"DRAFT")));
         return rules(request.positionId()).getFirst();
+    }
+    private List<Map<String,Object>> activeRules() {
+        return jdbc.queryForList("""
+                select r.*,p.name as position_name,sp.name as source_position_name
+                from ai_evidence_rule r join position_definition p on p.tenant_id=r.tenant_id and p.id=r.position_id
+                left join ai_evidence_rule source on source.tenant_id=r.tenant_id and source.id::text=r.configuration->>'sourceRuleId'
+                left join position_definition sp on sp.tenant_id=source.tenant_id and sp.id=source.position_id
+                where r.tenant_id=:tenant and r.state='SHADOW' order by p.name,r.id
+                """,params());
+    }
+    private boolean participants(Map<String,Object> rule) {
+        return "WORK_PARTICIPANTS".equals(node(rule.get("configuration")).path("subjectScope").asText());
+    }
+    private boolean covers(Map<String,Object> rule,Map<String,Object> record) {
+        var c=node(rule.get("configuration"));
+        return contains(c.path("hotelIds"),String.valueOf(record.get("hotel_id")))
+                && contains(c.path("itemCodes"),String.valueOf(record.get("item_code")));
+    }
+    private Map<String,Object> participantRule(Map<String,Object> record,List<Map<String,Object>> rules) {
+        return rules.stream().filter(rule->participants(rule) && record.get("position_id").equals(rule.get("position_id"))
+                && covers(rule,record)).findFirst().orElse(null);
+    }
+    private Map<String,Object> resolveRule(Map<String,Object> record,Object subjectPosition,List<Map<String,Object>> rules) {
+        var taskRule=participantRule(record,rules);
+        if(taskRule!=null) return taskRule;
+        return rules.stream().filter(rule->!participants(rule) && subjectPosition.equals(rule.get("position_id"))
+                && covers(rule,record)).findFirst().orElse(null);
+    }
+    /** Standards are deliberately separate from record/evidence APIs. A participant
+     * may read their hotel's standard without gaining access to the submitter's record. */
+    @Transactional(readOnly=true)
+    public List<Map<String,Object>> myRuleReferences() {
+        var principal=prepare();
+        access.requireAnyPermission("work-record.read","work-record.submit","work-record.team-read","work-record.review");
+        Set<UUID> own=principal.businessActorAssignmentId()==null ? principal.assignmentIds()
+                : principal.assignmentIds().contains(principal.businessActorAssignmentId()) ? Set.of(principal.businessActorAssignmentId()) : Set.of();
+        if(own.isEmpty()) return List.of();
+        var assignments=jdbc.queryForList("""
+                select a.position_id,h.id,h.name from employee_position_assignment a
+                join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                join lateral (select o.id,o.name from org_unit_closure c
+                  join org_unit o on o.tenant_id=c.tenant_id and o.id=c.ancestor_id
+                  where c.tenant_id=a.tenant_id and c.descendant_id=a.org_unit_id and o.unit_type='HOTEL' and o.status='ACTIVE'
+                  order by c.depth limit 1) h on true
+                where a.tenant_id=:tenant and a.id in (:assignments) and e.account_id=:actor
+                  and a.status='ACTIVE' and a.valid_from<=current_date and (a.valid_to is null or a.valid_to>=current_date)
+                  and e.deleted_at is null and e.employment_status='ACTIVE'
+                """,params().addValue("assignments",own));
+        var result=new ArrayList<Map<String,Object>>();
+        for(var rule:activeRules()) {
+            var config=node(rule.get("configuration"));
+            var hotels=assignments.stream().filter(a->contains(config.path("hotelIds"),String.valueOf(a.get("id")))
+                    && (participants(rule) || a.get("position_id").equals(rule.get("position_id"))))
+                    .map(a->Map.<String,Object>of("id",a.get("id"),"name",a.get("name"))).distinct().toList();
+            if(!hotels.isEmpty()) result.add(reference(rule,hotels));
+        }
+        return result;
+    }
+    @Transactional(readOnly=true)
+    public List<Map<String,Object>> recordRuleReferences(UUID recordId) {
+        var r=record(recordId);
+        var positions=subjects(recordId).stream().map(s->s.get("position_id")).collect(java.util.stream.Collectors.toSet());
+        var applicable=new LinkedHashMap<Object,Map<String,Object>>();
+        for(var rule:activeRules()) if(covers(rule,r) && (participants(rule)
+                ? r.get("position_id").equals(rule.get("position_id")) : positions.contains(rule.get("position_id")))) applicable.put(rule.get("id"),rule);
+        // Historical checks always retain access to the exact version used, including retired versions.
+        jdbc.queryForList("""
+                select distinct r.*,p.name as position_name,sp.name as source_position_name
+                from ai_evidence_check c join ai_evidence_rule r on r.tenant_id=c.tenant_id and r.id=c.rule_id
+                join position_definition p on p.tenant_id=r.tenant_id and p.id=r.position_id
+                left join ai_evidence_rule source on source.tenant_id=r.tenant_id and source.id::text=r.configuration->>'sourceRuleId'
+                left join position_definition sp on sp.tenant_id=source.tenant_id and sp.id=source.position_id
+                where c.tenant_id=:tenant and c.work_record_id=:record order by r.version_no desc
+                """,params().addValue("record",recordId)).forEach(rule->applicable.putIfAbsent(rule.get("id"),rule));
+        var hotel=one("select id,name from org_unit where tenant_id=:tenant and id=:id",params().addValue("id",r.get("hotel_id")));
+        return applicable.values().stream().map(rule->reference(rule,List.of(hotel))).toList();
+    }
+    private Map<String,Object> reference(Map<String,Object> rule,List<Map<String,Object>> hotels) {
+        var config=node(rule.get("configuration"));
+        var result=new LinkedHashMap<String,Object>();
+        for(String key:List.of("id","version_no","state","position_name","source_position_name")) result.put(key,rule.get(key));
+        result.put("subjectScope",participants(rule)?"WORK_PARTICIPANTS":"POSITION");
+        result.put("criteria",config.path("criteria"));result.put("exceptions",config.path("exceptions").asText(""));
+        result.put("sourceRuleVersion",config.path("sourceRuleVersion").isIntegralNumber()?config.path("sourceRuleVersion").intValue():null);
+        result.put("itemCodes",config.path("itemCodes"));result.put("hotels",hotels);
+        result.put("pilotEnabled",hotels.stream().anyMatch(h->pilotHotel(h.get("id"))));
+        var samples=new ArrayList<Map<String,Object>>();
+        for(var id:config.path("sampleIds")) samples.add(Map.of("id",id.asText(),"source","SAMPLE",
+                "media_type","image/jpeg","original_name","规范样例 "+(samples.size()+1)));
+        result.put("samples",samples);
+        return result;
+    }
+    @Transactional(readOnly=true)
+    public AttachmentService.Download referenceSample(UUID ruleId,UUID sampleId,UUID recordId) {
+        var readable=recordId==null?myRuleReferences():recordRuleReferences(recordId);
+        var rule=readable.stream().filter(r->ruleId.equals(r.get("id"))).findFirst()
+                .orElseThrow(()->new AccessDeniedException("此规则不属于当前任职或授权工作范围"));
+        var samples=node(encode(rule.get("samples")));
+        boolean linked=false;
+        for(var sample:samples) if(sampleId.toString().equals(sample.path("id").asText())) linked=true;
+        if(!linked) throw new AccessDeniedException("样例不属于此规则版本");
+        return sampleDownload(sampleId);
     }
     @Transactional
     public Map<String,Object> uploadSample(UUID positionId,String kind,MultipartFile file) {
@@ -232,7 +350,9 @@ public class AiEvidenceService {
     @Transactional(readOnly=true)
     public List<Map<String,Object>> subjects(UUID recordId) {
         var r=record(recordId);var p=params().addValue("hotel",r.get("hotel_id"));
-        String scope=visibility.scope(access.principal(),p).summary("a");
+        // Explicit task-level rules authorize selecting this hotel's participants, not
+        // reading their other work. Record ownership/visibility is checked above.
+        String scope=participantRule(r,activeRules())!=null ? "true" : visibility.scope(access.principal(),p).summary("a");
         return jdbc.queryForList("""
                 select a.position_assignment_id as id,a.position_id,e.name,pd.name as position_name
                 from (select a.*,a.id as position_assignment_id,cast(:hotel as uuid) as target_org_unit_id
@@ -243,16 +363,15 @@ public class AiEvidenceService {
                 join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
                 join position_definition pd on pd.tenant_id=a.tenant_id and pd.id=a.position_id
                 where e.deleted_at is null and e.employment_status='ACTIVE' and
-                """+scope+" order by e.name limit 200",p);
+                """+scope+" order by e.name,a.position_assignment_id",p);
     }
     @Transactional(readOnly=true)
     public Map<String,Object> context(UUID recordId) {
         var r=record(recordId);
-        var activeRules=jdbc.queryForList("select position_id,configuration from ai_evidence_rule where tenant_id=:tenant and state='SHADOW'",params());
+        var activeRules=activeRules();
         var people=subjects(recordId).stream().map(subject->{
             var row=new LinkedHashMap<>(subject);
-            row.put("configured",pilotHotel(r.get("hotel_id")) && activeRules.stream().filter(rule->subject.get("position_id").equals(rule.get("position_id")))
-                .anyMatch(rule->{var c=node(rule.get("configuration"));return contains(c.path("hotelIds"),String.valueOf(r.get("hotel_id"))) && contains(c.path("itemCodes"),String.valueOf(r.get("item_code")));}));
+            row.put("configured",resolveRule(r,subject.get("position_id"),activeRules)!=null);
             return row;
         }).toList();
         var photos=new ArrayList<>(files.list(recordId));
@@ -260,7 +379,8 @@ public class AiEvidenceService {
         return Map.of("subjects",people,"checks",checks(recordId),"providerReady",gateway.ready(),
                 "attachments",photos,"canSubmit",pilotHotel(r.get("hotel_id")) && (access.principal().hasPermission("work-record.submit") || access.principal().hasPermission("*"))
                     && (access.principal().actorId().equals(r.get("account_id")) || access.principal().actorId().equals(r.get("submitted_by_account_id"))),
-                "defaultSubjectId",r.get("position_assignment_id"));
+                "defaultSubjectId",r.get("position_assignment_id"),"pilotEnabled",pilotHotel(r.get("hotel_id")),
+                "participantScope",participantRule(r,activeRules)!=null);
     }
     @Transactional(readOnly=true)
     public List<Map<String,Object>> checks(UUID recordId) {
@@ -331,8 +451,8 @@ public class AiEvidenceService {
                 throw new IllegalArgumentException("补拍必须关联同一工作和员工");
             rule=one("select * from ai_evidence_rule where tenant_id=:tenant and id=:id",params().addValue("id",previous.get("rule_id")));
         } else {
-            rule=one("select * from ai_evidence_rule where tenant_id=:tenant and position_id=:position and state='SHADOW'",
-                    params().addValue("position",subject.get("position_id")));
+            rule=resolveRule(r,subject.get("position_id"),activeRules());
+            if(rule==null) throw new IllegalArgumentException("此员工或检查任务尚未配置适用规则");
         }
         JsonNode config=node(rule.get("configuration"));
         if(!contains(config.path("hotelIds"),String.valueOf(r.get("hotel_id"))) || !contains(config.path("itemCodes"),String.valueOf(r.get("item_code"))))

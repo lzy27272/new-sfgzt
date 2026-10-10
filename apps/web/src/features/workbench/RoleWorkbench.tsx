@@ -13,6 +13,7 @@ import { DailyReportTodo } from './DailyReportTodo'
 import { AcademyTodo } from '../academy/AcademyTodo'
 import { ProcurementTodo } from '../procurement/ProcurementTodo'
 import { canProcure } from '../procurement/model'
+import { AiRuleReference } from '../aiEvidence/AiRuleReference'
 import { ManagerCycles, cycleType } from './ManagerCycles'
 import { WorkBoardPanel, WorkDateToolbar, WorkQueueAlerts, useWorkBoard } from './WorkBoard'
 import { boardLabels, emptyMetric, personalWorkLabel, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
@@ -89,6 +90,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   return <section className="wb-page">
     <header className="wb-page-heading"><div><span className="eyebrow">当前岗位工作</span><h1>{identity.label}工作台</h1><p>{identity.orgName} · 所选日期的工作进展与待办</p></div>
       <div className="wb-actions">
+        {canReadOwn && <AiRuleReference identity={identity} />}
         <OwnDailyReportShortcut permissions={permissions} available={dailyReportsAvailable} hasAssignment={Boolean(identity.businessActorAssignmentId)} go={go} />
         {dispatchMode && <button className="primary" aria-label="一键下达任务" onClick={() => dispatchMode === 'EXECUTIVE'
         ? go('tasks', { create: 'true' }) : setCreatingTask(true)}>工作下达</button>}
