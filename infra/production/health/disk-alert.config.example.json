@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "serverLabel": "43.136.184.38",
+  "mountPath": "/",
+  "thresholdPercent": 70,
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "accountId": "00000000-0000-0000-0000-000000000000",
+  "bindingId": "00000000-0000-0000-0000-000000000000",
+  "loginName": "replace-with-approved-login",
+  "bindingFingerprint": "replace-with-verified-64-character-fingerprint"
+}

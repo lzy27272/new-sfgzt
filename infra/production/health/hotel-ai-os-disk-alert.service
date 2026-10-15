@@ -1,0 +1,39 @@
+[Unit]
+Description=Hotel AI OS weekly disk capacity personal WeCom alert
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=hotelai
+Group=hotelai
+EnvironmentFile=/etc/hotel-ai-os/core-api.env
+ExecStart=/usr/bin/node /usr/local/lib/hotel-ai-os/disk-alert.mjs
+TimeoutStartSec=90s
+UMask=0077
+StateDirectory=hotel-ai-os-disk-alert
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+MemoryMax=192M
+TasksMax=64
+CPUQuota=20%
+Nice=10
