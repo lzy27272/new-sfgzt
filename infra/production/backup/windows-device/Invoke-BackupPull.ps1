@@ -1,6 +1,10 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([string]$BackupRoot = 'E:\中台备份')
+param(
+    [string]$BackupRoot = 'E:\中台备份',
+    [guid]$RunId = [guid]::NewGuid(),
+    [switch]$PreserveExistingBackups
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'BackupPull.Common.ps1')
@@ -9,6 +13,8 @@ $root = [IO.Path]::GetFullPath($BackupRoot).TrimEnd('\')
 $logPath = Join-Path $root 'logs\同步记录.log'
 $resultPath = Join-Path $root '同步结果.json'
 $lockStream = $null
+$executionSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$stage = 'INITIALIZE'
 function Write-SyncLog([string]$Message) {
     $line = ([DateTimeOffset]::Now.ToString('o') + ' ' + $Message + [Environment]::NewLine)
     [IO.File]::AppendAllText($logPath, $line, [Text.UTF8Encoding]::new($false))
@@ -18,6 +24,7 @@ function Publish-Failure([string]$Code, [string]$Message) {
         Write-BackupPullJsonAtomic $resultPath ([pscustomobject][ordered]@{
             kind = 'SFG_BACKUP_SYNC_RESULT_V1'; schemaVersion = 1; status = 'FAILED'
             completedAt = [DateTime]::UtcNow.ToString('o'); errorCode = $Code; message = $Message
+            runId = $RunId.ToString(); executionIdentitySid = $executionSid; stage = $stage
         })
         Write-SyncLog ('FAILED ' + $Code + ' ' + $Message)
     } catch { }
@@ -35,6 +42,8 @@ try {
         Write-SyncLog 'SKIP another synchronization is already running'
         exit 0
     }
+    Write-SyncLog ('START runId=' + $RunId.ToString() + ' sid=' + $executionSid)
+    $stage = 'VALIDATE_IDENTITY'
     $marker = Read-BackupPullJson (Join-Path $root '.sfg-backup-device.json') 16384
     $connectionPath = Join-Path $PSScriptRoot 'backup-connection.json'
     $connection = Read-BackupPullJson $connectionPath 32768
@@ -59,8 +68,9 @@ try {
     if ($hostFingerprint -cne [string]$connection.serverHostKeyFingerprint) {
         throw '固定的服务器身份指纹校验失败。'
     }
-    Clear-BackupPullIncoming $root
+    if (-not $PreserveExistingBackups) { Clear-BackupPullIncoming $root }
 
+    $stage = 'DOWNLOAD_MANIFEST'
     $manifestIncomingName = 'control/manifest-' + [guid]::NewGuid().ToString('N') + '.incoming.json'
     $manifestIncoming = Join-Path $root ($manifestIncomingName.Replace('/', '\'))
     Invoke-BackupSftpGet $connection $root $keyPath $knownHosts @(
@@ -102,9 +112,11 @@ try {
         throw '备用磁盘剩余空间不足，未开始下载。'
     }
     if ($downloads.Count -gt 0) {
+        $stage = 'DOWNLOAD_BACKUPS'
         $transfers = @($downloads | ForEach-Object { [pscustomobject]@{ Remote = $_.Remote; Local = $_.Local } })
         Invoke-BackupSftpGet $connection $root $keyPath $knownHosts $transfers
     }
+    $stage = 'VERIFY_BACKUPS'
     $quarantineRun = $null
     foreach ($download in $downloads) {
         $item = Get-Item -LiteralPath $download.IncomingPath -Force -ErrorAction Stop
@@ -137,7 +149,7 @@ try {
         if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '数据目录出现链接文件，拒绝清理。' }
         $relative = $file.FullName.Substring($dataRoot.Length + 1).Replace('\', '/')
         if (-not (Test-BackupManagedRelativePath $relative)) { throw ('数据目录出现非受管文件：' + $relative) }
-        if (-not $desired.ContainsKey($relative)) {
+        if (-not $PreserveExistingBackups -and -not $desired.ContainsKey($relative)) {
             if ($null -eq $quarantineRun) {
                 $quarantineRun = New-BackupPullDirectory $root (Join-Path $root ('quarantine\' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '-' + [guid]::NewGuid().ToString('N')))
             }
@@ -149,7 +161,7 @@ try {
     foreach ($directory in Get-ChildItem -LiteralPath (Join-Path $root 'quarantine') -Directory -Force) {
         if ($directory.Name -notmatch '^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}$' -or
             ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
-        if ($directory.CreationTimeUtc -lt [DateTime]::UtcNow.AddDays(-14)) {
+        if (-not $PreserveExistingBackups -and $directory.CreationTimeUtc -lt [DateTime]::UtcNow.AddDays(-14)) {
             $nestedLink = Get-ChildItem -LiteralPath $directory.FullName -Recurse -Force |
                 Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
                 Select-Object -First 1
@@ -159,6 +171,7 @@ try {
         }
     }
 
+    $stage = 'VERIFY_RECEIPT'
     $receiptName = 'control/receipt-' + [guid]::NewGuid().ToString('N') + '.incoming.json'
     $receiptIncoming = Join-Path $root ($receiptName.Replace('/', '\'))
     Invoke-BackupSftpGet $connection $root $keyPath $knownHosts @(
@@ -170,7 +183,9 @@ try {
     }
     $acceptedManifest = Join-Path $root 'control\accepted-manifest.json'
     [IO.File]::Copy($manifestIncoming, $acceptedManifest + '.new', $true)
-    if (Test-Path -LiteralPath $acceptedManifest) { [IO.File]::Replace($acceptedManifest + '.new', $acceptedManifest, $null) }
+    # PowerShell 5.1 binds plain $null to an empty string for this .NET string
+    # parameter, which makes the second sync fail with an invalid backup path.
+    if (Test-Path -LiteralPath $acceptedManifest) { [IO.File]::Replace($acceptedManifest + '.new', $acceptedManifest, [System.Management.Automation.Language.NullString]::Value) }
     else { [IO.File]::Move($acceptedManifest + '.new', $acceptedManifest) }
     [IO.File]::Copy($receiptIncoming, (Join-Path $root 'control\last-receipt.json'), $true)
     Remove-Item -LiteralPath $manifestIncoming, $receiptIncoming -Force
@@ -189,9 +204,10 @@ try {
         manifestGeneratedAt = [string]$manifest.generatedAt; completedAt = [DateTime]::UtcNow.ToString('o')
         receiptVerified = $true; totalEntries = $entries.Count; downloadedEntries = $downloads.Count
         categoryCounts = $categoryCounts; categoryBytes = $categoryBytes
+        runId = $RunId.ToString(); executionIdentitySid = $executionSid; stage = 'COMPLETE'
     }
     Write-BackupPullJsonAtomic $resultPath $result
-    Write-SyncLog ('SUCCESS manifest=' + [string]$manifest.manifestId + ' entries=' + $entries.Count + ' downloaded=' + $downloads.Count)
+    Write-SyncLog ('SUCCESS runId=' + $RunId.ToString() + ' sid=' + $executionSid + ' manifest=' + [string]$manifest.manifestId + ' entries=' + $entries.Count + ' downloaded=' + $downloads.Count)
     Write-Host '异地加密备份同步与逐文件校验成功。' -ForegroundColor Green
     Write-Host ('结果文件：' + $resultPath) -ForegroundColor Cyan
     exit 0

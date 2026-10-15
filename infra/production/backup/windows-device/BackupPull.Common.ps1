@@ -167,10 +167,60 @@ function Get-OpenSshTool {
     return $path
 }
 
+function ConvertTo-BackupNativeArgument {
+    param([AllowEmptyString()][string]$Value)
+    if ($Value -match '[\x00\r\n]') { throw 'Native argument contains a control character.' }
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    return ('"' + [regex]::Replace($escaped, '(\\+)$', '$1$1') + '"')
+}
+
+function Invoke-BackupNativeProcess {
+    param(
+        [string]$Executable, [string[]]$Arguments, [string]$WorkingDirectory = '',
+        [ValidateRange(1,18000)][int]$TimeoutSeconds = 30
+    )
+    # Windows PowerShell 5.1 turns redirected native stderr into terminating
+    # errors under ErrorActionPreference=Stop. Capture both OS pipes directly.
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Executable
+    $start.Arguments = (@($Arguments | ForEach-Object { ConvertTo-BackupNativeArgument $_ }) -join ' ')
+    if ($WorkingDirectory) { $start.WorkingDirectory = $WorkingDirectory }
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'Cannot start backup connection process.' }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Close()
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut -and -not $process.HasExited) {
+            # Only the process tree started by this invocation may be stopped.
+            $stop = [Diagnostics.ProcessStartInfo]::new()
+            $stop.FileName = Join-Path $env:WINDIR 'System32\taskkill.exe'
+            $stop.Arguments = '/PID ' + [string]$process.Id + ' /T /F'
+            $stop.UseShellExecute = $false; $stop.CreateNoWindow = $true
+            $stop.RedirectStandardOutput = $true; $stop.RedirectStandardError = $true
+            $killer = [Diagnostics.Process]::Start($stop)
+            try { $killer.WaitForExit(5000) | Out-Null } finally { $killer.Dispose() }
+            $process.WaitForExit(3000) | Out-Null
+        }
+        $outReady = $stdout.Wait(3000); $errReady = $stderr.Wait(3000)
+        return [pscustomobject]@{
+            timedOut = $timedOut
+            exitCode = $(if ($process.HasExited) { $process.ExitCode } else { -1 })
+            stdout = $(if ($outReady) { $stdout.GetAwaiter().GetResult() } else { '[output incomplete]' })
+            stderr = $(if ($errReady) { $stderr.GetAwaiter().GetResult() } else { '[error output incomplete]' })
+        }
+    } finally { $process.Dispose() }
+}
+
 function Get-BackupKeyFingerprint {
     param([string]$KeyTool, [string]$PublicKeyPath)
-    $output = & $KeyTool -l -E sha256 -f $PublicKeyPath 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0 -or $output -notmatch '(?:^|\s)(SHA256:[A-Za-z0-9+/]{43})(?:\s|$)') {
+    $processResult = Invoke-BackupNativeProcess $KeyTool @('-l','-E','sha256','-f',$PublicKeyPath)
+    $output = $processResult.stdout
+    if ($processResult.timedOut -or $processResult.exitCode -ne 0 -or $output -notmatch '(?:^|\s)(SHA256:[A-Za-z0-9+/]{43})(?:\s|$)') {
         throw '无法核验设备连接密钥指纹。'
     }
     return $Matches[1]
@@ -201,22 +251,28 @@ function Invoke-BackupSftpGet {
         [IO.File]::WriteAllLines($batch, $lines, [Text.Encoding]::ASCII)
         $sftp = Get-OpenSshTool 'sftp.exe'
         $arguments = @(
-            '-q', '-b', $batch, '-F', 'NUL', '-P', [string]$Connection.port,
+            '-vv', '-b', $batch, '-F', 'NUL', '-P', [string]$Connection.port,
             '-i', $KeyPath,
             '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
             '-o', 'PreferredAuthentications=publickey',
             '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no',
-            '-o', 'StrictHostKeyChecking=yes', '-o', ('UserKnownHostsFile=' + $KnownHostsPath),
-            '-o', 'ConnectTimeout=30', '-o', 'ConnectionAttempts=2', '-o', 'LogLevel=ERROR',
+            '-o', 'StrictHostKeyChecking=yes', '-o', ('UserKnownHostsFile="' + $KnownHostsPath + '"'),
+            '-o', 'ConnectTimeout=30', '-o', 'ConnectionAttempts=2',
+            '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
             ([string]$Connection.username + '@' + [string]$Connection.host)
         )
-        Push-Location -LiteralPath $BackupRoot
-        try { $output = & $sftp @arguments 2>&1 | Out-String; $exitCode = $LASTEXITCODE }
-        finally { Pop-Location }
-        if ($exitCode -ne 0) {
-            $safeOutput = ($output -replace '[\r\n]+', ' ').Trim()
-            if ($safeOutput.Length -gt 300) { $safeOutput = $safeOutput.Substring(0, 300) }
-            throw ('只读备份连接失败：' + $safeOutput)
+        $processResult = Invoke-BackupNativeProcess $sftp $arguments $BackupRoot 18000
+        if ($processResult.timedOut -or $processResult.exitCode -ne 0) {
+            $logs = New-BackupPullDirectory $BackupRoot (Join-Path $BackupRoot 'logs')
+            $errorPath = Assert-BackupPullPath $BackupRoot (Join-Path $logs 'connection-error-last.log')
+            $details = ('Time: ' + [DateTimeOffset]::Now.ToString('o') + "`r`nSID: " +
+                [Security.Principal.WindowsIdentity]::GetCurrent().User.Value + "`r`nExit: " +
+                $processResult.exitCode + "`r`nTimeout: " + $processResult.timedOut +
+                "`r`nSTDOUT:`r`n" + $processResult.stdout + "`r`nSTDERR:`r`n" + $processResult.stderr)
+            # One bounded diagnostic file; never log private-key contents.
+            if ($details.Length -gt 131072) { $details = $details.Substring(0,65536) + "`r`n[truncated]`r`n" + $details.Substring($details.Length-65536) }
+            [IO.File]::WriteAllText($errorPath, $details, [Text.UTF8Encoding]::new($true))
+            throw ('只读备份连接失败（退出码 ' + $processResult.exitCode + '），完整原因见 logs\connection-error-last.log')
         }
     } finally {
         if (Test-Path -LiteralPath $batch) { Remove-Item -LiteralPath $batch -Force }

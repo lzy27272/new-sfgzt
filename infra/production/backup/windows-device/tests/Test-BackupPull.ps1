@@ -105,7 +105,8 @@ try {
     Assert-Throws { Assert-BackupPullPath $testRoot (Join-Path $junction 'child') } 'Directory junction rejected'
     [IO.Directory]::Delete($junction)
     $installerText = [IO.File]::ReadAllText((Join-Path $packageRoot 'Install-BackupPull.ps1'), [Text.Encoding]::UTF8)
-    Assert-True ($installerText.Contains('& $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass')) 'Initial sync runs in a child PowerShell process so installer continues'
+    Assert-True ($installerText.Contains('Invoke-BackupSystemVerification $root')) 'Initial sync is verified under SYSTEM, not the interactive installer identity'
+    Assert-True ($installerText.Contains('Set-BackupSystemKeyPermission $root')) 'Installer applies the SYSTEM-safe key policy'
     Assert-True (-not $installerText.Contains("& (Join-Path `$program 'Invoke-BackupPull.ps1')")) 'Installer does not invoke exiting sync script in-process'
     $launcherBytes = [IO.File]::ReadAllBytes((Join-Path $packageRoot '02-Install-BackupPull.cmd'))
     Assert-True (@($launcherBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'CMD launcher is ASCII-only for every Windows system code page'

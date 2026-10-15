@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'BackupDevice.Common.ps1')
 . (Join-Path $PSScriptRoot 'BackupPull.Common.ps1')
+. (Join-Path $PSScriptRoot 'BackupSystem.Common.ps1')
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -26,7 +27,7 @@ try {
     $packageManifest = Read-BackupPullJson (Join-Path $PSScriptRoot 'package-manifest.json') 65536
     $expectedPackageFiles = @(
         '02-Install-BackupPull.cmd', 'Install-BackupPull.ps1', 'Invoke-BackupPull.ps1',
-        'BackupPull.Common.ps1', 'BackupDevice.Common.ps1', 'README.txt', 'backup-connection.json'
+        'BackupPull.Common.ps1', 'BackupSystem.Common.ps1', 'BackupDevice.Common.ps1', 'README.txt', 'backup-connection.json'
     )
     if ($packageManifest.kind -cne 'SFG_BACKUP_CLIENT_PACKAGE_V1' -or
         [int]$packageManifest.schemaVersion -ne 1 -or @($packageManifest.files).Count -ne $expectedPackageFiles.Count) {
@@ -84,14 +85,16 @@ try {
         throw '安装包内的服务器公钥和指纹不匹配。'
     }
     Protect-BackupIdentityDirectory $program
+    Set-BackupSystemKeyPermission $root
     foreach ($directory in @('control','data','incoming','logs','quarantine')) {
         New-BackupPullDirectory $root (Join-Path $root $directory) | Out-Null
     }
-    Write-Host '正在执行首次只读下载和完整性校验；首轮数据较多，窗口可能持续数分钟。' -ForegroundColor Yellow
+    Write-Host '正在以 SYSTEM 后台身份执行首次只读下载和完整性校验；首轮数据较多，请保持联网。' -ForegroundColor Yellow
     $powerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    & $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-        -File (Join-Path $program 'Invoke-BackupPull.ps1') -BackupRoot $root
-    if ($LASTEXITCODE -ne 0) { throw '首次同步未通过，暂不创建自动任务。' }
+    $verification = Invoke-BackupSystemVerification $root
+    if ($verification.status -ne 'SUCCESS') {
+        throw ('首次 SYSTEM 同步尚未验证通过，暂不创建每日自动任务。状态：' + $verification.status + '。请检查同步结果后重新运行安装。')
+    }
 
     $taskName = 'Sifangguan Encrypted Backup Pull'
     $taskArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $program 'Invoke-BackupPull.ps1') + '" -BackupRoot "' + $root + '"'

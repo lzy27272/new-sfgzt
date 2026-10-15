@@ -56,10 +56,14 @@ try {
 
     foreach ($name in @(
         '02-Install-BackupPull.cmd', 'Install-BackupPull.ps1', 'Invoke-BackupPull.ps1',
-        'BackupPull.Common.ps1', 'BackupDevice.Common.ps1', 'README.txt')) {
+        'BackupPull.Common.ps1', 'BackupSystem.Common.ps1', 'BackupDevice.Common.ps1', 'README.txt')) {
         $source = Join-Path $PSScriptRoot $name
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw ('源包缺少文件：' + $name) }
         [IO.File]::Copy($source, (Join-Path $staging $name), $false)
+        if ($name.EndsWith('.ps1')) {
+            $scriptText = [IO.File]::ReadAllText($source,[Text.Encoding]::UTF8)
+            [IO.File]::WriteAllText((Join-Path $staging $name),$scriptText,[Text.UTF8Encoding]::new($true))
+        }
     }
     # cmd.exe decodes batch files with the active legacy code page before a
     # script-level chcp command can safely affect every parsed block. Keep the
