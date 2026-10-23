@@ -1999,6 +1999,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
   }, [me.error, me.loading, navigate, presentationPolicy, route.explicit, view, visibleNavigation])
   const routePresentationAllowed = (view === 'data-retention' && isDataRetentionAdministrator)
     || (view === 'account-self-service' && isChairmanContext)
+    || (view === 'finance' && (activePermissions.includes('*') || navigation.find(item => item.id === 'finance')?.permissions?.some(code => activePermissions.includes(code))))
     || !useRoleDefaultsFallback
     || isRouteAllowedByRoleDefaults(presentationRoleCode, view, true)
   const page = useMemo(() => {

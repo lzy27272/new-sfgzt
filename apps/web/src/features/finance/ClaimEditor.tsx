@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { ApiIdentity } from '../../api/client'
 import { financeRequest, errorMessage } from './api'
 import { loadFinanceDraft, removeFinanceDraft, saveFinanceDraft } from './encryptedDrafts'
-import { canWithdrawClaim, cents, claimStatusLabel, differs, draftFromClaim, draftValidation, evidenceLabels, financeScope, invoiceTotal, money, type Claim, type DraftForm, type Evidence, type EvidenceKind, type FinanceContext, type LocalDraft } from './model'
+import { canWithdrawClaim, cents, claimLineAmount, claimStatusLabel, differs, draftFromClaim, draftValidation, evidenceLabels, financeScope, invoiceTotal, money, type Claim, type ClaimLine, type DraftForm, type Evidence, type EvidenceKind, type FinanceContext, type LocalDraft } from './model'
+import { exactDecimalTotal } from './unifiedModel'
 import { EvidencePreview } from './EvidencePreview'
 import { ReviewHistory } from './ReviewHistory'
 import s from './finance.module.css'
@@ -66,15 +67,15 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
         }
         update({ ...current.current, form: { ...current.current.form, invoices }, files: current.current.files.filter(f => f.id !== file.id), dirty: true })
       }
-      const validation = draftValidation(current.current.form)
+      const validation = submit ? draftValidation(current.current.form) : [current.current.form.transactionAmount, current.current.form.paymentAmount, current.current.form.requestedAmount].some(value => cents(value) === null) ? '金额请填写非负数字，最多两位小数' : undefined
       if (validation) { setError(validation); setNotice('已成功上传的凭证保留在云端；未完成的表单内容保留在本机。请核对识别候选值并补充明细。'); return }
       setBusy(submit ? '正在保存并提交审核…' : '正在保存云端草稿…')
-      const saved = await financeRequest<Claim>(identity, `/claims/${claim.id}`, 'PUT', current.current.form)
+      const saved = await financeRequest<Claim>(identity, `/claims/${claim.id}`, 'PUT', { ...current.current.form, invoices: current.current.form.invoices.map(invoice => ({ ...invoice, amount: invoice.amount === '' ? null : invoice.amount })), items: current.current.form.items?.map(item => ({ ...item, quantity: item.quantity === '' ? null : item.quantity, unitPrice: item.unitPrice === '' ? null : item.unitPrice, amount: item.amount === '' ? null : item.amount })) })
       setClaim(saved); update({ form: draftFromClaim(saved), files: [], dirty: false })
       if (submit) {
         const sent = await financeRequest<Claim>(identity, `/claims/${claim.id}/submit`, 'POST', { expectedVersion: saved.version })
         setClaim(sent); current.current = { form: draftFromClaim(sent), files: [], dirty: false }; setLocal(current.current)
-        await removeFinanceDraft(scope, claim.id); setNotice('已提交：门店负责人 → 财务 → 集团领导依次审核。'); onChange(); return sent
+        await removeFinanceDraft(scope, claim.id); setNotice('已提交：初审 → 门店财务 → 财务总监 → CEO终审依次审核。'); onChange(); return sent
       }
       setNotice('草稿已保存到云端，尚未提交审核。'); onChange(); return saved
     } catch (e) {
@@ -86,7 +87,7 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
   const addFiles = (kind: EvidenceKind, selected: FileList | null) => {
     if (!selected) return
     const files = Array.from(selected)
-    if (files.some(f => f.size <= 0 || f.size > 20 * 1024 * 1024 || !/\.(pdf|jpe?g|png)$/i.test(f.name))) { setError('仅支持20MB以内的PDF、JPG和PNG；本次选择尚未添加。'); return }
+    if (files.some(f => f.size <= 0 || f.size > 20 * 1024 * 1024 || !/\.(pdf|ofd|xml|jpe?g|png)$/i.test(f.name))) { setError('仅支持20MB以内的PDF、OFD、XML、JPG和PNG；本次选择尚未添加。'); return }
     if (claim.attachments.length + current.current.files.length + files.length > 40) { setError('每单最多40份凭证。'); return }
     if (kind === 'INVOICE') {
       const referenced = new Set(current.current.form.invoices.map(i => i.attachmentId))
@@ -108,6 +109,10 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
     catch (e) { setError(errorMessage(e)) } finally { setBusy('') }
   }
   const f = local.form
+  const updateItems = (items: ClaimLine[]) => {
+    const calculated = items.map(item => ({ ...item, amount: claimLineAmount(item.quantity, item.unitPrice) ?? '' }))
+    change({ items: calculated, requestedAmount: exactDecimalTotal(calculated.map(item => item.amount)) ?? f.requestedAmount, categoryId: calculated[0]?.categoryId ?? f.categoryId })
+  }
   const removeUploaded = async (id: string) => {
     if (current.current.form.invoices.some(i => i.attachmentId === id)) { setError('请先移除该文件的发票明细，再保存云端草稿，之后移除附件。'); return }
     if (!window.confirm('从草稿中移除此文件？已归档的原件不会从服务器删除。')) return
@@ -126,6 +131,7 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
   return <section className={s.editor}>
     <div className={s.heading}><div><small>REIMBURSEMENT</small><h2>{claim.canEdit ? '报销申请' : claim.title || '报销详情'}</h2></div><button type="button" onClick={onBack}>返回列表</button></div>
     <div className={s.identity}><strong>{claim.applicant_name} · {claim.hotel_name}</strong><span>{claim.company_name}</span><small>税号 {claim.company_tax_number} · {claimStatusLabel(claim)}</small></div>
+    {claim.configurationIssues && claim.configurationIssues.length > 0 && <p className={s.warning}>待配置草稿：{claim.configurationIssues.join('；')}。可先保存资料，补齐配置后才能正式提交。</p>}
     {!online && <p className={s.warning}>离线模式 · 可继续填写和选择凭证。重新联网仅同步草稿，不会自动提交。</p>}
     {notice && <p role="status" className={s.info}>{notice}</p>}
     {error && <p role="alert" className={s.error}>{error}</p>}
@@ -134,10 +140,13 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
       <label>报销事由<input value={f.title} maxLength={160} placeholder="例如：客房用品采购" onChange={e => change({ title: e.target.value })} /></label>
       <div className={s.pair}><label>业务日期<input type="date" value={f.businessDate} max={context.today} onChange={e => change({ businessDate: e.target.value })} /></label><label>费用类别<select value={f.categoryId ?? ''} onChange={e => change({ categoryId: e.target.value || null })}><option value="">请选择费用类别</option>{context.categories.filter(c => c.hotel_id === claim.hotel_id && c.enabled).map(c => <option key={c.id} value={c.id}>{c.name} · {treatmentLabel(c.treatment)}</option>)}</select></label></div>
       <div className={s.pair}><label>交易记录金额<input inputMode="decimal" value={f.transactionAmount} onChange={e => change({ transactionAmount: e.target.value })} /></label><label>实际支付金额<input inputMode="decimal" value={f.paymentAmount} onChange={e => change({ paymentAmount: e.target.value })} /></label></div>
-      <label>申请报销金额<input inputMode="decimal" value={f.requestedAmount} onChange={e => change({ requestedAmount: e.target.value })} /></label>
+      <label>申请报销金额<input inputMode="decimal" readOnly={!!f.items?.length} value={f.requestedAmount} onChange={e => change({ requestedAmount: e.target.value })} />{!!f.items?.length && <small>由费用明细精确合计，不可单独覆盖。</small>}</label>
+      <h3>费用明细与归属</h3><p className={s.muted}>一单可填写多个类别。数量与单价最多四位小数，行金额按四舍五入保留两位，申请总额由明细合计。</p>
+      {(f.items ?? []).map((line, index) => <div className={s.invoice} key={line.id}><div className={s.heading}><strong>费用明细 {index + 1} · {money(line.amount)}</strong><button type="button" onClick={() => updateItems((f.items ?? []).filter(item => item.id !== line.id))}>移除明细</button></div><label>费用说明<input value={line.description} maxLength={500} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, description: e.target.value } : item))} /></label><div className={s.pair}><label>费用类别<select value={line.categoryId ?? ''} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, categoryId: e.target.value || null } : item))}><option value="">请选择类别</option>{context.categories.filter(category => category.hotel_id === claim.hotel_id && category.enabled).map(category => <option key={category.id} value={category.id}>{category.name} · {treatmentLabel(category.treatment)}</option>)}</select></label>{(['quantity', 'unitPrice'] as const).map(key => <label key={key}>{key === 'quantity' ? '数量' : '单价'}<input inputMode="decimal" value={line[key]} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, [key]: e.target.value } : item))} /></label>)}<label>归属部门ID（可选）<input value={line.departmentId ?? ''} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, departmentId: e.target.value || null } : item))} /></label></div><label>关联本单发票（可多选）<select multiple value={line.invoiceIds ?? []} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, invoiceIds: Array.from(e.target.selectedOptions).map(option => option.value) } : item))}>{f.invoices.map(invoice => <option key={invoice.id} value={invoice.id}>{invoice.invoiceNumber || '号码待补'} · {money(invoice.amount)}</option>)}</select></label></div>)}
+      <button type="button" onClick={() => updateItems([...(f.items ?? []), { id: crypto.randomUUID(), categoryId: f.categoryId, description: '', quantity: '1', unitPrice: (f.items ?? []).length ? '0.00' : f.requestedAmount, amount: '0.00', departmentId: null, allocationMonth: null, invoiceIds: [] }])}>＋ 增加费用明细</button>
       <h3>上传凭证</h3><p className={s.muted}>三类原件分别保存，每份≤20MB。电子PDF可提取文字；照片需人工核对，不代表税务验真。</p>
       {(Object.keys(evidenceLabels) as EvidenceKind[]).map(kind => <div className={s.uploadGroup} key={kind}>
-        <div className={s.heading}><strong>{evidenceLabels[kind]} <span className={s.muted}>必填</span></strong><label className={s.uploadButton}>＋ 添加文件<input type="file" accept="application/pdf,image/jpeg,image/png" multiple onChange={e => { addFiles(kind, e.target.files); e.target.value = '' }} /></label></div>
+        <div className={s.heading}><strong>{evidenceLabels[kind]} <span className={s.muted}>必填</span></strong><label className={s.uploadButton}>＋ 添加文件<input type="file" accept="application/pdf,application/ofd,.ofd,application/xml,text/xml,.xml,image/jpeg,image/png" multiple onChange={e => { addFiles(kind, e.target.files); e.target.value = '' }} /></label></div>
         {claim.attachments.filter(a => a.kind === kind).map(a => <div className={s.fileLine} key={a.id}><span>{a.original_name} · 已上传云端</span>{kind === 'INVOICE' && claim.canEdit && <button type="button" onClick={() => addInvoice(a.id)}>添加发票明细</button>}{claim.canEdit && <button type="button" disabled={!online} onClick={() => void removeUploaded(a.id)}>移除附件</button>}</div>)}
         {local.files.filter(a => a.kind === kind).map(a => <div className={s.fileLine} key={a.id}><span>{a.file.name} · 待上传</span>{kind === 'INVOICE' && <button type="button" onClick={() => addInvoice(a.id)}>添加发票明细</button>}<button type="button" aria-label={`移除待上传${a.file.name}`} onClick={() => update({ dirty: true, files: current.current.files.filter(x => x.id !== a.id), form: { ...current.current.form, invoices: current.current.form.invoices.filter(i => i.attachmentId !== a.id) } })}>移除</button></div>)}
       </div>)}

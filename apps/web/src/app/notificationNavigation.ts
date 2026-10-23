@@ -19,6 +19,12 @@ export function resolveNotificationNavigation(
   const sourceType = normalized(notification.sourceType)
   const sourceId = notification.sourceId?.trim()
   const has = (...required: string[]) => grantedPermissions.includes('*') || required.some((permission) => grantedPermissions.includes(permission))
+  if (sourceType === 'FINANCE' && sourceId && has('finance.submit', 'finance.review', 'finance.read', 'finance.pay')) {
+    return { view: 'finance', params: { tab: type.includes('RETURN') ? 'mine' : type.includes('PAYMENT') || type.includes('APPROVED') ? 'all' : 'review', id: sourceId }, actionLabel: '办理财务单据' }
+  }
+  if (sourceType === 'FINANCE_OPERATION' && sourceId && has('finance.submit', 'finance.review', 'finance.read', 'finance.pay')) {
+    return { view: 'finance', params: { tab: 'operations', screen: 'documents', documentId: sourceId }, actionLabel: '办理财务业务单据' }
+  }
   if (sourceType === 'ACADEMY_PLAN') {
     if (['ACADEMY_CONFIGURATION','ACADEMY_ATTEMPTS_EXHAUSTED','ACADEMY_MANAGER_OVERDUE'].includes(type))
       return has('academy.manage','academy.team-read') ? {view:'academy',params:{tab:'team'},actionLabel:'查看团队学习'} : undefined

@@ -183,6 +183,17 @@ public class WeComOAuthService {
             UUID.fromString(query.getFirst("id"));
             return value;
         }
+        if ("/finance".equals(uri.getPath())) {
+            var query=UriComponentsBuilder.fromUri(uri).build().getQueryParams();
+            if(query.keySet().equals(Set.of("tab","screen","documentId")) && query.values().stream().allMatch(v->v.size()==1)
+                    && "operations".equals(query.getFirst("tab")) && "documents".equals(query.getFirst("screen"))) {
+                UUID.fromString(query.getFirst("documentId"));return value;
+            }
+            if(!query.keySet().equals(Set.of("id","tab")) || query.get("id").size()!=1 || query.get("tab").size()!=1
+                    || !Set.of("review","all","mine").contains(query.getFirst("tab")))
+                throw new IllegalArgumentException("财务入口必须包含一个单据id和有效tab");
+            UUID.fromString(query.getFirst("id"));return value;
+        }
         if ("/procurement".equals(uri.getPath())) {
             var query = UriComponentsBuilder.fromUri(uri).build().getQueryParams();
             if (!query.keySet().equals(Set.of("orderId")) || query.get("orderId").size() != 1) {

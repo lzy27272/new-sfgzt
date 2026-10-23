@@ -29,6 +29,9 @@ class FinanceIntegrationTest {
     static final UUID T=UUID.fromString("10000000-0000-0000-0000-000000000001");
     static final EmbeddedPostgres PG=start();static final String URL=url();static final Path FILES=temp();
     @Autowired FinanceService service;@Autowired FinanceEvidenceService evidence;@Autowired JdbcTemplate jdbc;@Autowired MockMvc mvc;
+    @Autowired org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate namedJdbc;
+    @Autowired cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext database;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
     UUID owner,other,manager,finance,director,leader,cashier,hotel,assignment,category;String invoiceNumber;
     LocalDate today=LocalDate.now(ZoneId.of("Asia/Shanghai"));
     @DynamicPropertySource static void properties(DynamicPropertyRegistry r) {
@@ -79,10 +82,10 @@ class FinanceIntegrationTest {
         as(owner,true,"finance.configure");service.historical(new FinanceModels.Historical(List.of(new FinanceModels.HistoricalInvoice("",invoiceNumber,"金蝶历史测试"))));
         as(owner,false,"finance.submit");assertThatThrownBy(()->service.submit(historical,1)).hasMessageContaining("历史已报销");
     }
-    @Test void returningPreservesReservationAndRestartRequiresManagerReview() {
+    @Test void returningReleasesReservationAndRestartRequiresManagerReview() {
         UUID id=draft(false);as(owner,false,"finance.submit");service.submit(id,1);
         as(manager,false,"finance.review");service.review(id,review(2,"RETURN",false));
-        assertThat(jdbc.queryForObject("select count(*) from finance_invoice_reservation where claim_id=?",Integer.class,id)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from finance_invoice_reservation where claim_id=?",Integer.class,id)).isZero();
         as(owner,false,"finance.submit");assertThat(service.submit(id,3).get("status")).isEqualTo("MANAGER_REVIEW");
         service.withdraw(id,4);assertThat(jdbc.queryForObject("select count(*) from finance_invoice_reservation where claim_id=?",Integer.class,id)).isZero();
     }
@@ -160,7 +163,171 @@ class FinanceIntegrationTest {
         service.removeAttachment(id,paymentId,1);assertThatThrownBy(()->service.submit(id,2)).hasMessageContaining("补齐发票");
         // A saved draft must NOT disable a live config. Explicitly simulate a paused legacy config here.
         jdbc.update("update finance_store_config set enabled=false where tenant_id=? and hotel_id=?",T,hotel);
-        as(owner,false,"finance.submit");assertThatThrownBy(()->service.create(new FinanceModels.Create(UUID.randomUUID(),assignment))).hasMessageContaining("报销尚未启用");
+        as(owner,false,"finance.submit");UUID disabledDraft=UUID.randomUUID();
+        assertThat(service.create(new FinanceModels.Create(disabledDraft,assignment))).containsEntry("status","DRAFT");
+        assertThatThrownBy(()->service.submit(disabledDraft,0)).hasMessageContaining("报销尚未启用");
+    }
+    @Test void unconfiguredDraftCanBeSavedAndLaterSubmittedWithoutChangingItsIdentity() {
+        jdbc.update("delete from finance_store_config where tenant_id=? and hotel_id=?",T,hotel);
+        as(owner,false,"finance.submit");UUID id=UUID.randomUUID();
+        assertThat(service.create(new FinanceModels.Create(id,assignment))).containsEntry("company_id",null);
+        service.save(id,input(0,List.of(),false));
+        assertThat(service.detail(id).get("configurationIssues")).asList().isNotEmpty();
+        assertThatThrownBy(()->service.submit(id,1)).hasMessageContaining("尚未配置");
+        as(owner,true,"finance.configure");service.configure(hotel,config(-1,manager,finance,leader));
+        as(owner,false,"finance.submit");
+        assertThatThrownBy(()->service.submit(id,1)).hasMessageContaining("核对所有发票");
+        assertThat(service.detail(id)).containsEntry("id",id).containsEntry("status","DRAFT");
+    }
+    @Test void multiLinesValidateMoneyAndFreezeLineFactsWithoutDoubleCounting() {
+        UUID id=draft(false);UUID second=UUID.randomUUID();
+        as(owner,true,"finance.configure");service.category(hotel,second,new FinanceModels.Category("办公室用品","EXPENSE","办公","管理费用",true,-1));
+        as(owner,false,"finance.submit");
+        var detail=service.detail(id);@SuppressWarnings("unchecked")var invoices=(List<Map<String,Object>>)detail.get("invoices");
+        var invoice=invoices.getFirst();
+        UUID invoiceId=UUID.fromString(invoice.get("id").toString());
+        var commands=List.of(new FinanceModels.Invoice(invoiceId,UUID.fromString(invoice.get("attachment_id").toString()),"",invoiceNumber,new BigDecimal("90"),"91520100123456789X",true));
+        var items=List.of(new FinanceModels.Line(UUID.randomUUID(),category,"房务用品",new BigDecimal("2"),new BigDecimal("30"),new BigDecimal("60"),null,today.withDayOfMonth(1),List.of(invoiceId)),
+            new FinanceModels.Line(UUID.randomUUID(),second,"办公用品",BigDecimal.ONE,new BigDecimal("30"),new BigDecimal("30"),null,today.withDayOfMonth(1),List.of(invoiceId)));
+        as(owner,false,"finance.submit");
+        assertThatThrownBy(()->service.save(id,new FinanceModels.Draft(1,"多行费用",today,category,new BigDecimal("90"),new BigDecimal("90"),new BigDecimal("91"),"",commands,items))).hasMessageContaining("明细合计");
+        assertThat(service.save(id,new FinanceModels.Draft(1,"多行费用",today,category,new BigDecimal("90"),new BigDecimal("90"),new BigDecimal("90"),"",commands,items)).get("items")).asList().hasSize(2);
+        service.submit(id,2);as(manager,false,"finance.review");service.review(id,review(3,"APPROVE",false));as(finance,false,"finance.review");
+        assertThatThrownBy(()->service.review(id,new FinanceModels.Review(UUID.randomUUID(),4,"APPROVE","不应覆盖多行",second,new BigDecimal("90"),true))).hasMessageContaining("多行报销不能");
+        assertThatThrownBy(()->service.review(id,new FinanceModels.Review(UUID.randomUUID(),4,"APPROVE","不应改总额",category,new BigDecimal("89"),true))).hasMessageContaining("多行报销不能");
+        service.review(id,review(4,"APPROVE",true));as(director,false,"finance.review");service.review(id,review(5,"APPROVE",false));as(leader,false,"finance.review");service.review(id,review(6,"APPROVE",false));
+        assertThat(jdbc.queryForObject("select count(*) from finance_expense_entry where claim_id=?",Integer.class,id)).isZero();
+        assertThat(jdbc.queryForObject("select sum(amount) from finance_expense_line_entry where claim_id=?",BigDecimal.class,id)).isEqualByComparingTo("90");
+        as(finance,false,"finance.read");assertThat(((Map<?,?>)service.ledger(YearMonth.from(today).toString(),hotel).get("totals")).get("total")).isEqualTo("90.00");
+    }
+    @Test void workbenchTodosKeepCrossDayAndOnlyCurrentReviewerCounts() {
+        UUID id=draft(false);as(owner,false,"finance.submit");service.submit(id,1);
+        jdbc.update("update finance_claim set submitted_at=now()-interval '3 days' where id=?",id);
+        as(leader,false,"finance.review");assertThat(service.todos(0).get("total")).isEqualTo(0L);
+        as(manager,false,"finance.review");assertThat(service.todos(0).get("total")).isEqualTo(1L);
+        assertThat(service.todos(1).get("total")).isEqualTo(1L);assertThat((List<?>)service.todos(1).get("items")).isEmpty();
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_type='FINANCE' and source_id=? and recipient_account_id=?",Integer.class,id,manager)).isEqualTo(1);
+        service.review(id,review(2,"RETURN",false));assertThat(service.todos(0).get("total")).isEqualTo(0L);
+        as(owner,false,"finance.submit");assertThat(service.todos(0).get("total")).isEqualTo(1L);
+        as(other,false,"finance.submit");assertThat(service.todos(0).get("total")).isEqualTo(0L);
+    }
+    @Test void independentInvoiceIntakePreservesOriginalAndAssociatesWithoutCreatingExpenseOrLosingOwnerScope() throws Exception {
+        as(owner,false,"finance.submit");UUID intake=UUID.randomUUID();service.createIntake(new FinanceModels.Create(intake,assignment));
+        assertThat(jdbc.queryForObject("select count(*) from finance_claim where id=?",Integer.class,intake)).isZero();
+        var bytes=new ByteArrayOutputStream();ImageIO.write(new BufferedImage(16,24,BufferedImage.TYPE_INT_RGB),"png",bytes);byte[] original=bytes.toByteArray();
+        evidence.uploadIntake(intake,new MockMultipartFile("file","original.png","image/png",original));
+        service.saveIntake(intake,new FinanceModels.IntakeDraft(1,"",invoiceNumber,new BigDecimal("90"),"91520100123456789X",true));
+        assertThat(evidence.downloadIntake(intake).resource().getContentAsByteArray()).isEqualTo(original);
+        UUID claim=UUID.randomUUID();service.create(new FinanceModels.Create(claim,assignment));
+        var linked=service.associateIntake(intake,new FinanceModels.Associate(claim,0));
+        assertThat(service.associateIntake(intake,new FinanceModels.Associate(claim,0)).get("version")).isEqualTo(linked.get("version"));
+        @SuppressWarnings("unchecked")var files=(List<Map<String,Object>>)linked.get("attachments");UUID file=UUID.fromString(files.getFirst().get("id").toString());
+        assertThat(evidence.download(claim,file).resource().getContentAsByteArray()).isEqualTo(original);
+        assertThat(jdbc.queryForObject("select count(*) from finance_expense_entry where claim_id=?",Integer.class,claim)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from finance_invoice_reservation where claim_id=?",Integer.class,claim)).isZero();
+        as(other,false,"finance.submit");assertThatThrownBy(()->evidence.downloadIntake(intake)).isInstanceOf(ResponseStatusException.class);
+        as(owner,false,"finance.submit");assertThatThrownBy(()->service.saveIntake(intake,new FinanceModels.IntakeDraft(3,"","",null,"",false))).hasMessageContaining("未关联");
+    }
+    @Test void partialPaymentsRemainDueAndCashierCanArchiveOriginalAfterFullPayment() throws Exception {
+        UUID id=draft(false);as(owner,false,"finance.submit");service.submit(id,1);as(manager,false,"finance.review");service.review(id,review(2,"APPROVE",false));as(finance,false,"finance.review");service.review(id,review(3,"APPROVE",true));as(director,false,"finance.review");service.review(id,review(4,"APPROVE",false));as(leader,false,"finance.review");service.review(id,review(5,"APPROVE",false));
+        as(cashier,false,"finance.pay");var first=new FinanceModels.Payment(UUID.randomUUID(),6,new BigDecimal("40"),"首次付款",today);service.payment(id,first);service.payment(id,first);
+        assertThat(service.detail(id)).containsEntry("unpaidAmount","50.00");
+        assertThat(((Map<?,?>)service.todos(0).get("counts")).get("receipt")).isEqualTo(1L);
+        assertThat(service.todos(0,"payment").get("total")).isEqualTo(1L);
+        assertThat(service.todos(0,"receipt").get("total")).isEqualTo(1L);
+        assertThat(service.todos(0,"review").get("total")).isEqualTo(0L);
+        assertThatThrownBy(()->service.todos(0,"unknown")).hasMessageContaining("待办类别");
+        assertThatThrownBy(()->service.payment(id,new FinanceModels.Payment(UUID.randomUUID(),7,new BigDecimal("51"),"超付",today))).hasMessageContaining("未付余额");
+        service.payment(id,new FinanceModels.Payment(UUID.randomUUID(),7,new BigDecimal("50"),"尾款",today));
+        assertThat(service.detail(id)).containsEntry("canPay",false).containsEntry("canArchiveReceipts",true);
+        assertThat(service.todos(0,"payment").get("total")).isEqualTo(0L);
+        assertThat(service.todos(0,"receipt").get("total")).isEqualTo(1L);
+        UUID attachment=UUID.randomUUID();var bytes=new ByteArrayOutputStream();ImageIO.write(new BufferedImage(16,24,BufferedImage.TYPE_INT_RGB),"png",bytes);
+        evidence.upload(id,attachment,"PAYMENT",new MockMultipartFile("file","bank.png","image/png",bytes.toByteArray()));
+        UUID payment=jdbc.queryForObject("select id from finance_payment where request_id=?",UUID.class,first.requestId());
+        service.linkPaymentReceipt(id,payment,new FinanceModels.Receipt(attachment));
+        assertThat(jdbc.queryForObject("select count(*) from finance_payment_receipt where payment_id=?",Integer.class,payment)).isEqualTo(1);
+        assertThatThrownBy(()->jdbc.update("delete from finance_payment_receipt where payment_id=?",payment)).isInstanceOf(RuntimeException.class);
+        try(var connection=PG.getPostgresDatabase().getConnection();var statement=connection.createStatement()) {
+            statement.execute("set role hotel_ai_os_app");
+            statement.execute("select set_config('app.tenant_id','"+T+"',false)");
+            assertThatThrownBy(()->statement.executeUpdate("update finance_payment_receipt set created_at=now() where payment_id='"+payment+"'"))
+                .isInstanceOf(java.sql.SQLException.class);
+            assertThatThrownBy(()->statement.executeUpdate("delete from finance_payment_receipt where payment_id='"+payment+"'"))
+                .isInstanceOf(java.sql.SQLException.class);
+        }
+    }
+    @Test void cloudDraftRetainsIncompleteLinesAndInvoiceCandidatesWithoutInventingFacts() {
+        UUID id=draft(false);as(owner,false,"finance.submit");
+        UUID attachment=jdbc.queryForObject("select attachment_id from finance_invoice where claim_id=?",UUID.class,id);
+        var candidates=List.of(new FinanceModels.Invoice(UUID.randomUUID(),attachment,"","0012",null,"",false));
+        var items=List.of(new FinanceModels.Line(UUID.randomUUID(),null,"尚未写完",null,null,null,null,null,List.of()));
+        var saved=service.save(id,new FinanceModels.Draft(1,"保存未完成内容",today,null,BigDecimal.ZERO,BigDecimal.ZERO,BigDecimal.ZERO,"",candidates,items));
+        assertThat((List<?>)saved.get("items")).hasSize(1);assertThat((List<?>)saved.get("invoices")).hasSize(1);
+        assertThat(jdbc.queryForObject("select count(*) from finance_claim_line where claim_id=?",Integer.class,id)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from finance_invoice where claim_id=?",Integer.class,id)).isZero();
+        assertThatThrownBy(()->service.submit(id,2)).hasMessageContaining("补齐费用明细");
+    }
+    @Test void allocatedPaymentsConserveCentsAcrossThreeExpenseLines() {
+        UUID id=draft(false);as(owner,false,"finance.submit");
+        var detail=service.detail(id);
+        @SuppressWarnings("unchecked") var invoices=(List<Map<String,Object>>)detail.get("invoices");
+        var invoice=invoices.getFirst();UUID invoiceId=UUID.fromString(invoice.get("id").toString());
+        var invoiceCommands=List.of(new FinanceModels.Invoice(invoiceId,UUID.fromString(invoice.get("attachment_id").toString()),"",invoiceNumber,new BigDecimal("90"),"91520100123456789X",true));
+        var lines=new ArrayList<FinanceModels.Line>();
+        for(int i=0;i<3;i++) lines.add(new FinanceModels.Line(UUID.randomUUID(),category,"分摊明细"+i,BigDecimal.ONE,new BigDecimal("30"),new BigDecimal("30"),null,null,List.of(invoiceId)));
+        service.save(id,new FinanceModels.Draft(1,"累计分摊守恒",today,category,new BigDecimal("90"),new BigDecimal("90"),new BigDecimal("90"),"",invoiceCommands,lines));
+        service.submit(id,2);as(manager,false,"finance.review");service.review(id,review(3,"APPROVE",false));
+        as(finance,false,"finance.review");service.review(id,review(4,"APPROVE",true));
+        as(director,false,"finance.review");service.review(id,review(5,"APPROVE",false));
+        as(leader,false,"finance.review");service.review(id,review(6,"APPROVE",false));
+        as(cashier,false,"finance.pay");service.payment(id,new FinanceModels.Payment(UUID.randomUUID(),7,BigDecimal.ONE,"实际只付一元",today));
+        as(finance,false,"finance.read");var ledger=service.ledger(YearMonth.from(today).toString(),hotel);
+        var totals=(Map<?,?>)ledger.get("totals");assertThat(new BigDecimal(totals.get("paid").toString())).isEqualByComparingTo("1.00");
+        @SuppressWarnings("unchecked") var entries=(List<Map<String,Object>>)ledger.get("entries");
+        assertThat(entries).hasSize(3);
+        assertThat(entries.stream().map(row->new BigDecimal(row.get("allocated_paid").toString())).reduce(BigDecimal.ZERO,BigDecimal::add)).isEqualByComparingTo("1.00");
+        assertThat(entries.stream().map(row->row.get("entry_id")).distinct().count()).isEqualTo(3);
+    }
+    @Test void mixedTreatmentLedgerExportUsesSameLineFactsAndPreservesAllocationCents() {
+        UUID id=draft(false),asset=UUID.randomUUID();as(owner,true,"finance.configure");
+        service.category(hotel,asset,new FinanceModels.Category("固定资产","ASSET","设备","固定资产",true,-1));
+        as(owner,false,"finance.submit");var detail=service.detail(id);
+        @SuppressWarnings("unchecked")var invoices=(List<Map<String,Object>>)detail.get("invoices");var invoice=invoices.getFirst();UUID invoiceId=UUID.fromString(invoice.get("id").toString());
+        var invoiceCommands=List.of(new FinanceModels.Invoice(invoiceId,UUID.fromString(invoice.get("attachment_id").toString()),"",invoiceNumber,new BigDecimal("90"),"91520100123456789X",true));
+        var lines=List.of(new FinanceModels.Line(UUID.randomUUID(),category,"当期费用",BigDecimal.ONE,new BigDecimal("60"),new BigDecimal("60"),null,null,List.of(invoiceId)),new FinanceModels.Line(UUID.randomUUID(),asset,"购入设备",BigDecimal.ONE,new BigDecimal("30"),new BigDecimal("30"),null,null,List.of(invoiceId)));
+        service.save(id,new FinanceModels.Draft(1,"=SUM(1)",today,category,new BigDecimal("90"),new BigDecimal("90"),new BigDecimal("90"),"",invoiceCommands,lines));service.submit(id,2);
+        as(manager,false,"finance.review");service.review(id,review(3,"APPROVE",false));as(finance,false,"finance.review");service.review(id,review(4,"APPROVE",true));as(director,false,"finance.review");service.review(id,review(5,"APPROVE",false));as(leader,false,"finance.review");service.review(id,review(6,"APPROVE",false));
+        as(cashier,false,"finance.pay");service.payment(id,new FinanceModels.Payment(UUID.randomUUID(),7,BigDecimal.ONE,"一元真实分次付款",today));
+        as(finance,false,"finance.read");String month=YearMonth.from(today).toString();var ledger=service.ledger(month,hotel);
+        @SuppressWarnings("unchecked")var entries=(List<Map<String,Object>>)ledger.get("entries");
+        assertThat(((Map<?,?>)ledger.get("totals")).get("total")).isEqualTo("60.00");
+        var csv=service.export(month,hotel);assertThat(csv).contains("\"明细事实ID\"").contains("\"已付分摊\"").contains("\"'=SUM(1)\"");
+        var exported=csv.lines().skip(1).toList();assertThat(exported).hasSize(2);
+        for(var entry:entries){String line=exported.stream().filter(row->row.startsWith("\""+id+"\",\""+entry.get("entry_id")+"\",")).findFirst().orElseThrow();
+            assertThat(line).contains(",\""+entry.get("treatment")+"\",\""+entry.get("amount")+"\",\""+entry.get("allocated_paid")+"\",\""+entry.get("allocated_unpaid")+"\",");}
+        assertThat(entries.stream().map(row->new BigDecimal(row.get("allocated_paid").toString())).reduce(BigDecimal.ZERO,BigDecimal::add)).isEqualByComparingTo("1.00");
+        assertThat(exported.stream().filter(line->line.contains("\"ASSET\",\"30.00\"")).count()).isEqualTo(1);
+        assertThat(exported.stream().filter(line->line.contains("\"EXPENSE\",\"60.00\"")).count()).isEqualTo(1);
+    }
+    @Test void financeWeComQueueExecutesRealSqlAndSendsOnlyStillCurrentNodeWithMockTransport() {
+        UUID id=draft(false);as(owner,false,"finance.submit");service.submit(id,1);
+        String corp="finance-test-"+UUID.randomUUID();String user="test-"+UUID.randomUUID();
+        jdbc.update("insert into wecom_user_binding(tenant_id,corp_id,wecom_user_id,user_id_fingerprint,account_id) values(?,?,?,?,?)",T,corp,user,FinanceService.hash(corp+":"+user),manager);
+        var props=org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComProperties.class);
+        org.mockito.Mockito.when(props.tenantId()).thenReturn(T);org.mockito.Mockito.when(props.corpId()).thenReturn(corp);
+        org.mockito.Mockito.when(props.oauthCallbackUrl()).thenReturn(java.net.URI.create("https://localhost/api/v1/integrations/wecom/oauth/callback"));
+        var api=org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class);
+        org.mockito.Mockito.when(api.sendApplicationTaskLink(org.mockito.ArgumentMatchers.eq(user),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(java.net.URI.class))).thenReturn("isolated-test-message");
+        var worker=new cn.sifangguan.hotelaios.integrations.wecom.WeComDeliveryWorker(namedJdbc,database,new org.springframework.transaction.support.TransactionTemplate(transactionManager),api,props,50);
+        worker.run();
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery d join notification n on n.tenant_id=d.tenant_id and n.id=d.notification_id where n.source_id=? and d.status='SENT'",Integer.class,id)).isEqualTo(1);
+        UUID second=draft(false);as(owner,false,"finance.submit");
+        // Withdraw releases the first reservation before submitting the next independent message.
+        service.withdraw(id,2);service.submit(second,1);as(manager,false,"finance.review");service.review(second,review(2,"APPROVE",false));
+        worker.run();
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery d join notification n on n.tenant_id=d.tenant_id and n.id=d.notification_id where n.source_id=?",Integer.class,second)).isZero();
+        org.mockito.Mockito.verify(api,org.mockito.Mockito.times(1)).sendApplicationTaskLink(org.mockito.ArgumentMatchers.eq(user),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.any(java.net.URI.class));
     }
     @Test void initialSelfReviewSkipsOnlyOnceAndKeepsEvidenceAudit() {
         UUID id=draft(false);as(owner,true,"finance.configure");service.configure(hotel,config(0,owner,finance,leader));

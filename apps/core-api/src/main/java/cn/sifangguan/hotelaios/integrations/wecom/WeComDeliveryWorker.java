@@ -132,7 +132,16 @@ public class WeComDeliveryWorker {
                         limit 1
                     ) chat on true
                     where n.tenant_id = :tenantId
-                      and ((n.source_type = 'TASK' and task.id is not null)
+                      and ((n.source_type = 'FINANCE' and exists(select 1 from finance_claim fc
+                           where fc.tenant_id=n.tenant_id and fc.id=n.source_id and (
+                            (n.notification_type='FINANCE_REVIEW_PENDING' and fc.applicant_id<>n.recipient_account_id and n.recipient_account_id=case fc.status when 'MANAGER_REVIEW' then fc.manager_account_id when 'FINANCE_REVIEW' then fc.finance_account_id when 'DIRECTOR_REVIEW' then fc.director_account_id when 'LEADER_REVIEW' then fc.leader_account_id end)
+                            or (n.notification_type='FINANCE_PAYMENT_PENDING' and fc.status='APPROVED' and fc.cashier_account_id=n.recipient_account_id and (coalesce((select sum(fp.amount) from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id),0)<fc.approved_amount or exists(select 1 from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id and not exists(select 1 from finance_payment_receipt r where r.tenant_id=fp.tenant_id and r.payment_id=fp.id))))
+                            or (n.notification_type='FINANCE_RETURNED' and fc.status='RETURNED' and fc.applicant_id=n.recipient_account_id))))
+                           or (n.source_type='FINANCE_OPERATION' and exists(select 1 from fo_document fd where fd.tenant_id=n.tenant_id and fd.id=n.source_id and (
+                            (n.notification_type='FINANCE_OPERATION_REVIEW_PENDING' and fd.status='REVIEW' and fd.applicant_id<>n.recipient_account_id and fd.approval_route->>fd.review_index=cast(n.recipient_account_id as text))
+                            or (n.notification_type='FINANCE_OPERATION_PAYMENT_PENDING' and fd.status='APPROVED' and fd.cashier_account_id=n.recipient_account_id and fd.applicant_id<>n.recipient_account_id)
+                            or (n.notification_type='FINANCE_OPERATION_RETURNED' and fd.status='RETURNED' and fd.applicant_id=n.recipient_account_id))))
+                           or (n.source_type = 'TASK' and task.id is not null)
                            or (n.source_type = 'LOST_PROPERTY' and exists (
                                select 1 from lost_property_case lp
                                join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
@@ -257,7 +266,16 @@ public class WeComDeliveryWorker {
                         order by cb.created_at, cb.id limit 1
                     ) chat on true
                     where d.tenant_id = :tenantId and d.channel = 'WECHAT'
-                      and ((n.source_type = 'TASK' and task.id is not null)
+                      and ((n.source_type = 'FINANCE' and exists(select 1 from finance_claim fc
+                           where fc.tenant_id=n.tenant_id and fc.id=n.source_id and (
+                            (n.notification_type='FINANCE_REVIEW_PENDING' and fc.applicant_id<>n.recipient_account_id and n.recipient_account_id=case fc.status when 'MANAGER_REVIEW' then fc.manager_account_id when 'FINANCE_REVIEW' then fc.finance_account_id when 'DIRECTOR_REVIEW' then fc.director_account_id when 'LEADER_REVIEW' then fc.leader_account_id end)
+                            or (n.notification_type='FINANCE_PAYMENT_PENDING' and fc.status='APPROVED' and fc.cashier_account_id=n.recipient_account_id and (coalesce((select sum(fp.amount) from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id),0)<fc.approved_amount or exists(select 1 from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id and not exists(select 1 from finance_payment_receipt r where r.tenant_id=fp.tenant_id and r.payment_id=fp.id))))
+                            or (n.notification_type='FINANCE_RETURNED' and fc.status='RETURNED' and fc.applicant_id=n.recipient_account_id))))
+                           or (n.source_type='FINANCE_OPERATION' and exists(select 1 from fo_document fd where fd.tenant_id=n.tenant_id and fd.id=n.source_id and (
+                            (n.notification_type='FINANCE_OPERATION_REVIEW_PENDING' and fd.status='REVIEW' and fd.applicant_id<>n.recipient_account_id and fd.approval_route->>fd.review_index=cast(n.recipient_account_id as text))
+                            or (n.notification_type='FINANCE_OPERATION_PAYMENT_PENDING' and fd.status='APPROVED' and fd.cashier_account_id=n.recipient_account_id and fd.applicant_id<>n.recipient_account_id)
+                            or (n.notification_type='FINANCE_OPERATION_RETURNED' and fd.status='RETURNED' and fd.applicant_id=n.recipient_account_id))))
+                           or (n.source_type = 'TASK' and task.id is not null)
                            or (n.source_type = 'LOST_PROPERTY' and exists (
                                select 1 from lost_property_case lp
                                join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
@@ -395,6 +413,8 @@ public class WeComDeliveryWorker {
             // reviewer lands on the authenticated workbench and can open 团队工作 from there.
             case "WORK_RECORD" -> "#/workbench";
             case "PROCUREMENT" -> "#/procurement?orderId=" + sourceId;
+            case "FINANCE" -> "#/finance?tab="+("FINANCE_RETURNED".equals(notificationType)?"mine":"FINANCE_PAYMENT_PENDING".equals(notificationType)?"all":"review")+"&id="+sourceId;
+            case "FINANCE_OPERATION" -> "#/finance?tab=operations&screen=documents&documentId="+sourceId;
             case "LOST_PROPERTY" -> "#/lost-properties?id=" + sourceId;
             default -> throw new IllegalArgumentException("Unsupported WeCom notification source type");
         };

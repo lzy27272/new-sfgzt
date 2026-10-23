@@ -1,7 +1,10 @@
 import { apiRequest, apiBlob, type ApiIdentity } from '../../api/client'
 
-export function financeRequest<T>(identity: ApiIdentity, path: string, method = 'GET', body?: unknown): Promise<T> {
-  return apiRequest<T>(`/finance${path}`, identity, { method, body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(body instanceof FormData ? 120000 : 25000) })
+export async function financeRequest<T>(identity: ApiIdentity, path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+  const deadline = AbortSignal.timeout(body instanceof FormData ? 120000 : 25000)
+  const result = await apiRequest<T>(`/finance${path}`, identity, { method, body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body), signal: signal ? AbortSignal.any([signal, deadline]) : deadline })
+  if (method !== 'GET') window.dispatchEvent(new Event('finance:changed'))
+  return result
 }
 export async function financeDownload(identity: ApiIdentity, path: string, name: string) {
   const blob = await apiBlob(`/finance${path}`, identity, { signal: AbortSignal.timeout(30000) })
