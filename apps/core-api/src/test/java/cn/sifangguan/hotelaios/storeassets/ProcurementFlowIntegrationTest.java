@@ -34,6 +34,7 @@ class ProcurementFlowIntegrationTest {
     static final String TENANT="10000000-0000-0000-0000-000000000001",HOTEL="12000000-0000-0000-0000-000000000003",OTHER="12000000-0000-0000-0000-000000000004";
     static final String ADMIN="19000000-0000-0000-0000-000000000001",MANAGER="19000000-0000-0000-0000-000000000002",BUYER="19000000-0000-0000-0000-000000000005",RECEIVER="19000000-0000-0000-0000-000000000008";
     static final EmbeddedPostgres PG=start();static final Path FILES=temp();
+    private String financialCode;private UUID financialDepartment;
     @Autowired MockMvc mvc;@Autowired ObjectMapper json;@Autowired JdbcTemplate jdbc;@Autowired ProcurementService service;@Autowired XlsxWorkbook workbook;
     @DynamicPropertySource static void properties(DynamicPropertyRegistry r){
         r.add("spring.datasource.url",()->{try(var c=PG.getPostgresDatabase().getConnection()){return c.getMetaData().getURL();}catch(Exception e){throw new IllegalStateException(e);}});
@@ -50,6 +51,16 @@ class ProcurementFlowIntegrationTest {
         var row=api(get("/api/v1/procurement/hotels/"+HOTEL),ADMIN,200);
         api(put("/api/v1/procurement/hotels/"+HOTEL+"/config"),ADMIN,Map.of("expectedVersion",row.path("config").has("version")?row.path("config").path("version").asLong():-1,
             "enabled",true,"managerId",MANAGER,"buyerId",BUYER,"reviewerId",BUYER,"financeId",ADMIN,"financeDirectorId",ADMIN,"deputyId",MANAGER,"generalId",ADMIN,"receiverIds",List.of(RECEIVER)),200);
+        // The current OrderEditor explicitly sends governed finance dimensions.
+        // Publish a real classification with a different actor; do not seed a
+        // PUBLISHED row or bypass the production submit/purchase validation.
+        String suffix=UUID.randomUUID().toString().substring(0,8);financialCode="PROC_INVENTORY_"+suffix;financialDepartment=UUID.randomUUID();
+        jdbc.update("insert into org_unit(id,tenant_id,parent_id,code,name,unit_type) values(?::uuid,?::uuid,?::uuid,?,?,'DEPARTMENT')",financialDepartment,TENANT,HOTEL,"PROC-DEPT-"+suffix,"采购真实受益部门-"+suffix);
+        jdbc.update("insert into org_unit_closure(tenant_id,ancestor_id,descendant_id,depth) select ?::uuid,ancestor_id,?::uuid,depth+1 from org_unit_closure where tenant_id=?::uuid and descendant_id=?::uuid on conflict do nothing",TENANT,financialDepartment,TENANT,HOTEL);
+        jdbc.update("insert into org_unit_closure(tenant_id,ancestor_id,descendant_id,depth) values(?::uuid,?::uuid,?::uuid,0),(?::uuid,?::uuid,?::uuid,1) on conflict do nothing",TENANT,financialDepartment,financialDepartment,TENANT,HOTEL,financialDepartment);
+        UUID policy=UUID.randomUUID();
+        var category=api(post("/api/v1/finance/control/policies"),ADMIN,Map.of("requestId",policy,"hotelId",HOTEL,"kind","CATEGORY","code","procurement-test-"+suffix,"title","真实采购库存分类","effectiveFrom","2020-01-01","spec",Map.of("items",List.of(Map.of("code",financialCode,"name","采购库存资金-"+suffix,"treatment","INVENTORY")))),200);
+        api(post("/api/v1/finance/control/policies/"+policy+"/publish"),MANAGER,Map.of("expectedVersion",category.path("version").asInt(),"note","不同实际账号独立发布采购财务分类"),200);
     }
     @AfterAll static void close()throws Exception{PG.close();}
     @AfterEach void clearIdentity(){TenantContext.clear();}
@@ -144,7 +155,7 @@ class ProcurementFlowIntegrationTest {
         assertThat(jdbc.queryForObject("select count(*) from procurement_line where item_id=?::uuid",Integer.class,low.path("id").asText())).isOne();
         var order=api(get("/api/v1/procurement/orders/"+id),MANAGER,200);
         assertThat(order.path("source").asText()).isEqualTo("LOW_STOCK");
-        var body=Map.of("commandId",UUID.randomUUID(),"expectedVersion",order.path("version").asLong(),"title","补货与额外需求","lines",List.of(Map.of("itemId",low.path("id").asText(),"quantity",2,"unit","箱"),Map.of("itemId",extra.path("id").asText(),"quantity",5,"unit","支")));
+        var body=Map.of("commandId",UUID.randomUUID(),"expectedVersion",order.path("version").asLong(),"title","补货与额外需求","lines",List.of(requestLine(low,2,"箱"),requestLine(extra,5,"支")));
         api(put("/api/v1/procurement/orders/"+id),BUYER,body,403);
         var saved=api(put("/api/v1/procurement/orders/"+id),MANAGER,body,200);
         var sent=api(post("/api/v1/procurement/orders/"+id+"/submit"),MANAGER,cmd(saved.path("version").asLong()),200);
@@ -186,10 +197,26 @@ class ProcurementFlowIntegrationTest {
         var attachment=photo(id,r);mvc.perform(headers(get("/api/v1/procurement/orders/"+id+"/attachments/"+attachment.path("id").asText()),BUYER)).andExpect(status().isOk()).andExpect(result->assertThat(result.getResponse().getContentType()).isEqualTo("image/png"));
         api(multipart("/api/v1/procurement/orders/"+id+"/attachments").file(image()).param("receipt",r),MANAGER,403);
     }
+    @Test void legacyUnmappedPayloadMaySaveDraftButCannotSubmitWithoutRealFinancialDimensions()throws Exception {
+        var item=item(HOTEL,"1");
+        var oldShape=Map.of("commandId",UUID.randomUUID(),"expectedVersion",-1,"title","旧形状待补真实财务归集","lines",List.of(Map.of("itemId",item.path("id").asText(),"quantity",1,"unit","支")));
+        var draft=api(post("/api/v1/procurement/hotels/"+HOTEL+"/orders"),MANAGER,oldShape,201);String id=draft.path("id").asText();
+        assertThat(draft.path("status").asText()).isEqualTo("DRAFT");
+        var rejected=mvc.perform(headers(post("/api/v1/procurement/orders/"+id+"/submit"),MANAGER)
+            .contentType("application/json").content(json.writeValueAsString(cmd(draft.path("version").asLong()))))
+            .andExpect(status().isConflict()).andReturn();
+        assertThat(rejected.getResponse().getErrorMessage()).contains("明确选择已发布财务类别");
+        assertThat(jdbc.queryForObject("select status from procurement_order where id=?::uuid",String.class,id)).isEqualTo("DRAFT");
+        assertThat(jdbc.queryForObject("select financial_department_id from procurement_line where order_id=?::uuid",UUID.class,id)).isNull();
+        assertThat(balance(item)).isEqualByComparingTo("0");
+    }
     private JsonNode item(String hotel,String factor)throws Exception{return api(post("/api/v1/store-resources/hotels/"+hotel+"/items"),ADMIN,Map.of("sku","PUR-"+UUID.randomUUID(),"name","采购测试牙刷","category","CONSUMABLE","unit","支","unitCost",0,"minimumQuantity",10,"purchaseUnit","箱","purchaseFactor",factor),201);}
-    private Map<String,Object> request(JsonNode item,int count){return Map.of("commandId",UUID.randomUUID(),"expectedVersion",-1,"title","门店采购测试","lines",List.of(Map.of("itemId",item.path("id").asText(),"quantity",count,"unit","箱")));}
+    private Map<String,Object> requestLine(JsonNode item,int count,String unit){return Map.of("itemId",item.path("id").asText(),"quantity",count,"unit",unit,"lineKind","INVENTORY","financialCategoryCode",financialCode,"departmentId",financialDepartment.toString(),"projectKind","NONE");}
+    private Map<String,Object> request(JsonNode item,int count){return Map.of("commandId",UUID.randomUUID(),"expectedVersion",-1,"title","门店采购测试","lines",List.of(requestLine(item,count,"箱")));}
     private JsonNode ordered(JsonNode item,int count,String price)throws Exception {
         var draft=api(post("/api/v1/procurement/hotels/"+HOTEL+"/orders"),MANAGER,request(item,count),201);String id=draft.path("id").asText();
+        assertThat(draft.path("lines").get(0).path("financial_category_code").asText()).isEqualTo(financialCode);
+        assertThat(draft.path("lines").get(0).path("financial_department_id").asText()).isEqualTo(financialDepartment.toString());
         var submitted=api(post("/api/v1/procurement/orders/"+id+"/submit"),MANAGER,cmd(draft.path("version").asLong()),200);
         return api(post("/api/v1/procurement/orders/"+id+"/purchase"),BUYER,Map.of("commandId",UUID.randomUUID(),"expectedVersion",submitted.path("version").asLong(),"supplier","测试供应商","expectedOn","2026-09-25","buyerId",BUYER,"prices",List.of(Map.of("lineId",submitted.path("lines").get(0).path("id").asText(),"unitPrice",price))),200);
     }
