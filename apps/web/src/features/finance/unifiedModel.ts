@@ -2,15 +2,18 @@ import type { NavigationParams } from '../../domain'
 
 export type FinanceRow = Record<string, unknown>
 export type FinanceList<T = FinanceRow> = { items: T[]; total: number }
-export type FinanceTodoItem = { id: string; domain?: string; kind: string; title: string; hotelName: string; applicantName: string; amount: string; status: string; dueAt?: string; waitingSince?: string; mismatch?: boolean; version: number; target?: NavigationParams }
-export type FinanceTodos = { items: FinanceTodoItem[]; total: number; counts: { review: number; payment: number; returned: number; receipt?: number } }
-export const emptyTodos: FinanceTodos = { items: [], total: 0, counts: { review: 0, payment: 0, returned: 0, receipt: 0 } }
+export type FinanceTodoItem = { id: string; domain?: string; kind: string; title: string; hotelName: string; applicantName: string; amount: string | null; status: string; dueAt?: string; waitingSince?: string; mismatch?: boolean; version: number; target?: NavigationParams }
+export type FinanceTodos = { items: FinanceTodoItem[]; total: number; counts: { review: number; payment: number; returned: number; receipt?: number; work?: number } }
+export const emptyTodos: FinanceTodos = { items: [], total: 0, counts: { review: 0, payment: 0, returned: 0, receipt: 0, work: 0 } }
 export const operationTypes = {
   CONTRACT: '合同与付款计划', PAYABLE: '采购与应付', LOAN: '借款与备用金', PREPAYMENT: '预付与待摊',
   ASSET: '资产核算', PAYROLL: '薪酬计提', REVENUE: '收入与应收', INTERCOMPANY: '内部往来', TAX_TASK: '税务任务',
 } as const
 export type OperationType = keyof typeof operationTypes
 export function financeTodoType(item: FinanceTodoItem): string {
+  const labels: Record<string, string> = { FINANCE_BUSINESS: '收入 / 工资 / 往来当前节点', ASSET_GAIN: '实物盘盈估值', INPUT_BASIS: '进项原件税额确认', TAX_ACCRUAL: '税费计提与实缴', LOAN_OVERDUE: '已发放借款逾期清理', ACCRUAL: '租赁与待摊计划', ACCRUAL_POLICY: '受控核算政策', INSIGHT: '财务月报复核发布', ACCOUNTING: '凭证复核 / 过账', LEDGER_CHANGE: '科目 / 映射发布', CASH_ERROR: '资金登记差错', AR_ADJUSTMENT: '应收差异', AR_RECOVERY: '应收损失恢复', TAX_CALENDAR: '税务日历', BUDGET_EXCEPTION: '限时预算例外', CLOSE: '月结来源核对', ARCHIVE_REQUEST: '档案调阅申请', INSIGHT_ACTION: '分析建议跟进', SUPPLY_INVOICE_RELEASE: '发票误选释放', DELEGATION: '限时审批代理发布' }
+  if (item.domain && labels[item.domain]) return labels[item.domain]
+  if (item.domain === 'CASH_INSTRUCTION') return '受控资金指令'
   if (item.domain !== 'OPERATION') return '报销'
   const type = item.target?.type
   return typeof type === 'string' && type in operationTypes ? operationTypes[type as OperationType] : '财务业务单据'
@@ -20,6 +23,7 @@ export const financeStateLabels: Record<string, string> = {
   REJECTED: '已拒绝', RETURNED: '退回补充', CANCELLED: '已取消', CLOSED: '已结账', OPEN: '开放期间',
   PARTIAL: '部分结算', SETTLED: '已结算', PAID: '已登记付款', UNMATCHED: '未匹配', MATCHED: '已匹配',
   PENDING_MAPPING: '待配置记账映射', PENDING_BOOK: '待关联账套', PENDING_PERIOD: '待开放期间',
+  PENDING_AUXILIARY: '待核对真实辅助维度', CONFIRMED: '已独立确认', ACTIVE: '有效待处理',
   INCOMPLETE: '资料不完整', COMPLETE: '来源已核对', RECEIPT_PENDING: '待补回单', VERIFIED: '已外部查验',
   MANUAL_CONFIRMED: '已人工核对（非税务验真）', NOT_VERIFIED: '尚未外部查验',
   MANAGER_REVIEW: '待初审', FINANCE_REVIEW: '待门店财务复核', DIRECTOR_REVIEW: '待财务总监审核', LEADER_REVIEW: '待CEO终审', LINKED: '已关联报销',
@@ -32,6 +36,13 @@ export function textValue(value: unknown, fallback = '—'): string {
 }
 export function rowText(row: FinanceRow, field: string, fallback = '—') { return textValue(row[field], fallback) }
 export function financeState(value: unknown) { const key = textValue(value); return financeStateLabels[key] ?? key }
+export function financeTodoState(item: FinanceTodoItem): string {
+  if (item.kind === 'receipt') return '待补回单'
+  if (item.domain === 'INSIGHT_ACTION') return ({ OPEN: '待本人跟进', IN_PROGRESS: '正在跟进', REWORK: '退回补充依据', SUBMITTED: '待独立核实' } as Record<string, string>)[item.status] ?? financeState(item.status)
+  if (item.domain === 'CASH_INSTRUCTION' && item.kind === 'work') return '旧指令待作废重建'
+  if (item.domain === 'ACCRUAL' && item.kind === 'work') return '计提异常待处理'
+  return financeState(item.status)
+}
 export function financeWaiting(since?: string, now = Date.now()): string {
   const timestamp = since ? Date.parse(since) : NaN
   if (!Number.isFinite(timestamp)) return '等待时间待核对'

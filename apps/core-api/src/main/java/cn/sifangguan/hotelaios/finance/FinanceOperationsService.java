@@ -46,14 +46,15 @@ public class FinanceOperationsService {
     public Map<String,Object> documents(String type,UUID hotelId,int page) {
         var p=prepare();if(page<0||page>10000||type!=null&&!TYPES.contains(type)) throw bad("单据查询条件无效");if(hotelId!=null) access.requireOrgScope(hotelId);
         var b=base(p).addValue("type",type).addValue("hotel",hotelId).addValue("offset",page*50);
-        String filter="d.tenant_id=:tenantId and "+VISIBLE+" and (cast(:type as text) is null or d.type=:type) and (cast(:hotel as uuid) is null or d.hotel_id=:hotel)";
+        String filter="d.tenant_id=:tenantId and "+visibleSql()+" and (cast(:type as text) is null or d.type=:type) and (cast(:hotel as uuid) is null or d.hotel_id=:hotel)";
         long total=jdbc.queryForObject("select count(*) from fo_document d where "+filter,b,Long.class);
-        var items=rows("select d.*,h.name as hotel_name,sums.* from fo_document d join org_unit h on h.tenant_id=d.tenant_id and h.id=d.hotel_id "+SUMS+" where "+filter+" order by d.updated_at desc,d.id limit 50 offset :offset",b);items.forEach(this::balances);
+        var items=rows("select d.*,h.name as hotel_name,sums.* from fo_document d join org_unit h on h.tenant_id=d.tenant_id and h.id=d.hotel_id "+SUMS.replace("sum(amount)","sum("+cashAmountSql("a","'9999-12-31'::date")+")")+" where "+filter+" order by d.updated_at desc,d.id limit 50 offset :offset",b);items.forEach(this::balances);
         return Map.of("items",items,"total",total,"page",page,"pageSize",50);
     }
     public Map<String,Object> detail(UUID id) {
         var p=prepare();var d=load(p,id,false);var b=base(p).addValue("id",id);
         var acts=rows("select a.*,coalesce((select sum(m.amount) from fo_bank_match m where m.tenant_id=a.tenant_id and m.action_id=a.id),0) as matched_amount,case when a.action not in ('PAYMENT','RECEIPT','REFUND','REPAYMENT') then 'NOT_APPLICABLE' when exists(select 1 from fo_attachment f where f.tenant_id=a.tenant_id and f.document_id=a.document_id and f.action_id=a.id and f.kind='PAYMENT') then 'ARCHIVED' when a.receipt_reference<>'' then 'EXTERNAL_REFERENCE' else 'MISSING' end as receipt_status from fo_action a where a.tenant_id=:tenantId and a.document_id=:id order by a.created_at,a.id",b);
+        if(new FinanceControlGuard(jdbc).table("fx_cash_correction")){var values=jdbc.queryForList("select a.id,"+cashAmountSql("a","'9999-12-31'::date")+" effective_amount,fx_bank_action_matched_amount(a.tenant_id,a.id,'9999-12-31'::date) matched_amount from fo_action a where a.tenant_id=:tenantId and a.document_id=:id",b);var index=new HashMap<String,Map<String,Object>>();for(var value:values)index.put(value.get("id").toString(),value);for(var act:acts){var value=index.get(act.get("id").toString());act.put("effectiveAmount",value.get("effective_amount").toString());act.put("matchedAmount",value.get("matched_amount").toString());act.put("correctedAmount",new BigDecimal(act.get("amount").toString()).subtract(new BigDecimal(value.get("effective_amount").toString())).toPlainString());}}
         var result=external(d);result.put("settlements",acts.stream().filter(a->!Set.of("SUBMIT","APPROVE","RETURN","REJECT","CANCEL","SKIP_SELF").contains(a.get("action"))).toList());
         result.put("reviews",acts.stream().filter(a->Set.of("SUBMIT","APPROVE","RETURN","REJECT","CANCEL","SKIP_SELF").contains(a.get("action"))).toList());
         result.put("attachments",rows("select id,document_id,action_id,kind,original_name,media_type,size_bytes,sha256,scan_status,extraction,created_at from fo_attachment where tenant_id=:tenantId and document_id=:id order by created_at,id",b));
@@ -62,7 +63,7 @@ public class FinanceOperationsService {
         var allowed=allowedActions(p,d);result.put("allowedActions",allowed);result.put("canSettle",!allowed.isEmpty());
         result.put("paidAmount",sum(p,id,"PAYMENT").subtract(sum(p,id,"REFUND")).toPlainString());
         result.put("receivedAmount",sum(p,id,"RECEIPT").toPlainString());result.put("writtenOffAmount",sum(p,id,"WRITEOFF").toPlainString());
-        for(var field:Map.of("paidTotal","PAYMENT","refundTotal","REFUND","receiptTotal","RECEIPT","repaidTotal","REPAYMENT","writtenOffTotal","WRITEOFF","depreciationTotal","DEPRECIATE","amortizationTotal","AMORTIZE").entrySet())result.put(field.getKey(),acts.stream().filter(a->field.getValue().equals(a.get("action"))).map(a->new BigDecimal(a.get("amount").toString())).reduce(BigDecimal.ZERO,BigDecimal::add).toPlainString());balances(result);
+        for(var field:Map.of("paidTotal","PAYMENT","refundTotal","REFUND","receiptTotal","RECEIPT","repaidTotal","REPAYMENT","writtenOffTotal","WRITEOFF","depreciationTotal","DEPRECIATE","amortizationTotal","AMORTIZE").entrySet())result.put(field.getKey(),acts.stream().filter(a->field.getValue().equals(a.get("action"))).map(a->new BigDecimal(a.getOrDefault("effectiveAmount",a.get("amount")).toString())).reduce(BigDecimal.ZERO,BigDecimal::add).toPlainString());balances(result);
         result.put("writeoffReceivedTotal",writeoffReceived(p,id).toPlainString());balances(result);
         result.put("events",rows("select source_type,source_id,event_key,status,amount,voucher_id from fa_source_event where tenant_id=:tenantId and metadata->>'documentId'=cast(:id as text) order by created_at,id",b));
         audit.record("FINANCE_OPERATION_VIEWED","FINANCE_OPERATION",id,"{}");return result;
@@ -75,10 +76,11 @@ public class FinanceOperationsService {
             if(!uid(previous,"hotel_id").equals(in.hotelId())||!str(previous,"type").equals(in.type()))throw bad("不能更换原单组织或业务类型");}
         else if(in.expectedVersion()!=0)throw conflict("新建版本应为0");
         BigDecimal amount=validate(p,in,target);if(in.partyId()!=null) party(p,in.partyId(),in.hotelId());
+        var frozenDetails=new LinkedHashMap<String,Object>(in.details());var projectDimensions=new FinanceProjectDimensions(jdbc,access);if(projectDimensions.installed()){if(previous!=null&&!frozenDetails.containsKey("projectKind")&&!frozenDetails.containsKey("projectId")){var oldProject=obj(previous,"details");frozenDetails.put("projectKind",oldProject.get("projectKind"));frozenDetails.put("projectId",oldProject.get("projectId"));}var project=FinanceProjectDimensions.from(frozenDetails);var projectConfigs=jdbc.queryForList("select company_id from finance_store_config where tenant_id=:tenantId and hotel_id=:hotel and enabled",base(p).addValue("hotel",in.hotelId()));UUID projectCompany=projectConfigs.size()==1?UUID.fromString(projectConfigs.getFirst().get("company_id").toString()):null;var snapshot=projectDimensions.freeze(p,in.hotelId(),projectCompany,project);frozenDetails.put("projectKind",project.kind());frozenDetails.put("projectId",project.id());frozenDetails.put("projectKey",project.key());frozenDetails.put("projectSnapshot",snapshot);}
         if(in.budgetId()!=null)budget(p,in.budgetId(),in.hotelId(),in.businessDate());
         b.addValue("hotel",in.hotelId()).addValue("type",in.type()).addValue("title",in.title().trim()).addValue("date",in.businessDate()).addValue("due",in.dueDate())
             .addValue("party",in.partyId()).addValue("budget",in.budgetId()).addValue("sourceType",blank(in.sourceType()).isEmpty()?"MANUAL":in.sourceType().trim())
-            .addValue("sourceId",in.sourceId()).addValue("sourceReference",blank(in.sourceReference())).addValue("amount",amount).addValue("details",json(in.details())).addValue("lines",json(in.lines()))
+            .addValue("sourceId",in.sourceId()).addValue("sourceReference",blank(in.sourceReference())).addValue("amount",amount).addValue("details",json(frozenDetails)).addValue("lines",json(in.lines()))
             .addValue("recognizedSource",str(in.details(),"recognizedSourceDocumentId").isBlank()?null:uuidField(in.details(),"recognizedSourceDocumentId"));
         if(previous==null)jdbc.update("insert into fo_document(id,tenant_id,hotel_id,applicant_id,type,title,business_date,due_date,party_id,budget_id,source_type,source_id,source_reference,amount,details,lines,recognized_source_document_id) values(:id,:tenantId,:hotel,:actorId,:type,:title,:date,:due,:party,:budget,:sourceType,:sourceId,:sourceReference,:amount,cast(:details as jsonb),cast(:lines as jsonb),:recognizedSource)",b);
         else jdbc.update("update fo_document set title=:title,business_date=:date,due_date=:due,party_id=:party,budget_id=:budget,source_type=:sourceType,source_id=:sourceId,source_reference=:sourceReference,amount=:amount,details=cast(:details as jsonb),lines=cast(:lines as jsonb),recognized_source_document_id=:recognizedSource,version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",b);
@@ -89,7 +91,7 @@ public class FinanceOperationsService {
         var d=load(p,id,true);version(d,in.expectedVersion());if(!EDITABLE.contains(str(d,"status"))||!p.actorId().equals(uid(d,"applicant_id")))throw conflict("只有申请人可以提交未完成审批的单据");
         var b=base(p).addValue("id",id).addValue("hotel",uid(d,"hotel_id"));
         var configs=jdbc.queryForList("select * from finance_store_config where tenant_id=:tenantId and hotel_id=:hotel and enabled and workflow_version=2",b);
-        if(configs.isEmpty())throw conflict("四段审批与出纳配置尚未完整启用，草稿已保留");var config=configs.getFirst();
+        if(configs.isEmpty())throw conflict("四段审批与出纳配置尚未完整启用，草稿已保留");var config=new FinanceControlGuard(jdbc).workflow(p,configs.getFirst(),str(d,"type"),dec(d,"amount"),date(d,"business_date"),id);
         var route=new ArrayList<String>();for(String col:List.of("manager_account_id","finance_account_id","director_account_id","leader_account_id")){UUID user=uid(config,col);if(user==null)throw conflict("审核人缺失，草稿保留");requireAccount(p,user);route.add(user.toString());}
         UUID cashier=uid(config,"cashier_account_id");if(cashier==null)throw conflict("出纳缺失");requireAccount(p,cashier);if(cashier.equals(p.actorId()))throw conflict("申请人不能登记本人付款，请配置独立出纳");int index=0;
         if(uid(d,"company_id")!=null&&!uid(d,"company_id").equals(uid(config,"company_id")))throw conflict("法人主体已经调整，原单据主体不得静默替换，请重新建立并核对来源");
@@ -97,8 +99,10 @@ public class FinanceOperationsService {
         if(route.getFirst().equals(p.actorId().toString())&&Boolean.TRUE.equals(config.get("skip_self_review"))){index=1;action(p,d,"SKIP_SELF",BigDecimal.ZERO,in.requestId(),"按已发布配置回避首段自审","",null,null,null,LocalDate.now(),Map.of());}
         if(route.subList(index,route.size()).contains(p.actorId().toString()))throw conflict("后续节点不可由申请人本人审核，请调整审批配置");
         if(new HashSet<>(route).size()!=4)throw conflict("四段审核人必须不同");
+        new FinanceDelegationControl(jdbc).freeze(p,uid(d,"hotel_id"),"OPERATION",id,in.expectedVersion(),route.stream().map(UUID::fromString).toList(),p.actorId(),cashier);
         b.addValue("route",json(route)).addValue("index",index).addValue("cashier",cashier).addValue("company",config.get("company_id")).addValue("partySnapshot",json(uid(d,"party_id")==null?Map.of():party(p,uid(d,"party_id"),uid(d,"hotel_id"))));
         jdbc.update("update fo_document set status='REVIEW',approval_route=cast(:route as jsonb),review_index=:index,cashier_account_id=:cashier,company_id=:company,party_snapshot=cast(:partySnapshot as jsonb),version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",b);
+        new FinanceBudgetControl(jdbc).reserve(p,"OPERATION",d);
         usage(p,d,BigDecimal.ZERO,dec(d,"amount"),BigDecimal.ZERO);recordCommand(p,in.requestId(),id,"SUBMIT",in);action(p,d,"SUBMIT",BigDecimal.ZERO,UUID.randomUUID(),"提交审批","",null,null,null,LocalDate.now(),Map.of());notifyCurrent(p,id);return detail(id);
     }
     public Map<String,Object> review(UUID id,Review in) {
@@ -112,14 +116,14 @@ public class FinanceOperationsService {
             // Authorization of a loan, prepayment or deposit is not an actual advance or cash receipt.
             boolean recognize=Set.of("PAYABLE","PAYROLL","ASSET").contains(str(d,"type"))||str(d,"type").equals("REVENUE")&&Set.of("ROOM","OTHER").contains(str(obj(d,"details"),"revenueKind"));
             // A financial asset card linked to an already-recognized purchase is a dimension, not another acquisition.
-            if(recognize&&str(obj(d,"details"),"recognizedSourceDocumentId").isBlank())event(d,"RECOGNITION",dec(d,"amount"),date(d,"business_date"),in.requestId(),Map.of("action","APPROVED"));
+            if(recognize&&str(obj(d,"details"),"recognizedSourceDocumentId").isBlank()&&!"FS_PROCUREMENT".equals(str(d,"source_type")))event(d,"RECOGNITION",dec(d,"amount"),date(d,"business_date"),in.requestId(),Map.of("action","APPROVED"));
         }
-        else if(!status.equals("REVIEW"))usage(p,d,BigDecimal.ZERO,BigDecimal.ZERO,BigDecimal.ZERO);notifyCurrent(p,id);return detail(id);
+        else if(!status.equals("REVIEW"))usage(p,d,BigDecimal.ZERO,BigDecimal.ZERO,BigDecimal.ZERO);new FinanceBudgetControl(jdbc).transition(p,"OPERATION",d,status);notifyCurrent(p,id);return detail(id);
     }
     public Map<String,Object> cancel(UUID id,Version in) {
         var p=prepare("finance.submit");lock(p,"command:"+in.requestId());if(replayed(p,in.requestId(),id,"CANCEL",in))return detail(id);var d=load(p,id,true);version(d,in.expectedVersion());
         if(!p.actorId().equals(uid(d,"applicant_id"))||!Set.of("DRAFT","RETURNED","REVIEW").contains(str(d,"status")))throw conflict("只能取消本人的未批准单据；已批准事项必须受控调整，不能删除历史");
-        jdbc.update("update fo_document set status='CANCELLED',version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",base(p).addValue("id",id));usage(p,d,BigDecimal.ZERO,BigDecimal.ZERO,BigDecimal.ZERO);recordCommand(p,in.requestId(),id,"CANCEL",in);action(p,d,"CANCEL",BigDecimal.ZERO,in.requestId(),"申请人取消","",null,null,null,LocalDate.now(),Map.of());return detail(id);
+        jdbc.update("update fo_document set status='CANCELLED',version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",base(p).addValue("id",id));usage(p,d,BigDecimal.ZERO,BigDecimal.ZERO,BigDecimal.ZERO);new FinanceBudgetControl(jdbc).transition(p,"OPERATION",d,"CANCELLED");recordCommand(p,in.requestId(),id,"CANCEL",in);action(p,d,"CANCEL",BigDecimal.ZERO,in.requestId(),"申请人取消","",null,null,null,LocalDate.now(),Map.of());return detail(id);
     }
     public Map<String,Object> settle(UUID id,Settlement in) {
         var p=prepare();lock(p,"command:"+in.requestId());if(replayed(p,in.requestId(),id,"SETTLE",in))return detail(id);
@@ -135,6 +139,7 @@ public class FinanceOperationsService {
         if(type.equals("PAYROLL"))access.requirePermission("finance.payroll");
         if(type.equals("TAX_TASK")||Set.of("ISSUE_INVOICE","RED_INVOICE","TAX_FILE").contains(act))access.requirePermission("finance.tax");
         validateSettlement(p,d,in);
+        if(CASH.contains(act))new FinanceControlGuard(jdbc).cash(p,"OPERATION",d,act,amount,in.occurredOn(),in.bankAccountId());
         if(Set.of("DEPRECIATE","AMORTIZE").contains(act))accounting.lockBudgetOwner(p,d);
         if(CASH.contains(act)&&amount.signum()<=0)throw bad("收付款金额必须大于0");
         var snapshot=new LinkedHashMap<String,Object>();snapshot.put("party",obj(d,"party_snapshot"));snapshot.put("documentVersion",d.get("version"));snapshot.put("sourceType",d.get("source_type"));snapshot.put("sourceId",Objects.toString(d.get("source_id"),""));
@@ -149,8 +154,9 @@ public class FinanceOperationsService {
         audit.record("FINANCE_OPERATION_"+act,"FINANCE_OPERATION",id,json(in));return detail(id);
     }
     private void validateSettlement(TenantPrincipal p,Map<String,Object> d,Settlement in) {
-        String type=str(d,"type"),a=in.action();UUID id=uid(d,"id");BigDecimal total=dec(d,"amount"),paid=sum(p,id,"PAYMENT").subtract(sum(p,id,"REFUND"));Map<String,Object> x=obj(d,"details");
-        if(a.equals("DISPOSE"))throw conflict("资产处置尚缺净值、累计折旧与处置损益完整分录及复核流程，目前不允许办理；不能用零金额动作标记已处置");
+        String type=str(d,"type"),a=in.action();UUID id=uid(d,"id");BigDecimal total=new FinanceControlGuard(jdbc).contractAmount(p,d),paid=sum(p,id,"PAYMENT").subtract(sum(p,id,"REFUND"));Map<String,Object> x=obj(d,"details");
+        if(a.equals("DISPOSE"))throw conflict("请在财务中心“采购与资产”的真实财务卡片中核对净值、累计折旧与处置损益，办理完整处置及独立复核；旧零金额动作不能标记资产已处置");
+        if(a.equals("PAYMENT"))new FinanceControlGuard(jdbc).requireActiveSourceForPayment(p,id);
         Set<String> allowed=typeActions(type);
         if(!allowed.contains(a))throw bad("此业务类型不支持该动作");
         if(CASH.contains(a)&&uid(d,"recognized_source_document_id")!=null)throw conflict("承接财务卡片不能重复办理资金；请到原应付单据登记收付款");
@@ -165,6 +171,7 @@ public class FinanceOperationsService {
             if(settled.add(in.amount()).compareTo(dec(expense,"amount"))>0)throw conflict("借款核销与已付款合计超过关联费用的剩余清偿余额");
         }}
         if(Set.of("DEPRECIATE","AMORTIZE").contains(a)){
+            new FinanceControlGuard(jdbc).requireLegacyAccrualAvailable(p,id);
             if(jdbc.queryForObject("select count(*) from fa_recurring_plan where tenant_id=:tenantId and source_id=:source and source_type in ('FO_ASSET','FO_PREPAYMENT')",base(p).addValue("source",id),Integer.class)>0)throw conflict("本来源已有受控周期计划，请通过该计划执行，不能双轨重复计提");
             BigDecimal basis=recognizedBasis(p,d,in.occurredOn());BigDecimal ceiling=a.equals("DEPRECIATE")?basis.subtract(decimalField(x,"residualAmount")).max(BigDecimal.ZERO):basis;
             BigDecimal prior=sum(p,id,a).add(recurringAllocated(p,id,null));
@@ -190,7 +197,7 @@ public class FinanceOperationsService {
             }
         }
         if(a.equals("DISPOSE")&&sumCount(p,id,"DISPOSE")>0)throw conflict("资产已经处置");
-        if(a.equals("DEPRECIATE")&&sumCount(p,id,"DISPOSE")>0)throw conflict("已处置资产不能继续折旧");
+        if(a.equals("DEPRECIATE")&&(sumCount(p,id,"DISPOSE")>0||new FinanceControlGuard(jdbc).disposed(p,id)))throw conflict("已处置资产不能继续折旧");
         if(a.equals("COUNTERSIGN")){if(!p.actorId().toString().equals(str(x,"counterpartyReviewerId")))throw forbidden();access.requireOrgScope(UUID.fromString(str(x,"counterpartyHotelId")));if(sumCount(p,id,a)>0)throw conflict("对方已确认");}
         if(type.equals("INTERCOMPANY")&&!a.equals("COUNTERSIGN")&&sumCount(p,id,"COUNTERSIGN")==0)throw conflict("内部往来尚未完成对方确认");
         if(a.equals("ISSUE_INVOICE")){if(in.receiptReference()==null||in.receiptReference().isBlank())throw bad("必须提供真实发票归档引用，开票服务尚未自动连接");BigDecimal issued=sum(p,id,a).subtract(sum(p,id,"RED_INVOICE"));if(issued.add(in.amount()).compareTo(total)>0)throw conflict("开票累计不能超过确认收入");}
@@ -217,16 +224,18 @@ public class FinanceOperationsService {
     public Map<String,Object> saveBankAccount(BankAccount in) {
         var p=prepare("finance.configure");access.requireOrgScope(in.hotelId());requireHotel(p,in.hotelId());lock(p,"command:"+in.requestId());if(replayed(p,in.requestId(),in.requestId(),"BANK_ACCOUNT",in))return external(bank(p,in.requestId(),in.hotelId()));
         var b=base(p).addValue("id",in.requestId()).addValue("hotel",in.hotelId()).addValue("name",in.name().trim()).addValue("account",in.accountNumber().trim()).addValue("bank",in.bankName().trim()).addValue("date",in.openingDate()).addValue("balance",in.openingBalance());
-        jdbc.update("insert into fo_bank_account(id,tenant_id,hotel_id,name,account_number,bank_name,opening_date,opening_balance,created_by) values(:id,:tenantId,:hotel,:name,:account,:bank,:date,:balance,:actorId)",b);recordCommand(p,in.requestId(),in.requestId(),"BANK_ACCOUNT",in);audit.record("FINANCE_BANK_ACCOUNT_CREATED","FINANCE_BANK_ACCOUNT",in.requestId(),"{}");return external(bank(p,in.requestId(),in.hotelId()));
+        jdbc.update("insert into fo_bank_account(id,tenant_id,hotel_id,name,account_number,bank_name,opening_date,opening_balance,created_by) values(:id,:tenantId,:hotel,:name,:account,:bank,:date,:balance,:actorId)",b);if(new FinanceControlGuard(jdbc).installed()){var config=jdbc.queryForList("select company_id from finance_store_config where tenant_id=:tenantId and hotel_id=:hotel and enabled",b);if(config.size()!=1)throw conflict("请先启用实际法人主体配置再建立资金账户");jdbc.update("update fo_bank_account set company_id=:company where tenant_id=:tenantId and id=:id",b.addValue("company",config.getFirst().get("company_id")));}recordCommand(p,in.requestId(),in.requestId(),"BANK_ACCOUNT",in);audit.record("FINANCE_BANK_ACCOUNT_CREATED","FINANCE_BANK_ACCOUNT",in.requestId(),"{}");return external(bank(p,in.requestId(),in.hotelId()));
     }
     public Map<String,Object> bankTransactions(UUID accountId,int page) {
         var p=prepare("finance.read","finance.pay");if(page<0||page>10000)throw bad("分页无效");if(accountId!=null)bank(p,accountId,null);var b=base(p).addValue("account",accountId).addValue("offset",page*50);
         String filter="t.tenant_id=:tenantId and "+SCOPE+" and (cast(:account as uuid) is null or t.bank_account_id=:account)";
         long total=jdbc.queryForObject("select count(*) from fo_bank_transaction t join fo_bank_account d on d.tenant_id=t.tenant_id and d.id=t.bank_account_id where "+filter,b,Long.class);
         var list=rows("select t.*,d.name as bank_account_name,m.matched_amount,m.match_count,e.reason as explanation_reason,e.version as explanation_version,case when e.transaction_id is null then 'NONE' when e.transaction_hash_snapshot=t.source_hash and e.matched_amount_snapshot=m.matched_amount and e.match_count_snapshot=m.match_count then 'VALID' else 'STALE' end as explanation_status from fo_bank_transaction t join fo_bank_account d on d.tenant_id=t.tenant_id and d.id=t.bank_account_id left join lateral(select coalesce(sum(x.amount),0) as matched_amount,count(*) as match_count from fo_bank_match x where x.tenant_id=t.tenant_id and x.transaction_id=t.id) m on true left join fo_bank_explanation e on e.tenant_id=t.tenant_id and e.transaction_id=t.id where "+filter+" order by t.occurred_on desc,t.id limit 50 offset :offset",b);
+        var guard=new FinanceControlGuard(jdbc);for(var row:list){BigDecimal net=guard.bankAllocated(p,UUID.fromString(row.get("id").toString()),LocalDate.of(9999,12,31));row.put("matchedAmount",net.toPlainString());row.put("unmatchedAmount",dec(row,"amount").subtract(net).toPlainString());if(guard.table("fcl_bank_explanation")){row.put("explanationStatus","LEGACY_NOTE_ONLY");row.put("explanationMeaning","旧往来备注不代表跨域净额已独立核对，请进入月结来源与银行核对。");}}
         return Map.of("items",list,"total",total,"page",page,"pageSize",50);
     }
     public Map<String,Object> explainBankTransaction(UUID transactionId,BankExplanation in) {
+        if(new FinanceControlGuard(jdbc).table("fcl_bank_explanation"))throw conflict("请到核算与报表的月结核对，由独立复核人确认跨域净额银行未达；旧往来备注不能替代完整对账");
         var p=prepare("finance.review");if(in.reason()==null||in.reason().isBlank()||in.reason().length()>2000)throw bad("请填写非空的真实未达解释，最多2000字");
         lock(p,"bank-match");lock(p,"command:"+in.requestId());var b=base(p).addValue("id",transactionId);
         var txs=jdbc.queryForList("select * from fo_bank_transaction where tenant_id=:tenantId and id=:id",b);if(txs.isEmpty())throw missing();var transaction=txs.getFirst();bank(p,uid(transaction,"bank_account_id"),null);
@@ -257,14 +266,14 @@ public class FinanceOperationsService {
         // Immutable imported rows intentionally have no UPDATE grant; tenant advisory lock serializes allocations.
         var txs=jdbc.queryForList("select * from fo_bank_transaction where tenant_id=:tenantId and id=:id",b);if(txs.isEmpty())throw missing();var tx=txs.getFirst();var account=bank(p,uid(tx,"bank_account_id"),null);
         BigDecimal allocated=in.allocations().stream().map(Allocation::amount).reduce(BigDecimal.ZERO,BigDecimal::add);
-        BigDecimal matched=jdbc.queryForObject("select coalesce(sum(amount),0) from fo_bank_match where tenant_id=:tenantId and transaction_id=:id",b,BigDecimal.class);
-        if(matched.add(allocated).compareTo(dec(tx,"amount"))>0)throw conflict("匹配金额超过银行流水未匹配余额");
+        BigDecimal matched=new FinanceControlGuard(jdbc).bankAllocated(p,transactionId,LocalDate.of(9999,12,31));
+        if(matched.add(allocated).compareTo(dec(tx,"amount"))>0)throw conflict("匹配金额超过银行流水净未匹配余额（包括报销、收入与供应商退款占用）");
         for(var allocation:in.allocations().stream().sorted(Comparator.comparing(a->a.settlementId().toString())).toList()){
             var ab=base(p).addValue("id",allocation.settlementId());var actions=jdbc.queryForList("select * from fo_action where tenant_id=:tenantId and id=:id",ab);if(actions.isEmpty())throw missing();var action=actions.getFirst();var d=load(p,uid(action,"document_id"),false);
             if(!uid(d,"hotel_id").equals(uid(account,"hotel_id"))||!uid(tx,"bank_account_id").equals(uid(action,"bank_account_id")))throw bad("流水与结算出入款账户或组织不同");
             String direction=Set.of("RECEIPT","REPAYMENT").contains(str(action,"action"))||str(action,"action").equals("REFUND")&&!str(d,"type").equals("REVENUE")?"IN":"OUT";
             if(!CASH.contains(str(action,"action"))||!direction.equals(str(tx,"direction")))throw bad("流水方向与结算动作不符");
-            BigDecimal used=jdbc.queryForObject("select coalesce(sum(amount),0) from fo_bank_match where tenant_id=:tenantId and action_id=:id",ab,BigDecimal.class);if(used.add(allocation.amount()).compareTo(dec(action,"amount"))>0)throw conflict("累计匹配超过结算金额");
+            boolean net=new FinanceControlGuard(jdbc).table("fx_cash_correction");BigDecimal used=jdbc.queryForObject(net?"select fx_bank_action_matched_amount(:tenantId,:id,'9999-12-31'::date)":"select coalesce(sum(amount),0) from fo_bank_match where tenant_id=:tenantId and action_id=:id",ab,BigDecimal.class);BigDecimal effective=jdbc.queryForObject("select "+cashAmountSql("a","'9999-12-31'::date")+" from fo_action a where a.tenant_id=:tenantId and a.id=:id",ab,BigDecimal.class);if(used.add(allocation.amount()).compareTo(effective)>0)throw conflict("累计匹配超过差错更正后的真实净结算金额");
             ab.addValue("tx",transactionId).addValue("amount",allocation.amount()).addValue("request",in.requestId()).addValue("note",in.note());jdbc.update("insert into fo_bank_match(tenant_id,transaction_id,action_id,amount,request_id,note,actor_id) values(:tenantId,:tx,:id,:amount,:request,:note,:actorId)",ab);
         }
         recordCommand(p,in.requestId(),transactionId,"BANK_MATCH",in);audit.record("FINANCE_BANK_MATCHED","FINANCE_BANK_TRANSACTION",transactionId,json(in));return Map.of("transactionId",transactionId,"allocated",allocated.toPlainString(),"matchedAmount",matched.add(allocated).toPlainString());
@@ -286,7 +295,7 @@ public class FinanceOperationsService {
         var p=prepare("finance.read");if(hotelId!=null)access.requireOrgScope(hotelId);YearMonth month=parseMonth(monthValue);var b=base(p).addValue("hotel",hotelId).addValue("start",month.atDay(1)).addValue("end",month.plusMonths(1).atDay(1));
         String filter="d.tenant_id=:tenantId and "+VISIBLE+" and (cast(:hotel as uuid) is null or d.hotel_id=:hotel)";
         var totals=rows("select d.type,count(*) as document_count,sum(d.amount) as amount,count(*) filter(where d.status='REVIEW') as pending_review from fo_document d where "+filter+" and d.business_date>=:start and d.business_date<:end and d.status not in ('REJECTED','CANCELLED') group by d.type order by d.type",b);
-        var balances=rows("select d.id,d.hotel_id,d.type,d.title,d.amount,d.business_date,d.due_date,coalesce(a.paid,0) as paid,coalesce(a.refunded,0) as refunded,coalesce(a.received,0) as received,coalesce(a.cleared,0) as cleared from fo_document d left join lateral(select sum(amount) filter(where action='PAYMENT') paid,sum(amount) filter(where action='REFUND') refunded,sum(amount) filter(where action='RECEIPT') received,sum(amount) filter(where action in ('WRITEOFF','REPAYMENT','AMORTIZE')) cleared from fo_action a where a.tenant_id=d.tenant_id and a.document_id=d.id and a.occurred_on<:end) a on true where "+filter+" and d.status='APPROVED' and d.business_date<:end and d.type in ('PAYABLE','LOAN','PREPAYMENT','REVENUE','CONTRACT') order by d.business_date,d.id",b);
+        String balanceSql="select d.id,d.hotel_id,d.type,d.title,d.amount,d.business_date,d.due_date,coalesce(a.paid,0) as paid,coalesce(a.refunded,0) as refunded,coalesce(a.received,0) as received,coalesce(a.cleared,0) as cleared from fo_document d left join lateral(select sum(amount) filter(where action='PAYMENT') paid,sum(amount) filter(where action='REFUND') refunded,sum(amount) filter(where action='RECEIPT') received,sum(amount) filter(where action in ('WRITEOFF','REPAYMENT','AMORTIZE')) cleared from fo_action a where a.tenant_id=d.tenant_id and a.document_id=d.id and a.occurred_on<:end) a on true where "+filter+" and d.status='APPROVED' and d.business_date<:end and d.type in ('PAYABLE','LOAN','PREPAYMENT','REVENUE','CONTRACT') order by d.business_date,d.id";var balances=rows(balanceSql.replace("sum(amount)","sum("+cashAmountSql("a","(cast(:end as date)-1)")+")"),b);
         var incomplete=jdbc.queryForObject("select count(*) from fo_document d where "+filter+" and d.status='APPROVED' and d.business_date>=:start and d.business_date<:end and not exists(select 1 from fa_source_event e where e.tenant_id=d.tenant_id and e.metadata->>'documentId'=d.id::text and e.status='POSTED') and d.type not in ('CONTRACT','TAX_TASK','INTERCOMPANY')",b,Integer.class);
         return Map.of("month",month.toString(),"basis","BUSINESS_SUBLEDGER_NOT_GENERAL_LEDGER","totals",totals,"balances",balances,"dataPresent",!totals.isEmpty(),"unpostedSourceDocuments",incomplete,"completeness",List.of("仅包含中台实际登记的业务单据；缺少的外部来源不按零值补齐","预算、付款和成本是不同口径；总账报表以核算模块已过账分录为准"));
     }
@@ -343,7 +352,7 @@ public class FinanceOperationsService {
     }
     private void notifyCurrent(TenantPrincipal p,UUID id) {
         var d=load(p,id,false);String status=str(d,"status");UUID recipient;String kind;
-        if(status.equals("REVIEW")){recipient=UUID.fromString(stringList(d.get("approval_route")).get(((Number)d.get("review_index")).intValue()));kind="REVIEW_PENDING";}
+        if(status.equals("REVIEW")){int node=((Number)d.get("review_index")).intValue();recipient=new FinanceDelegationControl(jdbc).current(p,"OPERATION",id,node,UUID.fromString(stringList(d.get("approval_route")).get(node)));kind="REVIEW_PENDING";}
         else if(status.equals("APPROVED")&&!Set.of("REVENUE","INTERCOMPANY").contains(str(d,"type"))){recipient=uid(d,"cashier_account_id");kind="PAYMENT_PENDING";}
         else if(status.equals("RETURNED")){recipient=uid(d,"applicant_id");kind="RETURNED";}else return;
         if(recipient==null)return;
@@ -365,6 +374,7 @@ public class FinanceOperationsService {
         var b=base(p).addValue("id",uid(d,"id")).addValue("amount",amount);
         jdbc.update("update fo_budget_usage set committed=greatest(committed-:amount,0),updated_at=now() where tenant_id=:tenantId and document_id=:id",b);
     }
+    void releaseLoanCommitment(TenantPrincipal p,Map<String,Object> loan,BigDecimal amount){if(!"LOAN".equals(loan.get("type")))throw bad("只能释放真实借款已清偿承诺");releaseCommitment(p,loan,amount);}
     private BigDecimal writeoffReceived(TenantPrincipal p,UUID documentId) {
         return jdbc.queryForObject("select coalesce(sum(amount),0) from fo_action where tenant_id=:tenantId and related_document_id=:id and action='WRITEOFF'",base(p).addValue("id",documentId),BigDecimal.class);
     }
@@ -380,10 +390,11 @@ public class FinanceOperationsService {
             if(recognized.compareTo(dec(d,"amount"))<0)throw conflict("承接应付来源尚未在本期完成核算过账，不能据批准额度计提");
             return dec(d,"amount");
         }
-        if(str(d,"type").equals("PREPAYMENT"))return jdbc.queryForObject("select coalesce(sum(case when action='PAYMENT' then amount when action='REFUND' then -amount else 0 end),0) from fo_action where tenant_id=:tenantId and document_id=:id and occurred_on<=:asOf",base(p).addValue("id",uid(d,"id")).addValue("asOf",asOf),BigDecimal.class).max(BigDecimal.ZERO);
+        if(str(d,"type").equals("PREPAYMENT"))return jdbc.queryForObject("select coalesce(sum(case when a.action='PAYMENT' then "+cashAmountSql("a",":asOf")+" when a.action='REFUND' then -"+cashAmountSql("a",":asOf")+" else 0 end),0) from fo_action a where a.tenant_id=:tenantId and a.document_id=:id and a.occurred_on<=:asOf",base(p).addValue("id",uid(d,"id")).addValue("asOf",asOf),BigDecimal.class).max(BigDecimal.ZERO);
         return dec(d,"amount");
     }
     private Map<String,Object> budget(TenantPrincipal p,UUID id,UUID hotel,LocalDate day) {
+        jdbc.queryForObject("select pg_advisory_xact_lock(hashtextextended(:key,103))",base(p).addValue("key",p.tenantId()+":financial-budget"),Object.class);
         var rows=jdbc.queryForList("select * from fo_budget where tenant_id=:tenantId and id=:id for update",base(p).addValue("id",id));if(rows.isEmpty())throw bad("预算不存在");var row=rows.getFirst();access.requireOrgScope(uid(row,"hotel_id"));if(!uid(row,"hotel_id").equals(hotel)||!date(row,"month").equals(YearMonth.from(day).atDay(1)))throw bad("预算不属于所选组织/期间");return row;
     }
     private UUID action(TenantPrincipal p,Map<String,Object> d,String action,BigDecimal amount,UUID requestId,String note,String reference,String receipt,UUID bank,UUID related,LocalDate day,Map<String,Object> snapshot) {
@@ -398,11 +409,13 @@ public class FinanceOperationsService {
         String sourceType="FO_"+str(d,"type");if(str(d,"type").equals("REVENUE"))sourceType+="_"+str(obj(d,"details"),"revenueKind");if(str(d,"type").equals("PAYABLE"))sourceType+="_"+str(obj(d,"details"),"treatment");
         accounting.recordSourceEvent(uid(d,"hotel_id"),sourceType,sourceId,key,date(d,"business_date"),day,amount,str(d,"title"),meta);
     }
-    private BigDecimal sum(TenantPrincipal p,UUID id,String action) {return jdbc.queryForObject("select coalesce(sum(amount),0) from fo_action where tenant_id=:tenantId and document_id=:id and action=:action",base(p).addValue("id",id).addValue("action",action),BigDecimal.class);}
+    private String cashAmountSql(String alias,String day){return new FinanceControlGuard(jdbc).table("fx_cash_correction")?"fx_cash_effective_amount("+alias+".tenant_id,'OPERATION',"+alias+".id,"+alias+".amount,"+day+")":alias+".amount";}
+    private BigDecimal sum(TenantPrincipal p,UUID id,String action) {return new FinanceControlGuard(jdbc).operationAmount(p,id,action);}
     private int sumCount(TenantPrincipal p,UUID id,String action) {return jdbc.queryForObject("select count(*) from fo_action where tenant_id=:tenantId and document_id=:id and action=:action",base(p).addValue("id",id).addValue("action",action),Integer.class);}
     private Map<String,Object> load(TenantPrincipal p,UUID id,boolean lock) {
-        var rows=jdbc.queryForList("select d.*,h.name as hotel_name,u.display_name as applicant_name from fo_document d join org_unit h on h.tenant_id=d.tenant_id and h.id=d.hotel_id join user_account u on u.tenant_id=d.tenant_id and u.id=d.applicant_id where d.tenant_id=:tenantId and d.id=:id and "+VISIBLE+(lock?" for update of d":""),base(p).addValue("id",id));if(rows.isEmpty())throw missing();return rows.getFirst();
+        var rows=jdbc.queryForList("select d.*,h.name as hotel_name,u.display_name as applicant_name from fo_document d join org_unit h on h.tenant_id=d.tenant_id and h.id=d.hotel_id join user_account u on u.tenant_id=d.tenant_id and u.id=d.applicant_id where d.tenant_id=:tenantId and d.id=:id and "+visibleSql()+(lock?" for update of d":""),base(p).addValue("id",id));if(rows.isEmpty())throw missing();return rows.getFirst();
     }
+    private String visibleSql(){if(!new FinanceDelegationControl(jdbc).installed())return VISIBLE;return VISIBLE.replace("(:reviewer and d.approval_route @> cast(:actorRoute as jsonb))","(:reviewer and (d.approval_route @> cast(:actorRoute as jsonb) or exists(select 1 from fd_route dr where dr.tenant_id=d.tenant_id and dr.source_kind='OPERATION' and dr.source_id=d.id and fd_current_reviewer(dr.tenant_id,dr.source_kind,dr.source_id,dr.node,dr.original_id)=:actorId)))");}
     private static Set<String> typeActions(String type){return switch(type){case "CONTRACT","PAYABLE"->Set.of("PAYMENT","REFUND");case "LOAN"->Set.of("PAYMENT","REPAYMENT","WRITEOFF");case "PREPAYMENT"->Set.of("PAYMENT","REFUND","AMORTIZE");case "ASSET"->Set.of("PAYMENT","REFUND","DEPRECIATE","DISPOSE");case "PAYROLL"->Set.of("PAYMENT");case "REVENUE"->Set.of("RECEIPT","REFUND","ISSUE_INVOICE","RED_INVOICE");case "INTERCOMPANY"->Set.of("COUNTERSIGN","PAYMENT","RECEIPT");case "TAX_TASK"->Set.of("TAX_FILE","PAYMENT");default->Set.of();};}
     private List<String> allowedActions(TenantPrincipal p,Map<String,Object> d){
         if(!str(d,"status").equals("APPROVED")||p.actorId().equals(uid(d,"applicant_id")))return List.of();
@@ -419,7 +432,7 @@ public class FinanceOperationsService {
             if(action.equals("COUNTERSIGN")&&(!p.actorId().toString().equals(str(x,"counterpartyReviewerId"))||sumCount(p,id,action)>0))continue;
             if(action.equals("TAX_FILE")&&sumCount(p,id,action)>0)continue;
             if(action.equals("DISPOSE")&&sumCount(p,id,action)>0)continue;
-            if(action.equals("DEPRECIATE")&&sumCount(p,id,"DISPOSE")>0)continue;
+            if(action.equals("DEPRECIATE")&&(sumCount(p,id,"DISPOSE")>0||new FinanceControlGuard(jdbc).disposed(p,id)))continue;
             result.add(action);
         }return result;
     }
@@ -438,7 +451,7 @@ public class FinanceOperationsService {
         if(row.get("type").equals("ASSET"))row.put("netBookValue",amount.subtract(moneyValue(row,"depreciationTotal")).toPlainString());
     }
     private static BigDecimal moneyValue(Map<String,Object> row,String key){return new BigDecimal(Objects.toString(row.get(key),"0"));}
-    private boolean canReview(TenantPrincipal p,Map<String,Object> d) {if(!has(p,"finance.review")||p.actorId().equals(uid(d,"applicant_id"))||!str(d,"status").equals("REVIEW"))return false;var route=stringList(d.get("approval_route"));int index=((Number)d.get("review_index")).intValue();return index<route.size()&&route.get(index).equals(p.actorId().toString());}
+    private boolean canReview(TenantPrincipal p,Map<String,Object> d) {if(!has(p,"finance.review")||p.actorId().equals(uid(d,"applicant_id"))||!str(d,"status").equals("REVIEW"))return false;var route=stringList(d.get("approval_route"));int index=((Number)d.get("review_index")).intValue();return index<route.size()&&p.actorId().equals(new FinanceDelegationControl(jdbc).current(p,"OPERATION",uid(d,"id"),index,UUID.fromString(route.get(index))));}
     private Map<String,Object> party(TenantPrincipal p,UUID id,UUID hotel) {var list=jdbc.queryForList("select * from fo_party where tenant_id=:tenantId and id=:id",base(p).addValue("id",id));if(list.isEmpty()||!hotel.equals(uid(list.getFirst(),"hotel_id")))throw bad("交易对方不属于所选组织");return list.getFirst();}
     private Map<String,Object> bank(TenantPrincipal p,UUID id,UUID hotel) {var list=jdbc.queryForList("select * from fo_bank_account where tenant_id=:tenantId and id=:id",base(p).addValue("id",id));if(list.isEmpty())throw missing();var row=list.getFirst();access.requireOrgScope(uid(row,"hotel_id"));if(hotel!=null&&!hotel.equals(uid(row,"hotel_id")))throw bad("资金账户不属于本单组织");return row;}
     private void requireHotel(TenantPrincipal p,UUID id) {if(jdbc.queryForObject("select count(*) from org_unit where tenant_id=:tenantId and id=:id and status='ACTIVE' and unit_type in ('HOTEL','GROUP')",base(p).addValue("id",id),Integer.class)!=1)throw bad("所属门店/集团组织不可用");}

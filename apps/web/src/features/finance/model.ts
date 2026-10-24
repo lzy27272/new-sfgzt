@@ -17,14 +17,14 @@ export function canWithdrawClaim(status: string): boolean {
   return ['DRAFT', 'RETURNED', 'MANAGER_REVIEW', 'FINANCE_REVIEW', 'DIRECTOR_REVIEW', 'LEADER_REVIEW'].includes(status)
 }
 export const treatmentLabels: Record<string, string> = { EXPENSE: '当期费用', INVENTORY: '库存采购', ASSET: '固定资产', PREPAID: '预付 / 待摊', ALREADY_RECORDED: '已记成本（不重复计入）' }
-export type Category = { id: string; hotel_id: string; name: string; treatment: string; keywords: string; debit_account: string; enabled: boolean; version: number }
+export type Category = { id: string; hotel_id: string; name: string; treatment: string; keywords: string; debit_account: string; enabled: boolean; version: number; budget_code?: string | null }
 export type FinanceContext = {
   today: string; assignments: { assignment_id: string; employee_name: string; hotel_id: string; hotel_name: string; company_name?: string; company_tax_number?: string; enabled: boolean }[]
   hotels: { id: string; name: string }[]; categories: Category[]
 }
 export type Evidence = { id: string; kind: EvidenceKind; original_name: string; media_type: string; size_bytes: number; sha256: string; extraction: { source: string; notice: string; invoiceNumber?: string; invoiceCode?: string; amount?: string } }
 export type Invoice = { id: string; attachmentId: string; invoiceCode: string; invoiceNumber: string; amount: string; buyerTaxNumber: string; confirmed: boolean }
-export type ClaimLine = { id: string; categoryId: string | null; description: string; quantity: string; unitPrice: string; amount: string; departmentId?: string | null; allocationMonth?: string | null; invoiceIds: string[] }
+export type ClaimLine = { id: string; categoryId: string | null; description: string; quantity: string; unitPrice: string; amount: string; departmentId?: string | null; allocationMonth?: string | null; invoiceIds: string[]; projectKind?: string; projectId?: string | null; projectSnapshot?: Record<string, unknown>; categoryCode?: string | null }
 export type DraftForm = { expectedVersion: number; title: string; businessDate: string; categoryId: string | null; transactionAmount: string; paymentAmount: string; requestedAmount: string; differenceNote: string; invoices: Invoice[]; items?: ClaimLine[] }
 export type PendingEvidence = { id: string; kind: EvidenceKind; file: File }
 export type LocalDraft = { form: DraftForm; files: PendingEvidence[]; dirty: boolean }
@@ -32,6 +32,7 @@ export type ReviewRecord = { stage: string; decision: string; note: string; crea
   claim: { title: string; requested_amount: string; approved_amount: string | null; category_name: string; workflow_version?: number }
   evidence: { id: string; kind: EvidenceKind; original_name: string; sha256: string }[]
   invoices: { invoice_code: string; invoice_number: string; amount: string; buyer_tax_number: string }[]
+  items?: ClaimLine[]
 } }
 export type Claim = {
   workflow_version?: number; submitted_at?: string; approvalRoute?: { stage: string; label: string; accountId: string | null; accountName: string; skipped: boolean }[];
@@ -41,7 +42,7 @@ export type Claim = {
   items?: ClaimLine[]; configurationIssues?: string[]; paidAmount?: string; unpaidAmount?: string; canArchiveReceipts?: boolean;
   invoices: { id: string; attachment_id: string; invoice_code: string; invoice_number: string; amount: string; buyer_tax_number: string; confirmed: boolean }[];
   reviews: ReviewRecord[];
-  payments: { id?: string; amount: string; reference: string; paid_on: string; receipt_archived?: boolean }[];
+  payments: { id?: string; amount: string; reference: string; paid_on: string; receipt_archived?: boolean; settlement_kind?: 'CASH' | 'LOAN_OFFSET'; receipt_status?: string }[];
   classificationSuggestion: { source: string; categoryId?: string; categoryName?: string };
 }
 export function draftFromClaim(c: Claim): DraftForm {

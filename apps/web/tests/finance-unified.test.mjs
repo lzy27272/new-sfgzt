@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { claimLineAmount } from '../src/features/finance/model.ts'
-import { exactDecimalTotal, financeCsv, financeTodoType, todoTarget, voucherBalanced } from '../src/features/finance/unifiedModel.ts'
+import { exactDecimalTotal, financeCsv, financeTodoType, financeTodoState, todoTarget, voucherBalanced } from '../src/features/finance/unifiedModel.ts'
 import { resolveNotificationNavigation } from '../src/app/notificationNavigation.ts'
 
 test('line quantity times price uses exact four-place decimals with explicit HALF_UP cents', () => {
@@ -36,8 +36,32 @@ test('financial todo labels distinguish reimbursements and real business documen
   assert.equal(financeTodoType({ domain: 'OPERATION', target: { type: 'PAYABLE' } }), '采购与应付')
   assert.equal(financeTodoType({ domain: 'OPERATION', target: { type: 'UNKNOWN' } }), '财务业务单据')
 })
+test('current work actions are not mislabeled as accounting open periods', () => {
+  assert.equal(financeTodoState({ domain: 'INSIGHT_ACTION', kind: 'work', status: 'OPEN' }), '待本人跟进')
+  assert.equal(financeTodoState({ domain: 'INSIGHT_ACTION', kind: 'review', status: 'SUBMITTED' }), '待独立核实')
+  assert.equal(financeTodoState({ domain: 'CASH_INSTRUCTION', kind: 'work', status: 'APPROVED' }), '旧指令待作废重建')
+  assert.equal(financeTodoState({ domain: 'ACCRUAL', kind: 'work', status: 'PENDING' }), '计提异常待处理')
+  assert.equal(financeTodoType({ domain: 'AR_RECOVERY' }), '应收损失恢复')
+})
 test('financial notifications retain permission checks and do not send business document IDs to reimbursement routes', () => {
   assert.equal(resolveNotificationNavigation({ sourceType: 'FINANCE', sourceId: 'c1' }, []), undefined)
   assert.deepEqual(resolveNotificationNavigation({ sourceType: 'FINANCE', sourceId: 'c1', type: 'FINANCE_RETURNED' }, ['finance.submit']).params, { tab: 'mine', id: 'c1' })
   assert.deepEqual(resolveNotificationNavigation({ sourceType: 'FINANCE_OPERATION', sourceId: 'op1' }, ['finance.review']).params, { tab: 'operations', screen: 'documents', documentId: 'op1' })
+})
+test('V2 notifications route to actual modules and sensitive grants remain independent', () => {
+  const cases = [
+    ['FINANCE_CASH_STALE', { tab: 'control', screen: 'cash', instructionId: 'source' }],
+    ['FINANCE_AR_RECOVERY', { tab: 'business-exceptions', section: 'recoveries', exceptionId: 'source' }],
+    ['FINANCE_INSIGHT_ACTION', { tab: 'insight-actions', actionId: 'source' }],
+    ['FINANCE_ACCRUAL', { tab: 'accrual', screen: 'plans', planId: 'source' }],
+  ]
+  for (const [sourceType, target] of cases) {
+    assert.equal(resolveNotificationNavigation({ sourceType, sourceId: 'source' }, []), undefined)
+    assert.deepEqual(resolveNotificationNavigation({ sourceType, sourceId: 'source' }, ['finance.review'])?.params, target)
+  }
+  assert.equal(resolveNotificationNavigation({ sourceType: 'FINANCE_PAYROLL', sourceId: 'source' }, ['finance.review']), undefined)
+  assert.equal(resolveNotificationNavigation({ sourceType: 'FINANCE_TAX_CALENDAR', sourceId: 'source' }, ['finance.review']), undefined)
+  assert.equal(resolveNotificationNavigation({ sourceType: 'FINANCE_ARCHIVE_REQUEST', sourceId: 'source' }, ['finance.read']), undefined)
+  assert.deepEqual(resolveNotificationNavigation({ sourceType: 'FINANCE_ARCHIVE_REQUEST', sourceId: 'source' }, ['finance.archive.grant'])?.params, { tab: 'overview' })
+  assert.equal(resolveNotificationNavigation({ sourceType: 'FINANCE_UNKNOWN', sourceId: 'source' }, ['*']), undefined)
 })

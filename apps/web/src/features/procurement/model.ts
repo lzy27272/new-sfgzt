@@ -10,11 +10,12 @@ export type CatalogItem = {
 export type HotelContext = {
   config: Partial<ProcurementConfig>; items: CatalogItem[]; canConfigure: boolean; canRequest: boolean
   canManage: boolean; canPurchase: boolean; canReview: boolean; canReceive: boolean
+  financialMappingEnabled?: boolean; financialCategories?: { code: string; name: string; treatment: string; policy_id: string }[]; financialDepartments?: { id: string; name: string }[]
 }
 export type ProcurementContext = { hotels: { id: string; name: string }[]; accounts: { id: string; display_name: string }[]; canRequest: boolean; canConfigure: boolean }
-export type DraftLine = { itemId: string; quantity: number; unit: string }
-export type OrderLine = { id: string; item_id: string; item_name: string; sku: string; specification: string; input_quantity: number; input_unit: string; base_unit: string; factor: number; quantity: number; approved_quantity: number; pending_quantity: number; current_quantity: number; unit_price?: number }
-export type ReceiptLine = { line_id: string; item_name: string; base_unit: string; arrived: number; accepted: number; rejected: number; quantity_before?: number; quantity_after?: number; value_delta?: number }
+export type DraftLine = { itemId: string; quantity: number; unit: string; lineKind?: 'INVENTORY' | 'SERVICE' | 'ASSET' | 'PROJECT'; description?: string; specification?: string; financialCategoryCode?: string; departmentId?: string; budgetUnitPrice?: string; projectKind?: string; projectId?: string }
+export type OrderLine = { id: string; item_id: string; line_kind?: 'INVENTORY' | 'SERVICE' | 'ASSET' | 'PROJECT'; item_name: string; sku: string; specification: string; input_quantity: number; input_unit: string; base_unit: string; factor: number; quantity: number; approved_quantity: number; pending_quantity: number; current_quantity: number; unit_price?: number; financial_category_code?: string; financial_department_id?: string; budget_unit_price?: string; project_kind?: string; project_id?: string }
+export type ReceiptLine = { line_id: string; item_name: string; line_kind?: string; base_unit: string; arrived: number; accepted: number; rejected: number; quantity_before?: number; quantity_after?: number; value_delta?: number }
 export type Receipt = { id: string; receiver_id: string; receiver_name: string; status: string; note: string; review_note: string; version: number; submitted_at?: string; reviewed_at?: string; lines: ReceiptLine[] }
 export type Evidence = { id: string; receipt_id?: string; original_name: string; media_type: string; size_bytes: number; created_at: string; purged_at?: string }
 export type Order = {

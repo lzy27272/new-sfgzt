@@ -59,13 +59,14 @@ export function FinanceConfiguration({ identity, context, onChange }: { identity
     <div className={s.configurationFooter}><p className={s.muted}>保存草稿不发布新配置。已启用的配置继续生效，已提交单据保留原审核链。</p><div className={s.actions}><button disabled={busy || saveIssues.length > 0} onClick={() => void saveConfiguration(false)}>保存草稿</button><button className={s.primary} disabled={busy || enableIssues.length > 0} onClick={() => void saveConfiguration(true)}>启用流程</button></div></div>
     <details className={s.panel}><summary>费用类别与分类规则 · {store.hotel_name}</summary><fieldset className={s.form} disabled={busy}><label>已有类别<select value={category.id ?? ''} onChange={e => setCategory(categories.find(c => c.id === e.target.value) ?? { treatment: 'EXPENSE', enabled: true })}><option value="">＋ 新增类别</option>{categories.map(c => <option key={c.id} value={c.id}>{c.name}{c.enabled ? '' : '（已停用）'}</option>)}</select></label>
       <label>类别名称<input value={category.name ?? ''} maxLength={80} onChange={e => setCategory({ ...category, name: e.target.value })} /></label>
+      <label>稳定财务类别编码（预算与采购共用）<input value={category.budget_code ?? ''} maxLength={80} placeholder="由财务明确配置，不按名称或UUID猜测" onChange={e => setCategory({ ...category, budget_code: e.target.value })} /><small>已被预算或原始费用引用的编码不可直接改名；请新建类别并受控停用旧类别。</small></label>
       <label>会计处理<select value={category.treatment} onChange={e => setCategory({ ...category, treatment: e.target.value })}>{Object.entries(treatmentLabels).map(([key, name]) => <option value={key} key={key}>{name}</option>)}</select></label>
       <label>分类关键词（逗号分隔）<input value={category.keywords ?? ''} maxLength={500} onChange={e => setCategory({ ...category, keywords: e.target.value })} /></label>
       <label>借方科目（凭证草稿）<input value={category.debit_account ?? ''} maxLength={120} onChange={e => setCategory({ ...category, debit_account: e.target.value })} /></label>
       <label className={s.check}><input type="checkbox" checked={category.enabled ?? true} onChange={e => setCategory({ ...category, enabled: e.target.checked })} />启用此分类</label>
       <button className={s.primary} disabled={!category.name?.trim()} onClick={() => {
         const id = category.id ?? crypto.randomUUID(); setCategory({ ...category, id })
-        void run(`/hotels/${store.hotel_id}/categories/${id}`, 'PUT', { name: category.name, treatment: category.treatment, keywords: category.keywords ?? '', debitAccount: category.debit_account ?? '', enabled: category.enabled ?? true, expectedVersion: category.version ?? -1 })
+        void run(`/hotels/${store.hotel_id}/categories/${id}`, 'PUT', { name: category.name, treatment: category.treatment, keywords: category.keywords ?? '', debitAccount: category.debit_account ?? '', enabled: category.enabled ?? true, expectedVersion: category.version ?? -1, budgetCode: category.budget_code ?? null })
           .then(success => { if (success) setCategory({ treatment: 'EXPENSE', enabled: true }) })
       }}>保存分类</button>
     </fieldset></details>

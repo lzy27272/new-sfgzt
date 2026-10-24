@@ -185,6 +185,22 @@ public class WeComOAuthService {
         }
         if ("/finance".equals(uri.getPath())) {
             var query=UriComponentsBuilder.fromUri(uri).build().getQueryParams();
+            if(query.values().stream().anyMatch(v->v.size()!=1))throw new IllegalArgumentException("财务入口不可重复传递参数");
+            if(query.keySet().equals(Set.of("tab","correctionId"))&&"cash-errors".equals(query.getFirst("tab"))){UUID.fromString(query.getFirst("correctionId"));return value;}
+            if(query.keySet().equals(Set.of("tab","actionId"))&&"insight-actions".equals(query.getFirst("tab"))){UUID.fromString(query.getFirst("actionId"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","gainId"))&&"supply".equals(query.getFirst("tab"))&&"asset-gains".equals(query.getFirst("screen"))){UUID.fromString(query.getFirst("gainId"));return value;}
+            if(query.keySet().equals(Set.of("tab","section","basisId"))&&"tax-control".equals(query.getFirst("tab"))&&"inputs".equals(query.getFirst("section"))){UUID.fromString(query.getFirst("basisId"));return value;}
+            if(query.keySet().equals(Set.of("tab","section","accrualId"))&&"tax-control".equals(query.getFirst("tab"))&&"accruals".equals(query.getFirst("section"))){UUID.fromString(query.getFirst("accrualId"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","documentId"))&&"operations".equals(query.getFirst("tab"))&&"loans".equals(query.getFirst("screen"))){UUID.fromString(query.getFirst("documentId"));return value;}
+            if(query.keySet().equals(Set.of("tab","exceptionId"))&&"authorizations".equals(query.getFirst("tab"))){UUID.fromString(query.getFirst("exceptionId"));return value;}
+            if(query.keySet().equals(Set.of("tab","delegationId"))&&"authorizations".equals(query.getFirst("tab"))){UUID.fromString(query.getFirst("delegationId"));return value;}
+            if(query.keySet().equals(Set.of("tab","section","exceptionId"))&&"business-exceptions".equals(query.getFirst("tab"))&&Set.of("adjustments","recoveries","tax-calendar").contains(query.getFirst("section"))){UUID.fromString(query.getFirst("exceptionId"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","instructionId"))&&"control".equals(query.getFirst("tab"))&&"cash".equals(query.getFirst("screen"))){UUID.fromString(query.getFirst("instructionId"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","planId"))&&"accrual".equals(query.getFirst("tab"))&&"plans".equals(query.getFirst("screen"))){UUID.fromString(query.getFirst("planId"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","reportId"))&&"insights".equals(query.getFirst("tab"))&&"reports".equals(query.getFirst("screen"))){UUID.fromString(query.getFirst("reportId"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","section","businessId"))&&"business".equals(query.getFirst("tab"))&&Set.of("revenue:imports","payroll:batches","intercompany:transactions").contains(query.getFirst("screen")+":"+query.getFirst("section"))){UUID.fromString(query.getFirst("businessId"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","bookId","voucherId","month"))&&"accounting".equals(query.getFirst("tab"))&&"vouchers".equals(query.getFirst("screen"))){UUID.fromString(query.getFirst("bookId"));UUID.fromString(query.getFirst("voucherId"));java.time.YearMonth.parse(query.getFirst("month"));return value;}
+            if(query.keySet().equals(Set.of("tab","screen","bookId"))&&"accounting".equals(query.getFirst("tab"))&&Set.of("accounts","rules").contains(query.getFirst("screen"))){UUID.fromString(query.getFirst("bookId"));return value;}
             if(query.keySet().equals(Set.of("tab","screen","documentId")) && query.values().stream().allMatch(v->v.size()==1)
                     && "operations".equals(query.getFirst("tab")) && "documents".equals(query.getFirst("screen"))) {
                 UUID.fromString(query.getFirst("documentId"));return value;

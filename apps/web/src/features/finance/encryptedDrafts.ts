@@ -98,3 +98,43 @@ export async function removeFinanceDraft(scope: string, id: string) {
   await queues.get(`${scope}/${id}`)?.catch(() => undefined)
   const db = await open(); try { await erase(db, scope, id) } finally { db.close() }
 }
+
+export type PrivateFinanceForm = { values: Record<string, string>; baseVersion: string; savedAt: number }
+// Typed subforms share the account/assignment AES-GCM store, never plain localStorage.
+export async function loadPrivateFinanceForm(scope: string, id: string): Promise<PrivateFinanceForm | null> {
+  const db = await open(); const queueKey = `${scope}/form:${id}`
+  try {
+    const record = await request<CipherRecord | undefined>(db.transaction('records').objectStore('records').get(queueKey))
+    if (!record || record.scope !== scope) return null
+    if (record.savedAt < Date.now() - TTL) { await erase(db, scope, `form:${id}`); return null }
+    const key = await cryptoKey(db, scope)
+    const value = JSON.parse(new TextDecoder().decode(await decrypt(key, record))) as Omit<PrivateFinanceForm, 'savedAt'>
+    if (!value || typeof value.baseVersion !== 'string' || !value.values || Object.values(value.values).some(v => typeof v !== 'string')) throw new Error('本机财务草稿格式异常，未覆盖云端表单')
+    seenVersions.set(queueKey, record.etag)
+    return { ...value, savedAt: record.savedAt }
+  } finally { db.close() }
+}
+export function savePrivateFinanceForm(scope: string, id: string, value: Omit<PrivateFinanceForm, 'savedAt'>): Promise<number> {
+  const queueKey = `${scope}/form:${id}`
+  const next = (queues.get(queueKey) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    const db = await open()
+    try {
+      const key = await cryptoKey(db, scope); const bytes = new TextEncoder().encode(JSON.stringify(value))
+      if (bytes.byteLength > 256 * 1024) throw new Error('本机财务子表草稿过大，请联网保存')
+      const record = await encrypt(key, scope, queueKey, bytes.buffer)
+      const tx = db.transaction('records', 'readwrite'); const completion = done(tx); let stale = false
+      const check = tx.objectStore('records').get(queueKey)
+      check.onsuccess = () => {
+        const old = check.result as CipherRecord | undefined
+        if (old && old.etag !== seenVersions.get(queueKey) && old.writer !== writerId) { stale = true; tx.abort(); return }
+        tx.objectStore('records').put(record)
+      }
+      try { await completion } catch (error) { if (stale) throw new Error('另一页面已更新财务草稿，本页未覆盖，请先核对另一页面'); throw error }
+      seenVersions.set(queueKey, record.etag); return record.savedAt
+    } finally { db.close() }
+  })
+  queues.set(queueKey, next)
+  void next.finally(() => { if (queues.get(queueKey) === next) queues.delete(queueKey) }).catch(() => undefined)
+  return next
+}
+export async function removePrivateFinanceForm(scope: string, id: string) { await removeFinanceDraft(scope, `form:${id}`) }

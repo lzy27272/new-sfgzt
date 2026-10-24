@@ -60,15 +60,42 @@ export function accountingSourceTarget(source: FinanceRow, permissions: readonly
   const metadata = accountingRecord(source.metadata)
   const has = (permission: string) => permissions.includes('*') || permissions.includes(permission)
   const uuid = (value: unknown) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : undefined
+  const sourceType = typeof source.sourceType === 'string' ? source.sourceType : ''
+  // Sensitive origin survives wrappers such as an independently approved cash-error correction.
+  const origins = ([sourceType, metadata.sourceType, metadata.originalSourceType, metadata.documentType].filter(value => typeof value === 'string') as string[]).map(value => value.toUpperCase())
+  if (origins.some(value => value.includes('PAYROLL')) && !has('finance.payroll')) return undefined
+  if (origins.some(value => value.includes('TAX')) && !has('finance.tax')) return undefined
   const claimId = uuid(metadata.claimId)
-  if (claimId && String(source.sourceType).startsWith('REIMBURSEMENT_') && ['finance.submit', 'finance.read', 'finance.review', 'finance.pay'].some(has)) return { tab: has('finance.read') || has('finance.pay') ? 'all' : has('finance.review') ? 'review' : 'mine', id: claimId }
+  const reimbursementTypes = ['REIMBURSEMENT_EXPENSE', 'REIMBURSEMENT_INVENTORY', 'REIMBURSEMENT_ASSET', 'REIMBURSEMENT_PREPAID', 'REIMBURSEMENT_ALREADY_RECORDED', 'REIMBURSEMENT_PAYMENT', 'REIMBURSEMENT_LOAN_OFFSET']
+  if (claimId && reimbursementTypes.includes(sourceType) && ['finance.submit', 'finance.read', 'finance.review', 'finance.pay'].some(has)) return { tab: has('finance.read') || has('finance.pay') ? 'all' : has('finance.review') ? 'review' : 'mine', id: claimId }
   const documentId = uuid(metadata.documentId)
   const types = ['CONTRACT', 'PAYABLE', 'LOAN', 'PREPAYMENT', 'ASSET', 'PAYROLL', 'REVENUE', 'INTERCOMPANY', 'TAX_TASK']
   const canReadDocuments = ['finance.operations.read', 'finance.operations.write', 'finance.operations.review', 'finance.read', 'finance.review', 'finance.pay'].some(has)
-  if (documentId && String(source.sourceType).startsWith('FO_') && types.includes(String(metadata.documentType)) && canReadDocuments) return { tab: 'operations', screen: 'documents', type: String(metadata.documentType), documentId }
+  const documentType = String(metadata.documentType)
+  const matchesDocumentType = sourceType === `FO_${documentType}` || documentType === 'PAYABLE' && ['EXPENSE', 'INVENTORY', 'ASSET', 'PREPAID'].some(kind => sourceType === `FO_PAYABLE_${kind}`) || documentType === 'REVENUE' && ['ROOM', 'OTHER', 'DEPOSIT', 'PREPAID'].some(kind => sourceType === `FO_REVENUE_${kind}`)
+  if (documentId && matchesDocumentType && types.includes(documentType) && canReadDocuments) return { tab: 'operations', screen: 'documents', type: documentType, documentId }
   const recurringDocumentId = uuid(metadata.sourceId)
-  const recurringType = source.sourceType === 'FA_DEPRECIATION' && metadata.sourceType === 'FO_ASSET' ? 'ASSET'
-    : source.sourceType === 'FA_AMORTIZATION' && metadata.sourceType === 'FO_PREPAYMENT' ? 'PREPAYMENT' : undefined
+  const recurringType = sourceType === 'FA_DEPRECIATION' && metadata.sourceType === 'FO_ASSET' ? 'ASSET'
+    : sourceType === 'FA_AMORTIZATION' && metadata.sourceType === 'FO_PREPAYMENT' ? 'PREPAYMENT' : undefined
   if (recurringDocumentId && uuid(metadata.planId) && recurringType && canReadDocuments) return { tab: 'operations', screen: 'documents', type: recurringType, documentId: recurringDocumentId }
+  const hotelId = uuid(source.hotelId); const businessId = uuid(metadata.businessId)
+  const canReadSupply = ['finance.read', 'finance.review', 'finance.pay', 'finance.accounting.read', 'finance.accounting.write'].some(has)
+  const receiptId = uuid(metadata.receiptId)
+  if (sourceType === 'FS_ASSET_GAIN' && metadata.businessTable === 'fs_asset_gain' && businessId && hotelId && ['finance.read', 'finance.accounting.read'].some(has)) return { tab: 'supply', screen: 'asset-gains', gainId: businessId }
+  if (sourceType === 'FB_TAX_ACCRUAL' && metadata.businessTable === 'ft_tax_accrual' && businessId && has('finance.tax')) return { tab: 'tax-control', section: 'accruals', accrualId: businessId }
+  if (sourceType === 'FS_PROCUREMENT' && metadata.businessTable === 'fs_recognition' && businessId && receiptId && hotelId && canReadSupply) return { tab: 'supply', screen: 'procurement', hotelId, receiptId }
+  if (sourceType === 'FS_INVENTORY' && metadata.businessTable === 'fs_inventory_event' && businessId && uuid(metadata.movementId) === businessId && hotelId && canReadSupply) return { tab: 'supply', screen: 'inventory', hotelId }
+  const hasAccountingTab = ['finance.read', 'finance.configure', 'finance.accounting.read', 'finance.accounting.write', 'finance.accounting.review', 'finance.accounting.post', 'finance.accounting.close'].some(has)
+  if (sourceType === 'FAR_ACCRUAL' && metadata.businessTable === 'far_run' && businessId && uuid(metadata.planId) && hasAccountingTab && ['finance.read', 'finance.accounting.read', 'finance.review'].some(has)) return { tab: 'accrual', screen: 'plans', planId: uuid(metadata.planId)! }
+  if (sourceType === 'FX_CASH_CORRECTION' && metadata.businessTable === 'fx_cash_correction' && businessId && ['finance.read', 'finance.review', 'finance.pay'].some(has)) return { tab: 'cash-errors', correctionId: businessId }
+  if (businessId && ['finance.read', 'finance.review'].some(has)) {
+    if (sourceType === 'FB_RECEIVABLE_ADJUSTMENT' && metadata.businessTable === 'fb_receivable_adjustment') return { tab: 'business-exceptions', section: 'adjustments', exceptionId: businessId }
+    if (sourceType === 'FB_RECEIVABLE_RECOVERY' && metadata.businessTable === 'fb_receivable_recovery') return { tab: 'business-exceptions', section: 'recoveries', exceptionId: businessId }
+    const batchId = uuid(metadata.batchId)
+    if (['FB_REVENUE_INCOME', 'FB_REVENUE_AR', 'FB_REVENUE_DEPOSIT', 'FB_REVENUE_PREPAYMENT', 'FB_REVENUE_STORED_VALUE'].includes(sourceType) && metadata.businessTable === 'fb_revenue_entry' && batchId) return { tab: 'business', screen: 'revenue', section: 'imports', businessId: batchId }
+  }
+  const managedFinance = ['finance.read', 'finance.review', 'finance.pay', 'finance.configure'].some(has)
+  if (sourceType === 'FB_PAYROLL' && metadata.businessTable === 'fb_payroll_batch' && businessId && (metadata.payrollBatchId === undefined || uuid(metadata.payrollBatchId) === businessId) && has('finance.payroll') && managedFinance) return { tab: 'business', screen: 'payroll', section: 'batches', businessId }
+  if (['FB_INTERCOMPANY', 'FB_INTERCOMPANY_CASH'].includes(sourceType) && metadata.businessTable === 'fb_intercompany' && businessId && (metadata.transactionId === undefined || uuid(metadata.transactionId) === businessId) && ['finance.read', 'finance.review', 'finance.pay'].some(has)) return { tab: 'business', screen: 'intercompany', section: 'transactions', businessId }
   return undefined
 }

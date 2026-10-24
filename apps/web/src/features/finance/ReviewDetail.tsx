@@ -12,13 +12,10 @@ export function ReviewDetail({ claim, identity, context, onUpdated }: { claim: C
   const [amount, setAmount] = useState(claim.approved_amount ?? claim.requested_amount)
   const [note, setNote] = useState(''); const [ack, setAck] = useState(false); const [busy, setBusy] = useState(false); const lock = useRef(false)
   const [error, setError] = useState(''); const [success, setSuccess] = useState('')
-  const [reference, setReference] = useState(''); const [paidOn, setPaidOn] = useState(context.today)
-  const [paymentAmount, setPaymentAmount] = useState(claim.unpaidAmount ?? claim.approved_amount ?? claim.requested_amount)
   const hasItemLines = (claim.items?.length ?? 0) > 0
   useEffect(() => {
     setCategory(claim.category_id ?? '')
     setAmount(claim.approved_amount ?? claim.requested_amount)
-    setPaymentAmount(claim.unpaidAmount ?? claim.approved_amount ?? claim.requested_amount)
     setAck(false)
   }, [claim.id, claim.version, claim.category_id, claim.approved_amount, claim.requested_amount, claim.unpaidAmount])
   const request = useRef({ signature: '', id: '' })
@@ -52,9 +49,9 @@ export function ReviewDetail({ claim, identity, context, onUpdated }: { claim: C
       {claim.mismatch && <div className={s.warning}><strong>金额或抬头存在差异，需财务核实</strong><p>发票 {money(claim.invoice_amount)} · 实付 {money(claim.payment_amount)} · 申请 {money(claim.requested_amount)}</p><span>申请人说明：{claim.difference_note || '未填写'}</span></div>}
       <h3>凭证对照</h3><div className={s.documentColumns}>{(Object.keys(evidenceLabels) as EvidenceKind[]).map(kind => <section key={kind}><h4>{evidenceLabels[kind]}</h4>{claim.attachments.filter(a => a.kind === kind).map(a => <EvidencePreview key={a.id} evidence={a} identity={identity} claimId={claim.id} />)}{!claim.attachments.some(a => a.kind === kind) && <p className={s.muted}>未上传</p>}</section>)}</div>
       <h3>核对信息</h3><dl className={s.facts}><dt>发票合计</dt><dd>{money(claim.invoice_amount)}</dd><dt>交易记录</dt><dd>{money(claim.transaction_amount)}</dd><dt>实际支付</dt><dd>{money(claim.payment_amount)}</dd><dt>拟申请报销</dt><dd>{money(claim.requested_amount)}</dd><dt>购买方应为</dt><dd>{claim.company_name}<br />{claim.company_tax_number}</dd><dt>差异说明</dt><dd>{claim.difference_note || '无'}</dd></dl>
-      {!!claim.items?.length && <section><h3>费用明细及类别</h3>{claim.items.map((line, index) => <div className={s.invoiceSummary} key={line.id}><strong>{index + 1}. {line.description}</strong><p>{context.categories.find(category => category.id === line.categoryId)?.name ?? '历史类别'} · {line.quantity} × {line.unitPrice} = {money(line.amount)}</p><small>部门 {line.departmentId || '未单独分配'} · 关联发票 {line.invoiceIds?.length ?? 0} 张</small></div>)}</section>}
+      {!!claim.items?.length && <section><h3>费用明细及类别</h3>{claim.items.map((line, index) => <div className={s.invoiceSummary} key={line.id}><strong>{index + 1}. {line.description}</strong><p>{context.categories.find(category => category.id === line.categoryId)?.name ?? '历史类别'} · {line.quantity} × {line.unitPrice} = {money(line.amount)}</p><small>部门 {line.departmentId || '未单独分配'} · 关联发票 {line.invoiceIds?.length ?? 0} 张 · 稳定类别编码 {line.categoryCode || '历史未配置'}</small><p>项目：{String(line.projectSnapshot?.name ?? (line.projectKind === 'NONE' ? '未指定' : '历史项目快照未完整'))} · {line.projectKind || '历史未配置'}{line.projectSnapshot?.sourceVersion != null ? ` · 冻结V${String(line.projectSnapshot.sourceVersion)}` : ''}</p></div>)}</section>}
       <details><summary>发票号码与原始明细（{claim.invoices.length}）</summary>{claim.invoices.map(i => <p className={s.invoiceSummary} key={i.id}>{i.invoice_code && `${i.invoice_code} / `}{i.invoice_number}<br />{money(i.amount)} · 购买方 {i.buyer_tax_number}</p>)}</details>
-      <details open={claim.reviews.length > 0}><summary>审核与付款记录</summary><ReviewHistory records={claim.reviews} identity={identity} claimId={claim.id} />{claim.payments.map((p, i) => <p key={i}>付款 {money(p.amount)} · {p.paid_on}<br />流水参考：{p.reference}</p>)}</details>
+      <details open={claim.reviews.length > 0}><summary>审核与清偿记录</summary><ReviewHistory records={claim.reviews} identity={identity} claimId={claim.id} />{claim.payments.map((p, i) => <p key={i}>{p.settlement_kind === 'LOAN_OFFSET' ? '借款冲抵（非再次付款）' : '付款'} {money(p.amount)} · {p.paid_on}<br />依据：{p.reference}</p>)}</details>
     </section>
     <aside className={s.reviewActions}>
       <h2>{claim.canReview ? `当前审核：${claim.approvalRoute?.find(step => step.stage === claim.status)?.label ?? claimStatusLabel(claim)}` : '审核处理'}</h2>
@@ -73,7 +70,7 @@ export function ReviewDetail({ claim, identity, context, onUpdated }: { claim: C
         <small>审核通过不等于实际付款或入账；下一审核人仍需独立确认。</small>
       </fieldset> : <p className={s.info}>当前账号不是本阶段审核人，或单据已结束；仅显示权限范围内的信息。</p>}
       {claim.status === 'APPROVED' && <div className={s.voucher}><h3>凭证草稿</h3><p>已生成借贷平衡的草稿及原件索引。尚未记账，不代替税务发票。</p><button type="button" onClick={() => void financeDownload(identity, `/claims/${claim.id}/voucher/export`, '记账凭证草稿.csv').catch(e => setError(errorMessage(e)))}>导出凭证草稿</button></div>}
-      {claim.canPay && <fieldset disabled={busy} className={s.form}><h3>登记实际付款</h3><p>审批金额：{money(claim.approved_amount)} · 已付 {money(claim.paidAmount)} · 未付 {money(claim.unpaidAmount ?? claim.approved_amount)}</p><label>本次实际付款金额<input inputMode="decimal" value={paymentAmount} onChange={e => setPaymentAmount(e.target.value)} /></label><label>付款日期<input type="date" value={paidOn} max={context.today} min={claim.business_date} onChange={e => setPaidOn(e.target.value)} /></label><label>实际付款流水 / 凭证参考<input value={reference} maxLength={160} onChange={e => setReference(e.target.value)} /></label><button type="button" className={s.primary} disabled={!reference.trim() || !paymentAmount} onClick={() => { if (window.confirm(`确认已实际支付${money(paymentAmount)}？此操作仅登记，不转账。`)) void run('payment', { amount: paymentAmount, reference, paidOn }) }}>确认已付款</button></fieldset>}
+      {claim.canPay && <section className={s.form}><h3>受控付款</h3><p>审批金额：{money(claim.approved_amount)} · 已清偿 {money(claim.paidAmount)} · 待清偿 {money(claim.unpaidAmount ?? claim.approved_amount)}</p><a className={s.primary} href={`#/finance?tab=control&screen=cash&sourceId=${encodeURIComponent(claim.id)}`}>核对账户并建立付款指令</a><p className={s.muted}>先由独立人员复核账户，再由原出纳登记实际付款；借款冲抵不重复付款。</p></section>}
       {claim.canArchiveReceipts && <section className={s.voucher}><h3>补传付款回单</h3>{claim.payments.filter(payment => payment.id).map(payment => <div className={s.fileLine} key={payment.id}><span>{money(payment.amount)} · {payment.paid_on} · {payment.receipt_archived ? '回单已归档' : '待补回单'}</span>{!payment.receipt_archived && <label className={s.uploadButton}>上传真实回单<input type="file" disabled={busy} accept="application/pdf,image/jpeg,image/png" onChange={e => { void archiveReceipt(payment.id!, e.target.files?.[0]); e.target.value = '' }} /></label>}</div>)}</section>}
     </aside>
   </>

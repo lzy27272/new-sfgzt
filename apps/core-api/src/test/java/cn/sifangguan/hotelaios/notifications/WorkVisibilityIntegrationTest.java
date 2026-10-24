@@ -457,7 +457,7 @@ class WorkVisibilityIntegrationTest {
                 new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
                 new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc,true),
                 new org.springframework.transaction.support.TransactionTemplate(transactions),
-                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,200);
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,org.mockito.Mockito.mock(cn.sifangguan.hotelaios.finance.FinanceDeliveryEligibilityService.class),200);
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
         assertThat(jdbc.queryForObject("select count(*) from notification_delivery where notification_id=?",Integer.class,currentNotice)).isOne();
         assertThat(jdbc.queryForObject("select count(*) from notification_delivery where notification_id=?",Integer.class,staleNotice)).isZero();

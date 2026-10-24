@@ -1721,7 +1721,7 @@ function Notifications({ identity, permissions, routeParams, go }: { identity: R
   const [commandError, setCommandError] = useState<string>()
   const unreadOnly = routeParams.unread === 'true'
   const notices = unreadOnly ? resource.data.filter((item) => !item.readAt) : resource.data
-  const wecomLabels: Record<string, string> = { SENT: '企微已发送（不代表已读）', UNBOUND: '未绑定企微，仅站内可见', PENDING: '企微待发送', FAILED: '企微发送失败，等待重试', DEAD: '企微发送失败，请联系管理员', NOT_QUEUED: '站内通知，企微未发送' }
+  const wecomLabels: Record<string, string> = { SENT: '企微已发送（不代表已读）', UNBOUND: '未绑定企微，仅站内可见', PENDING: '企微待发送', FAILED: '企微发送失败，等待重试', DEAD: '企微发送失败，请联系管理员', NOT_QUEUED: '站内通知，企微未发送', SUPPRESSED: '当前权限已变化或事项已处理，已停止企微发送' }
   const markRead = async (id: string) => {
     setBusy(id); setCommandError(undefined)
     try {

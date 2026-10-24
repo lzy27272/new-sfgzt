@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.integrations.wecom;
 
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
+import cn.sifangguan.hotelaios.finance.FinanceDeliveryEligibilityService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -33,6 +34,7 @@ public class WeComDeliveryWorker {
     private final TransactionTemplate transactions;
     private final WeComApiClient apiClient;
     private final WeComProperties properties;
+    private final FinanceDeliveryEligibilityService financeEligibility;
     private final int batchSize;
     private final String workerId = "wecom-" + UUID.randomUUID();
 
@@ -42,6 +44,7 @@ public class WeComDeliveryWorker {
             TransactionTemplate transactions,
             WeComApiClient apiClient,
             WeComProperties properties,
+            FinanceDeliveryEligibilityService financeEligibility,
             @Value("${app.wecom.worker.batch-size:50}") int batchSize
     ) {
         this.jdbc = jdbc;
@@ -49,6 +52,7 @@ public class WeComDeliveryWorker {
         this.transactions = transactions;
         this.apiClient = apiClient;
         this.properties = properties;
+        this.financeEligibility = financeEligibility;
         this.batchSize = Math.max(1, Math.min(batchSize, 200));
     }
 
@@ -60,6 +64,11 @@ public class WeComDeliveryWorker {
         enqueueTaskNotifications();
         for (Delivery delivery : claim()) {
             try {
+                if (delivery.sourceType().startsWith("FINANCE") && !financeEligibility.eligible(
+                        properties.tenantId(), delivery.accountId(), delivery.assignmentId(), delivery.sourceType(), delivery.sourceId())) {
+                    markSuppressed(delivery.id());
+                    continue;
+                }
                 boolean groupDelivery = useGroupChat(delivery.sourceType(), delivery.chatId());
                 String endpoint = groupDelivery
                         ? "chat:" + delivery.chatId() : "user:" + delivery.userId();
@@ -134,14 +143,36 @@ public class WeComDeliveryWorker {
                     where n.tenant_id = :tenantId
                       and ((n.source_type = 'FINANCE' and exists(select 1 from finance_claim fc
                            where fc.tenant_id=n.tenant_id and fc.id=n.source_id and (
-                            (n.notification_type='FINANCE_REVIEW_PENDING' and fc.applicant_id<>n.recipient_account_id and n.recipient_account_id=case fc.status when 'MANAGER_REVIEW' then fc.manager_account_id when 'FINANCE_REVIEW' then fc.finance_account_id when 'DIRECTOR_REVIEW' then fc.director_account_id when 'LEADER_REVIEW' then fc.leader_account_id end)
-                            or (n.notification_type='FINANCE_PAYMENT_PENDING' and fc.status='APPROVED' and fc.cashier_account_id=n.recipient_account_id and (coalesce((select sum(fp.amount) from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id),0)<fc.approved_amount or exists(select 1 from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id and not exists(select 1 from finance_payment_receipt r where r.tenant_id=fp.tenant_id and r.payment_id=fp.id))))
+                            (n.notification_type='FINANCE_REVIEW_PENDING' and fc.applicant_id<>n.recipient_account_id and n.recipient_account_id=fd_current_reviewer(fc.tenant_id,'CLAIM',fc.id,case fc.status when 'MANAGER_REVIEW' then 0 when 'FINANCE_REVIEW' then 1 when 'DIRECTOR_REVIEW' then 2 when 'LEADER_REVIEW' then 3 else -1 end,case fc.status when 'MANAGER_REVIEW' then fc.manager_account_id when 'FINANCE_REVIEW' then fc.finance_account_id when 'DIRECTOR_REVIEW' then fc.director_account_id when 'LEADER_REVIEW' then fc.leader_account_id end))
+                            or (n.notification_type='FINANCE_PAYMENT_PENDING' and fc.status='APPROVED' and fc.cashier_account_id=n.recipient_account_id and (fx_claim_paid_amount(fc.tenant_id,fc.id,'9999-12-31'::date)<fc.approved_amount or exists(select 1 from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id and not exists(select 1 from fc_claim_loan_clear lc where lc.tenant_id=fp.tenant_id and lc.payment_id=fp.id) and fx_cash_effective_amount(fp.tenant_id,'CLAIM',fp.id,fp.amount,'9999-12-31'::date)>0 and not exists(select 1 from finance_payment_receipt r where r.tenant_id=fp.tenant_id and r.payment_id=fp.id))))
                             or (n.notification_type='FINANCE_RETURNED' and fc.status='RETURNED' and fc.applicant_id=n.recipient_account_id))))
                            or (n.source_type='FINANCE_OPERATION' and exists(select 1 from fo_document fd where fd.tenant_id=n.tenant_id and fd.id=n.source_id and (
-                            (n.notification_type='FINANCE_OPERATION_REVIEW_PENDING' and fd.status='REVIEW' and fd.applicant_id<>n.recipient_account_id and fd.approval_route->>fd.review_index=cast(n.recipient_account_id as text))
+                            (n.notification_type='FINANCE_OPERATION_REVIEW_PENDING' and fd.status='REVIEW' and fd.applicant_id<>n.recipient_account_id and fd_current_reviewer(fd.tenant_id,'OPERATION',fd.id,fd.review_index,cast(fd.approval_route->>fd.review_index as uuid))=n.recipient_account_id)
                             or (n.notification_type='FINANCE_OPERATION_PAYMENT_PENDING' and fd.status='APPROVED' and fd.cashier_account_id=n.recipient_account_id and fd.applicant_id<>n.recipient_account_id)
                             or (n.notification_type='FINANCE_OPERATION_RETURNED' and fd.status='RETURNED' and fd.applicant_id=n.recipient_account_id))))
-                           or (n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type='FINANCE_CASH' and exists(select 1 from fc_cash_instruction ci where ci.tenant_id=n.tenant_id and ci.id=n.source_id and ((ci.source_kind='CLAIM' and exists(select 1 from finance_claim s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id)) or (ci.source_kind='OPERATION' and exists(select 1 from fo_document s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id))) and ((n.notification_type='FINANCE_CASH_REVIEW_PENDING' and ci.status='DRAFT' and ci.reviewer_id=n.recipient_account_id) or (n.notification_type='FINANCE_CASH_PAYMENT_PENDING' and ci.status='APPROVED' and ci.cashier_id=n.recipient_account_id))))
+                            or (n.source_type='FINANCE_CASH_STALE' and exists(select 1 from fc_cash_instruction ci where ci.tenant_id=n.tenant_id and ci.id=n.source_id and ci.status in ('DRAFT','APPROVED') and n.recipient_account_id in (ci.created_by,ci.reviewer_id,ci.cashier_id) and not ((ci.source_kind='CLAIM' and exists(select 1 from finance_claim s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id)) or (ci.source_kind='OPERATION' and exists(select 1 from fo_document s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id)))))
+                            or (n.source_type='FINANCE_ACCRUAL' and (exists(select 1 from far_revision r join far_plan p on p.tenant_id=r.tenant_id and p.id=r.plan_id where r.tenant_id=n.tenant_id and p.id=n.source_id and r.status='PENDING' and r.reviewer_id=n.recipient_account_id and r.applicant_id<>n.recipient_account_id) or exists(select 1 from far_schedule_issue i join far_plan p on p.tenant_id=i.tenant_id and p.id=i.plan_id join finance_store_config c on c.tenant_id=p.tenant_id and c.hotel_id=p.hotel_id and c.company_id=p.company_id where i.tenant_id=n.tenant_id and i.plan_id=n.source_id and i.status='PENDING' and c.enabled and n.recipient_account_id in(c.finance_account_id,c.director_account_id) and not exists(select 1 from far_revision pending_revision where pending_revision.tenant_id=p.tenant_id and pending_revision.plan_id=p.id and pending_revision.status='PENDING'))))
+                            or (n.source_type='FINANCE_REVENUE' and exists(select 1 from fb_revenue_batch b where b.tenant_id=n.tenant_id and b.id=n.source_id and b.status='REVIEW' and b.reviewer_id=n.recipient_account_id and b.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_PAYROLL' and exists(select 1 from fb_payroll_batch b where b.tenant_id=n.tenant_id and b.id=n.source_id and ((b.status='REVIEW' and b.reviewer_id=n.recipient_account_id) or (b.status='CONFIRMED' and b.cashier_id=n.recipient_account_id)) and b.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_INTERCOMPANY' and exists(select 1 from fb_intercompany b where b.tenant_id=n.tenant_id and b.id=n.source_id and b.status='REVIEW' and b.creator_id<>n.recipient_account_id and ((b.reviewer_id=n.recipient_account_id and b.confirmed_by is null) or (b.counterparty_reviewer_id=n.recipient_account_id and b.counterparty_confirmed_by is null))))
+                            or (n.source_type='FINANCE_ACCOUNTING' and exists(select 1 from fa_voucher v where v.tenant_id=n.tenant_id and v.id=n.source_id and ((v.status='DRAFT' and v.created_by<>n.recipient_account_id) or v.status='REVIEWED')))
+                            or (n.source_type='FINANCE_LEDGER' and exists(select 1 from fc_ledger_change c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_INSIGHT' and exists(select 1 from fi_report r where r.tenant_id=n.tenant_id and r.id=n.source_id and r.status in ('DRAFT','REVIEWED') and r.created_by<>n.recipient_account_id and r.last_edited_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_CASH_ERROR' and exists(select 1 from fx_cash_correction c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_AR_ADJUSTMENT' and exists(select 1 from fb_receivable_adjustment c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_TAX_CALENDAR' and exists(select 1 from fb_tax_calendar c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status in ('REVIEW','ACTIVE') and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_AR_RECOVERY' and exists(select 1 from fb_receivable_recovery c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_INSIGHT_ACTION' and exists(select 1 from fi_action_task c where c.tenant_id=n.tenant_id and c.id=n.source_id and ((c.status in ('OPEN','IN_PROGRESS','REWORK') and c.owner_id=n.recipient_account_id) or (c.status='SUBMITTED' and c.reviewer_id=n.recipient_account_id and c.owner_id<>n.recipient_account_id and c.submitted_by<>n.recipient_account_id))))
+                            or (n.source_type='FINANCE_SUPPLY_INVOICE_RELEASE' and exists(select 1 from fs_invoice_release c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.applicant_id<>n.recipient_account_id))
+                            or n.source_type in ('FINANCE_ASSET_GAIN','FINANCE_INPUT_BASIS','FINANCE_TAX_ACCRUAL','FINANCE_LOAN_OVERDUE')
+                            or (n.source_type='FINANCE_BUDGET_EXCEPTION' and exists(select 1 from fc_budget_exception c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.valid_until>statement_timestamp() and c.reviewer_id=n.recipient_account_id and c.applicant_id<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_DELEGATION' and exists(select 1 from fd_delegation c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.created_by<>n.recipient_account_id and c.deputy_id<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_CLOSE_REGISTER' and exists(select 1 from fcl_register c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_CLOSE_BANK' and exists(select 1 from fcl_bank_explanation c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_ARCHIVE_REQUEST' and exists(select 1 from fac_request c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='PENDING' and c.applicant_id<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_ACCRUAL_POLICY' and exists(select 1 from far_policy c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                             or (n.source_type = 'TASK' and task.id is not null)
                            or (n.source_type = 'LOST_PROPERTY' and exists (
                                select 1 from lost_property_case lp
                                join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
@@ -221,6 +252,7 @@ public class WeComDeliveryWorker {
             List<Delivery> rows = jdbc.query("""
                     select d.id, d.attempt_count, d.recipient_endpoint_hash,
                            n.title, n.content, n.source_type, n.source_id, n.notification_type,
+                           n.recipient_account_id, n.recipient_assignment_id,
                            ub.wecom_user_id, chat.chat_id
                     from notification_delivery d
                     join notification n on n.tenant_id = d.tenant_id and n.id = d.notification_id
@@ -268,14 +300,36 @@ public class WeComDeliveryWorker {
                     where d.tenant_id = :tenantId and d.channel = 'WECHAT'
                       and ((n.source_type = 'FINANCE' and exists(select 1 from finance_claim fc
                            where fc.tenant_id=n.tenant_id and fc.id=n.source_id and (
-                            (n.notification_type='FINANCE_REVIEW_PENDING' and fc.applicant_id<>n.recipient_account_id and n.recipient_account_id=case fc.status when 'MANAGER_REVIEW' then fc.manager_account_id when 'FINANCE_REVIEW' then fc.finance_account_id when 'DIRECTOR_REVIEW' then fc.director_account_id when 'LEADER_REVIEW' then fc.leader_account_id end)
-                            or (n.notification_type='FINANCE_PAYMENT_PENDING' and fc.status='APPROVED' and fc.cashier_account_id=n.recipient_account_id and (coalesce((select sum(fp.amount) from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id),0)<fc.approved_amount or exists(select 1 from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id and not exists(select 1 from finance_payment_receipt r where r.tenant_id=fp.tenant_id and r.payment_id=fp.id))))
+                            (n.notification_type='FINANCE_REVIEW_PENDING' and fc.applicant_id<>n.recipient_account_id and n.recipient_account_id=fd_current_reviewer(fc.tenant_id,'CLAIM',fc.id,case fc.status when 'MANAGER_REVIEW' then 0 when 'FINANCE_REVIEW' then 1 when 'DIRECTOR_REVIEW' then 2 when 'LEADER_REVIEW' then 3 else -1 end,case fc.status when 'MANAGER_REVIEW' then fc.manager_account_id when 'FINANCE_REVIEW' then fc.finance_account_id when 'DIRECTOR_REVIEW' then fc.director_account_id when 'LEADER_REVIEW' then fc.leader_account_id end))
+                            or (n.notification_type='FINANCE_PAYMENT_PENDING' and fc.status='APPROVED' and fc.cashier_account_id=n.recipient_account_id and (fx_claim_paid_amount(fc.tenant_id,fc.id,'9999-12-31'::date)<fc.approved_amount or exists(select 1 from finance_payment fp where fp.tenant_id=fc.tenant_id and fp.claim_id=fc.id and not exists(select 1 from fc_claim_loan_clear lc where lc.tenant_id=fp.tenant_id and lc.payment_id=fp.id) and fx_cash_effective_amount(fp.tenant_id,'CLAIM',fp.id,fp.amount,'9999-12-31'::date)>0 and not exists(select 1 from finance_payment_receipt r where r.tenant_id=fp.tenant_id and r.payment_id=fp.id))))
                             or (n.notification_type='FINANCE_RETURNED' and fc.status='RETURNED' and fc.applicant_id=n.recipient_account_id))))
                            or (n.source_type='FINANCE_OPERATION' and exists(select 1 from fo_document fd where fd.tenant_id=n.tenant_id and fd.id=n.source_id and (
-                            (n.notification_type='FINANCE_OPERATION_REVIEW_PENDING' and fd.status='REVIEW' and fd.applicant_id<>n.recipient_account_id and fd.approval_route->>fd.review_index=cast(n.recipient_account_id as text))
+                            (n.notification_type='FINANCE_OPERATION_REVIEW_PENDING' and fd.status='REVIEW' and fd.applicant_id<>n.recipient_account_id and fd_current_reviewer(fd.tenant_id,'OPERATION',fd.id,fd.review_index,cast(fd.approval_route->>fd.review_index as uuid))=n.recipient_account_id)
                             or (n.notification_type='FINANCE_OPERATION_PAYMENT_PENDING' and fd.status='APPROVED' and fd.cashier_account_id=n.recipient_account_id and fd.applicant_id<>n.recipient_account_id)
                             or (n.notification_type='FINANCE_OPERATION_RETURNED' and fd.status='RETURNED' and fd.applicant_id=n.recipient_account_id))))
-                           or (n.source_type = 'TASK' and task.id is not null)
+                           or (n.source_type='FINANCE_CASH' and exists(select 1 from fc_cash_instruction ci where ci.tenant_id=n.tenant_id and ci.id=n.source_id and ((ci.source_kind='CLAIM' and exists(select 1 from finance_claim s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id)) or (ci.source_kind='OPERATION' and exists(select 1 from fo_document s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id))) and ((n.notification_type='FINANCE_CASH_REVIEW_PENDING' and ci.status='DRAFT' and ci.reviewer_id=n.recipient_account_id) or (n.notification_type='FINANCE_CASH_PAYMENT_PENDING' and ci.status='APPROVED' and ci.cashier_id=n.recipient_account_id))))
+                            or (n.source_type='FINANCE_CASH_STALE' and exists(select 1 from fc_cash_instruction ci where ci.tenant_id=n.tenant_id and ci.id=n.source_id and ci.status in ('DRAFT','APPROVED') and n.recipient_account_id in (ci.created_by,ci.reviewer_id,ci.cashier_id) and not ((ci.source_kind='CLAIM' and exists(select 1 from finance_claim s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id)) or (ci.source_kind='OPERATION' and exists(select 1 from fo_document s where s.tenant_id=ci.tenant_id and s.id=ci.source_id and s.status='APPROVED' and s.version=ci.source_version and s.hotel_id=ci.hotel_id and s.company_id=ci.company_id)))))
+                            or (n.source_type='FINANCE_ACCRUAL' and (exists(select 1 from far_revision r join far_plan p on p.tenant_id=r.tenant_id and p.id=r.plan_id where r.tenant_id=n.tenant_id and p.id=n.source_id and r.status='PENDING' and r.reviewer_id=n.recipient_account_id and r.applicant_id<>n.recipient_account_id) or exists(select 1 from far_schedule_issue i join far_plan p on p.tenant_id=i.tenant_id and p.id=i.plan_id join finance_store_config c on c.tenant_id=p.tenant_id and c.hotel_id=p.hotel_id and c.company_id=p.company_id where i.tenant_id=n.tenant_id and i.plan_id=n.source_id and i.status='PENDING' and c.enabled and n.recipient_account_id in(c.finance_account_id,c.director_account_id) and not exists(select 1 from far_revision pending_revision where pending_revision.tenant_id=p.tenant_id and pending_revision.plan_id=p.id and pending_revision.status='PENDING'))))
+                            or (n.source_type='FINANCE_REVENUE' and exists(select 1 from fb_revenue_batch b where b.tenant_id=n.tenant_id and b.id=n.source_id and b.status='REVIEW' and b.reviewer_id=n.recipient_account_id and b.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_PAYROLL' and exists(select 1 from fb_payroll_batch b where b.tenant_id=n.tenant_id and b.id=n.source_id and ((b.status='REVIEW' and b.reviewer_id=n.recipient_account_id) or (b.status='CONFIRMED' and b.cashier_id=n.recipient_account_id)) and b.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_INTERCOMPANY' and exists(select 1 from fb_intercompany b where b.tenant_id=n.tenant_id and b.id=n.source_id and b.status='REVIEW' and b.creator_id<>n.recipient_account_id and ((b.reviewer_id=n.recipient_account_id and b.confirmed_by is null) or (b.counterparty_reviewer_id=n.recipient_account_id and b.counterparty_confirmed_by is null))))
+                            or (n.source_type='FINANCE_ACCOUNTING' and exists(select 1 from fa_voucher v where v.tenant_id=n.tenant_id and v.id=n.source_id and ((v.status='DRAFT' and v.created_by<>n.recipient_account_id) or v.status='REVIEWED')))
+                            or (n.source_type='FINANCE_LEDGER' and exists(select 1 from fc_ledger_change c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_INSIGHT' and exists(select 1 from fi_report r where r.tenant_id=n.tenant_id and r.id=n.source_id and r.status in ('DRAFT','REVIEWED') and r.created_by<>n.recipient_account_id and r.last_edited_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_CASH_ERROR' and exists(select 1 from fx_cash_correction c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_AR_ADJUSTMENT' and exists(select 1 from fb_receivable_adjustment c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_TAX_CALENDAR' and exists(select 1 from fb_tax_calendar c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status in ('REVIEW','ACTIVE') and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_AR_RECOVERY' and exists(select 1 from fb_receivable_recovery c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_INSIGHT_ACTION' and exists(select 1 from fi_action_task c where c.tenant_id=n.tenant_id and c.id=n.source_id and ((c.status in ('OPEN','IN_PROGRESS','REWORK') and c.owner_id=n.recipient_account_id) or (c.status='SUBMITTED' and c.reviewer_id=n.recipient_account_id and c.owner_id<>n.recipient_account_id and c.submitted_by<>n.recipient_account_id))))
+                            or (n.source_type='FINANCE_SUPPLY_INVOICE_RELEASE' and exists(select 1 from fs_invoice_release c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.reviewer_id=n.recipient_account_id and c.applicant_id<>n.recipient_account_id))
+                            or n.source_type in ('FINANCE_ASSET_GAIN','FINANCE_INPUT_BASIS','FINANCE_TAX_ACCRUAL','FINANCE_LOAN_OVERDUE')
+                            or (n.source_type='FINANCE_BUDGET_EXCEPTION' and exists(select 1 from fc_budget_exception c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='REVIEW' and c.valid_until>statement_timestamp() and c.reviewer_id=n.recipient_account_id and c.applicant_id<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_DELEGATION' and exists(select 1 from fd_delegation c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.created_by<>n.recipient_account_id and c.deputy_id<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_CLOSE_REGISTER' and exists(select 1 from fcl_register c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_CLOSE_BANK' and exists(select 1 from fcl_bank_explanation c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_ARCHIVE_REQUEST' and exists(select 1 from fac_request c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='PENDING' and c.applicant_id<>n.recipient_account_id))
+                            or (n.source_type='FINANCE_ACCRUAL_POLICY' and exists(select 1 from far_policy c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
+                             or (n.source_type = 'TASK' and task.id is not null)
                            or (n.source_type = 'LOST_PROPERTY' and exists (
                                select 1 from lost_property_case lp
                                join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
@@ -337,7 +391,9 @@ public class WeComDeliveryWorker {
                             rs.getString("source_type"), rs.getObject("source_id", UUID.class), rs.getString("notification_type"),
                             rs.getString("recipient_endpoint_hash"),
                             rs.getString("wecom_user_id"),
-                            rs.getString("chat_id")));
+                            rs.getString("chat_id"),
+                            rs.getObject("recipient_account_id", UUID.class),
+                            rs.getObject("recipient_assignment_id", UUID.class)));
             for (Delivery row : rows) {
                 jdbc.update("""
                         update notification_delivery
@@ -346,6 +402,18 @@ public class WeComDeliveryWorker {
                         """, params().addValue("id", row.id()).addValue("workerId", workerId));
             }
             return rows;
+        });
+    }
+
+    private void markSuppressed(UUID id) {
+        transactions.executeWithoutResult(status -> {
+            prepare();
+            jdbc.update("""
+                    update notification_delivery set status='SUPPRESSED', suppressed_at=now(),
+                        last_error='FINANCE_CURRENT_AUTHORIZATION_REVOKED_OR_NODE_HANDLED',
+                        next_retry_at=null,locked_by=null,locked_until=null,row_version=row_version+1
+                    where tenant_id=:tenantId and id=:id and locked_by=:workerId and status in ('PENDING','FAILED')
+                    """,params().addValue("id",id).addValue("workerId",workerId));
         });
     }
 
@@ -415,6 +483,24 @@ public class WeComDeliveryWorker {
             case "PROCUREMENT" -> "#/procurement?orderId=" + sourceId;
             case "FINANCE" -> "#/finance?tab="+("FINANCE_RETURNED".equals(notificationType)?"mine":"FINANCE_PAYMENT_PENDING".equals(notificationType)?"all":"review")+"&id="+sourceId;
             case "FINANCE_OPERATION" -> "#/finance?tab=operations&screen=documents&documentId="+sourceId;
+            case "FINANCE_LOAN_OVERDUE" -> "#/finance?tab=operations&screen=loans&documentId="+sourceId;
+            case "FINANCE_ASSET_GAIN" -> "#/finance?tab=supply&screen=asset-gains&gainId="+sourceId;
+            case "FINANCE_INPUT_BASIS" -> "#/finance?tab=tax-control&section=inputs&basisId="+sourceId;
+            case "FINANCE_TAX_ACCRUAL" -> "#/finance?tab=tax-control&section=accruals&accrualId="+sourceId;
+            case "FINANCE_CASH", "FINANCE_CASH_STALE" -> "#/finance?tab=control&screen=cash&instructionId="+sourceId;
+            case "FINANCE_ACCRUAL" -> "#/finance?tab=accrual&screen=plans&planId="+sourceId;
+            case "FINANCE_REVENUE" -> "#/finance?tab=business&screen=revenue&section=imports&businessId="+sourceId;
+            case "FINANCE_PAYROLL" -> "#/finance?tab=business&screen=payroll&section=batches&businessId="+sourceId;
+            case "FINANCE_INTERCOMPANY" -> "#/finance?tab=business&screen=intercompany&section=transactions&businessId="+sourceId;
+            case "FINANCE_ACCOUNTING", "FINANCE_LEDGER", "FINANCE_INSIGHT" -> "#/workbench";
+            case "FINANCE_CASH_ERROR" -> "#/finance?tab=cash-errors&correctionId="+sourceId;
+            case "FINANCE_AR_ADJUSTMENT" -> "#/finance?tab=business-exceptions&section=adjustments&exceptionId="+sourceId;
+            case "FINANCE_TAX_CALENDAR" -> "#/finance?tab=business-exceptions&section=tax-calendar&exceptionId="+sourceId;
+            case "FINANCE_AR_RECOVERY" -> "#/finance?tab=business-exceptions&section=recoveries&exceptionId="+sourceId;
+            case "FINANCE_INSIGHT_ACTION" -> "#/finance?tab=insight-actions&actionId="+sourceId;
+            case "FINANCE_BUDGET_EXCEPTION" -> "#/finance?tab=authorizations&exceptionId="+sourceId;
+            case "FINANCE_DELEGATION" -> "#/finance?tab=authorizations&delegationId="+sourceId;
+            case "FINANCE_CLOSE_REGISTER", "FINANCE_CLOSE_BANK", "FINANCE_ARCHIVE_REQUEST", "FINANCE_ACCRUAL_POLICY", "FINANCE_SUPPLY_INVOICE_RELEASE" -> "#/workbench";
             case "LOST_PROPERTY" -> "#/lost-properties?id=" + sourceId;
             default -> throw new IllegalArgumentException("Unsupported WeCom notification source type");
         };
@@ -440,5 +526,5 @@ public class WeComDeliveryWorker {
                                        String userId, String chatId) { }
     private record Delivery(UUID id, int attemptCount, String title, String content,
                             String sourceType, UUID sourceId, String notificationType,
-                            String endpointHash, String userId, String chatId) { }
+                            String endpointHash, String userId, String chatId, UUID accountId, UUID assignmentId) { }
 }

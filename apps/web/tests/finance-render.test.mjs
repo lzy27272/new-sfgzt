@@ -24,8 +24,10 @@ test('readers do not receive approve actions and only completed claims get vouch
   assert.ok(!html.includes('>导出凭证草稿</button>'))
   const approved = render({ ...claim, canReview: false, status: 'APPROVED', canPay: true, approved_amount: '90' })
   assert.ok(approved.includes('导出凭证草稿'))
-  assert.ok(approved.includes('确认已付款'))
-  assert.ok(approved.includes('实际付款流水'))
+  assert.ok(!approved.includes('确认已付款'), 'old direct-payment action must not bypass frozen account review')
+  assert.ok(approved.includes('核对账户并建立付款指令'))
+  assert.ok(approved.includes('#/finance?tab=control&amp;screen=cash&amp;sourceId=claim'))
+  assert.ok(approved.includes('先由独立人员复核账户'))
 })
 test('review history exposes frozen facts and original download after a returned replacement', () => {
   const html = render({ ...claim, reviews: [{ stage: 'MANAGER_REVIEW', decision: 'RETURN', note: '请补充', created_at: '2026-09-21T01:00:00Z', reviewer_name: '审核员', review_snapshot: { claim: { title: '旧事由', category_name: '旧类别', requested_amount: '90.00', approved_amount: null }, invoices: [{ invoice_code: '', invoice_number: '00123456789012345678', amount: '100.00', buyer_tax_number: 'OLD-TAX' }], evidence: [{ id: 'previous', kind: 'INVOICE', original_name: '旧发票.pdf', sha256: 'hash' }] } }] })

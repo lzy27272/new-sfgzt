@@ -12,13 +12,33 @@ import { claimStatusLabel, money, type Claim, type FinanceContext } from './mode
 import s from './finance.module.css'
 const FinanceAccounting = lazy(() => import('./FinanceAccounting').then(module => ({ default: module.FinanceAccounting })))
 const FinanceOperations = lazy(() => import('./FinanceOperations').then(module => ({ default: module.FinanceOperations })))
+const FinanceSupply = lazy(() => import('./FinanceSupply'))
+const FinanceBusiness = lazy(() => import('./FinanceBusiness'))
+const FinanceInsights = lazy(() => import('./FinanceInsights'))
+const FinanceMigration = lazy(() => import('./FinanceMigration'))
+const FinanceControl = lazy(() => import('./FinanceControl'))
+const FinanceAccrual = lazy(() => import('./FinanceAccrual'))
+const FinanceArchive = lazy(() => import('./FinanceArchive'))
+const FinanceCashCorrections = lazy(() => import('./FinanceCashCorrections'))
+const FinanceAuthorizations = lazy(() => import('./FinanceAuthorizations'))
+const FinanceBusinessExceptions = lazy(() => import('./FinanceBusinessExceptions'))
+const FinanceInsightActions = lazy(() => import('./FinanceInsightActions'))
+const FinanceTaxControl = lazy(() => import('./FinanceTaxControl'))
 const queueTabs = ['mine', 'review', 'all']
 
 export default function FinanceRoutes({ identity, permissions, params, go }: { identity: ApiIdentity; permissions: string[]; params: RouteParams; go: AppNavigate }) {
   const allowed = (permission: string) => permissions.includes('*') || permissions.includes(permission)
   const baseFinance = ['finance.submit', 'finance.review', 'finance.read', 'finance.pay', 'finance.configure'].some(allowed)
   const hasAccounting = ['finance.read', 'finance.configure', 'finance.accounting.read', 'finance.accounting.write', 'finance.accounting.review', 'finance.accounting.post', 'finance.accounting.close'].some(allowed)
-  const tabs = [baseFinance && ['overview', '财务工作台'], allowed('finance.submit') && ['mine', '我的报销'], allowed('finance.review') && ['review', '报销审核'], (allowed('finance.read') || allowed('finance.pay')) && ['all', '单据与付款'], baseFinance && ['operations', '资金与往来'], (allowed('finance.submit') || allowed('finance.read') || allowed('finance.review')) && ['invoices', '票据原件'], hasAccounting && ['accounting', '核算与报表'], allowed('finance.read') && ['ledger', '费用台账'], allowed('finance.configure') && ['config', '财务配置']].filter(Boolean) as string[][]
+  const managedFinance = ['finance.read', 'finance.review', 'finance.pay', 'finance.configure'].some(allowed)
+  const hasArchive = ['finance.archive.read', 'finance.archive.grant'].some(allowed)
+  const tabs = [(baseFinance || hasAccounting || hasArchive) && ['overview', '财务工作台'], allowed('finance.submit') && ['mine', '我的报销'], allowed('finance.review') && ['review', '报销审核'], (allowed('finance.read') || allowed('finance.pay')) && ['all', '单据与付款'], baseFinance && ['operations', '资金与往来'], (managedFinance || hasAccounting) && ['supply', '采购与资产'], managedFinance && ['business', '收入与专项'], baseFinance && ['control', allowed('finance.submit') && !managedFinance ? '差旅与本人资料' : '财务控制'], (allowed('finance.submit') || allowed('finance.read') || allowed('finance.review')) && ['invoices', '票据原件'], hasAccounting && ['accounting', '核算与报表'], hasAccounting && ['accrual', '租赁与待摊'], hasAccounting && ['insights', '经营分析与AI'], allowed('finance.configure') && ['migration', '财务迁移'], allowed('finance.read') && ['ledger', '费用台账'], allowed('finance.configure') && ['config', '财务配置']].filter(Boolean) as string[][]
+  if (hasArchive) tabs.push(['archive', '电子档案'])
+  if (allowed('finance.tax')) tabs.push(['tax-control', '进项税与税费实缴'])
+  if (managedFinance) tabs.push(['cash-errors', '资金差错更正'])
+  if (baseFinance) tabs.push(['authorizations', '代理与预算例外'])
+  if (managedFinance || allowed('finance.tax')) tabs.push(['business-exceptions', '应收差异与税历'])
+  if (baseFinance || hasAccounting) tabs.push(['insight-actions', '分析建议跟进'])
   const tab = tabs.some(t => t[0] === params.tab) ? params.tab : tabs[0]?.[0]
   const [context, setContext] = useState<FinanceContext>(); const [items, setItems] = useState<Claim[]>([]); const [claim, setClaim] = useState<Claim>(); const [error, setError] = useState(''); const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(0); const [more, setMore] = useState(false); const [revision, setRevision] = useState(0); const [assignment, setAssignment] = useState(identity.businessActorAssignmentId ?? '')
@@ -58,6 +78,18 @@ export default function FinanceRoutes({ identity, permissions, params, go }: { i
     <Suspense fallback={<p role="status" className={s.info}>正在打开财务模块…</p>}>
       {tab === 'accounting' && <FinanceAccounting key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
       {tab === 'operations' && <FinanceOperations key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'supply' && <FinanceSupply key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={new Set(permissions)} params={params} go={go} />}
+      {tab === 'business' && <FinanceBusiness key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'insights' && <FinanceInsights key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'migration' && <FinanceMigration key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'control' && <FinanceControl key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'accrual' && <FinanceAccrual key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={new Set(permissions)} params={params} go={go} />}
+      {tab === 'archive' && <FinanceArchive key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'cash-errors' && <FinanceCashCorrections key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'authorizations' && <FinanceAuthorizations key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'business-exceptions' && <FinanceBusinessExceptions key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'insight-actions' && <FinanceInsightActions key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
+      {tab === 'tax-control' && <FinanceTaxControl key={`${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId}`} identity={identity} permissions={permissions} params={params} go={go} />}
     </Suspense>
     {error && <p role="alert" className={s.error}>{error}<button type="button" onClick={() => { changed(); void reload() }}>重试读取</button></p>}
     {baseFinance && !context && !error && <p className={s.empty}>正在读取财务权限与门店信息…</p>}

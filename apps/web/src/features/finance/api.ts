@@ -1,7 +1,7 @@
 import { apiRequest, apiBlob, type ApiIdentity } from '../../api/client'
 
 export async function financeRequest<T>(identity: ApiIdentity, path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
-  const deadline = AbortSignal.timeout(body instanceof FormData ? 120000 : 25000)
+  const deadline = AbortSignal.timeout(body instanceof FormData ? 120000 : method === 'POST' && (path === '/insights/reports' || path === '/insights/questions' || path.startsWith('/invoice-automation/')) ? 65000 : 25000)
   const result = await apiRequest<T>(`/finance${path}`, identity, { method, body: body instanceof FormData ? body : body === undefined ? undefined : JSON.stringify(body), signal: signal ? AbortSignal.any([signal, deadline]) : deadline })
   if (method !== 'GET') window.dispatchEvent(new Event('finance:changed'))
   return result

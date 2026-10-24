@@ -11,10 +11,16 @@ public final class FinanceAccountingModels {
  public record Book(@NotNull UUID requestId,@NotNull UUID hotelId,@NotNull UUID companyId,@NotBlank @Size(max=160) String name,@NotNull LocalDate startMonth) {}
  public record Account(@NotNull UUID bookId,@NotBlank @Pattern(regexp="[A-Za-z0-9._-]{1,32}") String code,@NotBlank @Size(max=120) String name,
    @NotNull @Pattern(regexp="ASSET|LIABILITY|EQUITY|REVENUE|EXPENSE") String category,@NotNull @Pattern(regexp="DEBIT|CREDIT") String normalSide,
-   @NotBlank @Size(max=80) String reportLine,boolean cashAccount,boolean enabled,@Min(-1) int expectedVersion) {}
+   @NotBlank @Size(max=80) String reportLine,boolean cashAccount,boolean enabled,@Min(-1) int expectedVersion,List<@Pattern(regexp="DEPARTMENT|EMPLOYEE|PARTY|PROJECT") String> requiredDimensions) {
+  public Account(UUID bookId,String code,String name,String category,String normalSide,String reportLine,boolean cashAccount,boolean enabled,int expectedVersion){this(bookId,code,name,category,normalSide,reportLine,cashAccount,enabled,expectedVersion,List.of());}
+  public Account{requiredDimensions=requiredDimensions==null?List.of():List.copyOf(requiredDimensions);if(new HashSet<>(requiredDimensions).size()!=requiredDimensions.size())throw new IllegalArgumentException("辅助维度不能重复");}
+ }
  public record Line(@NotBlank @Size(max=32) String accountCode,@NotNull @DecimalMin("0") @Digits(integer=16,fraction=2) BigDecimal debit,
    @NotNull @DecimalMin("0") @Digits(integer=16,fraction=2) BigDecimal credit,@NotNull @Size(max=500) String summary,
-   @Pattern(regexp="OPERATING|INVESTING|FINANCING|TRANSFER") String cashFlowCategory) {}
+   @Pattern(regexp="OPERATING|INVESTING|FINANCING|TRANSFER") String cashFlowCategory,Map<String,Object> auxiliary) {
+  public Line(String accountCode,BigDecimal debit,BigDecimal credit,String summary,String cashFlowCategory){this(accountCode,debit,credit,summary,cashFlowCategory,Map.of());}
+  public Line{auxiliary=auxiliary==null?Map.of():Map.copyOf(auxiliary);}
+ }
  public record Voucher(@NotNull UUID requestId,@NotNull UUID bookId,@NotNull LocalDate businessDate,@NotNull LocalDate accountingDate,
    @NotBlank @Size(max=500) String summary,@NotNull @Size(min=2,max=500) List<@NotNull @Valid Line> lines) {}
  public record Version(@Min(0) int expectedVersion) {}

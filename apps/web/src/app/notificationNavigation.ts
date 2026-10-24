@@ -25,6 +25,37 @@ export function resolveNotificationNavigation(
   if (sourceType === 'FINANCE_OPERATION' && sourceId && has('finance.submit', 'finance.review', 'finance.read', 'finance.pay')) {
     return { view: 'finance', params: { tab: 'operations', screen: 'documents', documentId: sourceId }, actionLabel: '办理财务业务单据' }
   }
+  const financeTargets: Record<string, NavigationParams> = {
+    FINANCE_CASH: { tab: 'control', screen: 'cash', instructionId: sourceId },
+    FINANCE_CASH_STALE: { tab: 'control', screen: 'cash', instructionId: sourceId },
+    FINANCE_ACCRUAL: { tab: 'accrual', screen: 'plans', planId: sourceId },
+    FINANCE_REVENUE: { tab: 'business', screen: 'revenue', section: 'imports', businessId: sourceId },
+    FINANCE_PAYROLL: { tab: 'business', screen: 'payroll', section: 'batches', businessId: sourceId },
+    FINANCE_INTERCOMPANY: { tab: 'business', screen: 'intercompany', section: 'transactions', businessId: sourceId },
+    FINANCE_CASH_ERROR: { tab: 'cash-errors', correctionId: sourceId },
+    FINANCE_AR_ADJUSTMENT: { tab: 'business-exceptions', section: 'adjustments', exceptionId: sourceId },
+    FINANCE_AR_RECOVERY: { tab: 'business-exceptions', section: 'recoveries', exceptionId: sourceId },
+    FINANCE_TAX_CALENDAR: { tab: 'business-exceptions', section: 'tax-calendar', exceptionId: sourceId },
+    FINANCE_ASSET_GAIN: { tab: 'supply', screen: 'asset-gains', gainId: sourceId },
+    FINANCE_INPUT_BASIS: { tab: 'tax-control', section: 'inputs', basisId: sourceId },
+    FINANCE_TAX_ACCRUAL: { tab: 'tax-control', section: 'accruals', accrualId: sourceId },
+    FINANCE_LOAN_OVERDUE: { tab: 'operations', screen: 'loans', documentId: sourceId },
+    FINANCE_INSIGHT_ACTION: { tab: 'insight-actions', actionId: sourceId },
+    FINANCE_BUDGET_EXCEPTION: { tab: 'authorizations', exceptionId: sourceId },
+    FINANCE_DELEGATION: { tab: 'authorizations', delegationId: sourceId },
+    // These sources need a server lookup (book/period/receipt). The same authorized queue provides that target.
+    FINANCE_ACCOUNTING: { tab: 'overview' }, FINANCE_LEDGER: { tab: 'overview' }, FINANCE_INSIGHT: { tab: 'overview' },
+    FINANCE_CLOSE_REGISTER: { tab: 'overview' }, FINANCE_CLOSE_BANK: { tab: 'overview' },
+    FINANCE_ARCHIVE_REQUEST: { tab: 'overview' }, FINANCE_ACCRUAL_POLICY: { tab: 'overview' }, FINANCE_SUPPLY_INVOICE_RELEASE: { tab: 'overview' },
+  }
+  if (sourceId && financeTargets[sourceType]) {
+    const granted = sourceType === 'FINANCE_ARCHIVE_REQUEST' ? has('finance.archive.grant')
+      : sourceType === 'FINANCE_ACCOUNTING' ? has('finance.accounting.read', 'finance.accounting.review', 'finance.accounting.post')
+        : sourceType === 'FINANCE_LEDGER' ? has('finance.configure')
+          : has('finance.submit', 'finance.review', 'finance.read', 'finance.pay', 'finance.configure')
+    if (!granted || (sourceType === 'FINANCE_PAYROLL' && !has('finance.payroll')) || (['FINANCE_TAX_CALENDAR', 'FINANCE_INPUT_BASIS', 'FINANCE_TAX_ACCRUAL'].includes(sourceType) && !has('finance.tax')) || (sourceType === 'FINANCE_ASSET_GAIN' && !has('finance.accounting.write'))) return undefined
+    return { view: 'finance', params: financeTargets[sourceType], actionLabel: '办理当前财务事项' }
+  }
   if (sourceType === 'ACADEMY_PLAN') {
     if (['ACADEMY_CONFIGURATION','ACADEMY_ATTEMPTS_EXHAUSTED','ACADEMY_MANAGER_OVERDUE'].includes(type))
       return has('academy.manage','academy.team-read') ? {view:'academy',params:{tab:'team'},actionLabel:'查看团队学习'} : undefined

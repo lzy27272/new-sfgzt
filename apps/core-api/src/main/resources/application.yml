@@ -57,6 +57,8 @@ app:
   finance:
     # Separate originals, but inside the mounted attachment volume by default. Never use operational retention rules here.
     attachments-root: ${FINANCE_ATTACHMENTS_ROOT:${ATTACHMENT_STORAGE_ROOT:var/attachments}/finance-originals}
+    # Revenue/payroll/tax receipt originals share the persistent mounted volume, never the release working directory.
+    business-attachments-root: ${FINANCE_BUSINESS_ATTACHMENTS_ROOT:${ATTACHMENT_STORAGE_ROOT:var/attachments}/finance-business-originals}
   store-cost:
     pms-source:
       # Read-only sanitized PMS aggregates. Tenant binding is mandatory; disabled by default.

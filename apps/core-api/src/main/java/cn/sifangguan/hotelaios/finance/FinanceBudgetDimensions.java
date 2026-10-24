@@ -1,0 +1,21 @@
+package cn.sifangguan.hotelaios.finance;
+import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
+import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import java.util.*;
+import static cn.sifangguan.hotelaios.finance.FinanceV2Support.*;
+
+/** Explicit budget category/project binding. A random category ID is not derivable from a display code. */
+final class FinanceBudgetDimensions {
+ private final NamedParameterJdbcTemplate jdbc;private final FinanceProjectDimensions projects;
+ FinanceBudgetDimensions(NamedParameterJdbcTemplate jdbc){this.jdbc=jdbc;projects=new FinanceProjectDimensions(jdbc,new AccessPolicy());}
+ boolean installed(){return projects.installed();}
+ Map<String,Object> category(TenantPrincipal p,UUID hotel,Map<String,Object> spec,boolean requireId){
+  String code=Objects.toString(spec.get("categoryCode"),"");UUID category=id(spec.get("categoryId"));if(code.isBlank()||requireId&&category==null)throw conflict("预算须选择本组织真实费用类别及已配置的稳定编码，不能按UUID或名称推断");
+  var rows=jdbc.queryForList("select id,name,budget_code,treatment,version from finance_category where tenant_id=:tenant and hotel_id=:hotel and enabled and budget_code=:code and (cast(:category as uuid) is null or id=:category)",base(p).addValue("hotel",hotel).addValue("code",code).addValue("category",category));if(rows.size()!=1)throw conflict("预算类别尚无唯一真实ID与财务编码映射，请补齐类别配置后受控修订；未把缺失来源算作零占用");return rows.getFirst();
+ }
+ String projectKey(TenantPrincipal p,UUID hotel,Map<String,Object> spec){String kind=Objects.toString(spec.get("projectKind"),"ALL");if(kind.equals("ALL")){if(spec.get("projectId")!=null)throw bad("全部项目预算不能同时指定项目编号");return "ALL";}if(kind.equals("NONE")){if(spec.get("projectId")!=null)throw bad("无项目预算不能同时指定项目编号");return "NONE";}
+  var cfg=jdbc.queryForList("select company_id from finance_store_config where tenant_id=:tenant and hotel_id=:hotel and enabled",base(p).addValue("hotel",hotel));if(cfg.size()!=1)throw conflict("预算实际法人待配置，不能猜测项目主体");return projects.freeze(p,hotel,id(cfg.getFirst().get("company_id")),new FinanceProjectDimensions.ProjectRef(kind,id(spec.get("projectId")))).get("key").toString();}
+ Map<String,Object> freeze(TenantPrincipal p,UUID hotel,Map<String,Object> spec){var result=new LinkedHashMap<>(spec);if(!installed())return result;var category=category(p,hotel,spec,true);String expected=switch(Objects.toString(spec.get("budgetKind"))){case "CAPITAL"->"ASSET";case "INVENTORY"->"INVENTORY";case "EXPENSE"->"EXPENSE";default->throw bad("预算须明确费用、资本或库存资金性质");};if(!expected.equals(category.get("treatment")))throw bad("预算性质与所选实际类别不一致");result.put("categorySnapshot",output(category));String key=projectKey(p,hotel,spec);result.put("projectKey",key);if(!Set.of("ALL","NONE").contains(key)){UUID company=id(jdbc.queryForObject("select company_id from finance_store_config where tenant_id=:tenant and hotel_id=:hotel and enabled",base(p).addValue("hotel",hotel),UUID.class));result.put("projectSnapshot",projects.freeze(p,hotel,company,new FinanceProjectDimensions.ProjectRef(spec.get("projectKind").toString(),id(spec.get("projectId")))));}else result.put("projectSnapshot",Map.of("kind",key,"key",key));result.put("occupancyBasis","BUDGET_FUNDS_USAGE_NOT_EXPENSE");return result;}
+ String frozenProjectKey(TenantPrincipal p,UUID hotel,Map<String,Object> spec){String kind=Objects.toString(spec.get("projectKind"),"ALL");if(Set.of("ALL","NONE").contains(kind))return projectKey(p,hotel,spec);var ref=new FinanceProjectDimensions.ProjectRef(kind,id(spec.get("projectId")));var snapshot=map(spec.get("projectSnapshot"));if(!ref.key().equals(spec.get("projectKey"))||!ref.key().equals(snapshot.get("key"))||!hotel.toString().equals(Objects.toString(snapshot.get("hotelId"),"")))throw conflict("项目预算缺少实际锚点冻结快照，请独立修订发布；不能把缺失来源算作零");String table=kind.equals("CONTRACT")?"fo_document":"fs_asset_card";if(jdbc.queryForObject("select count(*) from "+table+" where tenant_id=:tenant and id=:id and hotel_id=:hotel and company_id=:company",base(p).addValue("id",ref.id()).addValue("hotel",hotel).addValue("company",id(snapshot.get("companyId"))),Integer.class)!=1)throw conflict("项目预算实际来源或主体映射缺失，请先核对，不能按零额放行");return ref.key();}
+}
