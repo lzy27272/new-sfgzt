@@ -1,6 +1,7 @@
 export type ProcurementConfig = {
   version: number; enabled: boolean; manager_id: string; buyer_id: string; reviewer_id: string
   finance_id: string; finance_director_id: string; deputy_id: string; general_id: string; receiver_ids: string[]
+  financial_dimensions_required?: boolean
 }
 export type CatalogItem = {
   id: string; sku: string; name: string; specification: string; category: string; unit: string
@@ -10,7 +11,7 @@ export type CatalogItem = {
 export type HotelContext = {
   config: Partial<ProcurementConfig>; items: CatalogItem[]; canConfigure: boolean; canRequest: boolean
   canManage: boolean; canPurchase: boolean; canReview: boolean; canReceive: boolean
-  financialMappingEnabled?: boolean; financialCategories?: { code: string; name: string; treatment: string; policy_id: string }[]; financialDepartments?: { id: string; name: string }[]
+  financialMappingEnabled?: boolean; financialTransitionAvailable?: boolean; canConfigureFinance?: boolean; financialCategories?: { code: string; name: string; treatment: string; policy_id: string }[]; financialDepartments?: { id: string; name: string }[]
 }
 export type ProcurementContext = { hotels: { id: string; name: string }[]; accounts: { id: string; display_name: string }[]; canRequest: boolean; canConfigure: boolean }
 export type DraftLine = { itemId: string; quantity: number; unit: string; lineKind?: 'INVENTORY' | 'SERVICE' | 'ASSET' | 'PROJECT'; description?: string; specification?: string; financialCategoryCode?: string; departmentId?: string; budgetUnitPrice?: string; projectKind?: string; projectId?: string }
@@ -25,6 +26,7 @@ export type Order = {
 }
 export type OrderDetail = Order & {
   lines: OrderLine[]; receipts: Receipt[]; attachments: Evidence[]; config: ProcurementConfig
+  financial_dimensions_required?: boolean; pendingFinancialClassificationCount?: number; financialClassificationStatus?: string
   canEdit: boolean; canPurchase: boolean; canReview: boolean; canReceive: boolean
   events: { event_type: string; created_at: string; actor_name?: string; detail: { note?: string } }[]
   notifications: { title: string; created_at: string; recipient_name: string; delivery_status: string; read_at?: string }[]
@@ -38,6 +40,7 @@ export const number = (value: number | undefined) => new Intl.NumberFormat('zh-C
 export const money = (value: number) => new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(value)
 export const date = (value?: string) => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '—'
 export const canProcure = (permissions: readonly string[]) => permissions.includes('*') || ['procurement.read', 'procurement.request', 'procurement.configure'].some(p => permissions.includes(p))
+export const requiresFinancialDimensions = (hotel: Pick<HotelContext, 'financialTransitionAvailable' | 'financialMappingEnabled' | 'config'>) => hotel.financialTransitionAvailable === true ? hotel.config.financial_dimensions_required === true : hotel.financialMappingEnabled === true
 export function filterCatalog(items: CatalogItem[], query: string) {
   const text = query.trim().toLocaleLowerCase()
   return items.filter(i => !text || `${i.name} ${i.sku} ${i.specification}`.toLocaleLowerCase().includes(text))

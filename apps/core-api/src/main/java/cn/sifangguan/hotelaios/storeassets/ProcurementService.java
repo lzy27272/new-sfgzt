@@ -71,6 +71,8 @@ public class ProcurementService {
         var p=prepareHotel(hotel);var b=base(p).addValue("hotel",hotel);
         var out=new LinkedHashMap<String,Object>();var config=config(p.tenantId(),hotel,false);
         out.put("config",config);out.put("canConfigure",has(p,"procurement.configure"));
+        out.put("financialTransitionAvailable",FinanceCostDimensions.procurementSwitchInstalled(jdbc));
+        out.put("canConfigureFinance",has(p,"procurement.configure")&&has(p,"finance.configure"));
         out.put("canManage",is(p,config,"manager_id"));out.put("canPurchase",is(p,config,"buyer_id"));
         out.put("canReview",is(p,config,"reviewer_id"));out.put("canReceive",canReceive(p,config));
         out.put("canRequest",has(p,"procurement.request"));
@@ -91,21 +93,28 @@ public class ProcurementService {
     public Map<String,Object> configure(UUID hotel,ProcurementModels.Configuration in) {
         var p=prepareHotel(hotel);access.requirePermission("procurement.configure");lock(p.tenantId(),"config:"+hotel);
         var old=config(p.tenantId(),hotel,false);expect(old.isEmpty()?-1:version(old),in.expectedVersion());
+        boolean transition=FinanceCostDimensions.procurementSwitchInstalled(jdbc),required=Boolean.TRUE.equals(old.get("financial_dimensions_required"));
+        if(in.requireFinancialDimensions()!=null&&in.requireFinancialDimensions()!=required){
+            access.requirePermission("finance.configure");
+            if(!transition)throw conflict("采购财务兼容切换迁移尚未安装");
+            required=in.requireFinancialDimensions();
+            if(required&&FinanceCostDimensions.categories(jdbc,p.tenantId(),hotel).isEmpty())throw conflict("请先由财务独立发布本门店真实分类，再开启新版采购前置校验");
+        }
         var actors=new LinkedHashSet<>(List.of(in.managerId(),in.buyerId(),in.reviewerId(),in.financeId(),in.financeDirectorId(),in.deputyId(),in.generalId()));
         actors.addAll(in.receiverIds());
         if(jdbc.queryForObject("select count(*) from user_account where tenant_id=:tenantId and status='ACTIVE' and id in (:actors)",base(p).addValue("actors",actors),Integer.class)!=actors.size()) throw bad("责任人或预警接收人不存在、跨租户或已停用");
         var b=base(p).addValue("hotel",hotel).addValue("enabled",in.enabled()).addValue("manager",in.managerId())
             .addValue("buyer",in.buyerId()).addValue("reviewer",in.reviewerId()).addValue("finance",in.financeId())
             .addValue("director",in.financeDirectorId()).addValue("deputy",in.deputyId()).addValue("general",in.generalId())
-            .addValue("receivers","{"+String.join(",",in.receiverIds().stream().distinct().map(UUID::toString).toList())+"}");
+            .addValue("receivers","{"+String.join(",",in.receiverIds().stream().distinct().map(UUID::toString).toList())+"}").addValue("financialRequired",required);
         jdbc.update("""
-            insert into procurement_config(tenant_id,hotel_id,enabled,manager_id,buyer_id,reviewer_id,finance_id,finance_director_id,deputy_id,general_id,receiver_ids)
-            values(:tenantId,:hotel,:enabled,:manager,:buyer,:reviewer,:finance,:director,:deputy,:general,cast(:receivers as uuid[]))
+            insert into procurement_config(tenant_id,hotel_id,enabled,manager_id,buyer_id,reviewer_id,finance_id,finance_director_id,deputy_id,general_id,receiver_ids
+            """+(transition?",financial_dimensions_required":"")+") values(:tenantId,:hotel,:enabled,:manager,:buyer,:reviewer,:finance,:director,:deputy,:general,cast(:receivers as uuid[])"+(transition?",:financialRequired":"")+")"+"""
             on conflict(tenant_id,hotel_id) do update set enabled=excluded.enabled,manager_id=excluded.manager_id,buyer_id=excluded.buyer_id,
              reviewer_id=excluded.reviewer_id,finance_id=excluded.finance_id,finance_director_id=excluded.finance_director_id,
              deputy_id=excluded.deputy_id,general_id=excluded.general_id,receiver_ids=excluded.receiver_ids,
              version=procurement_config.version+1,updated_at=now()
-            """,b);
+            """+(transition?",financial_dimensions_required=excluded.financial_dimensions_required":""),b);
         event(p.tenantId(),null,p.actorId(),"CONFIGURED",Map.of("hotelId",hotel,"before",old,"after",in));
         return hotel(hotel);
     }
@@ -174,7 +183,12 @@ public class ProcurementService {
             """,b));
         result.put("canEdit",EDITABLE.contains(row.get("status")) && (row.get("source").equals("LOW_STOCK")?is(p,config,"manager_id"):p.actorId().equals(row.get("applicant_id"))));
         result.put("canPurchase",is(p,config,"buyer_id"));result.put("canReview",is(p,config,"reviewer_id"));result.put("canReceive",canReceive(p,config));
-        result.put("config",config);return result;
+        result.put("config",config);
+        if(FinanceCostDimensions.installed(jdbc)){
+            int pending=jdbc.queryForObject("select count(*) from procurement_line l left join fs_procurement_finance_classification c on c.tenant_id=l.tenant_id and c.line_id=l.id where l.tenant_id=:tenantId and l.order_id=:id and (coalesce(l.financial_category_code,c.financial_category_code) is null or coalesce(l.financial_department_id,c.financial_department_id) is null)",b,Integer.class);
+            result.put("pendingFinancialClassificationCount",pending);result.put("financialClassificationStatus",pending>0?"PENDING_CLASSIFICATION":"CLASSIFIED");
+        }
+        return result;
     }
     public Map<String,Object> create(UUID hotel,ProcurementModels.Request in) {
         var p=prepareHotel(hotel);access.requirePermission("procurement.request");config(p.tenantId(),hotel,true);
@@ -198,7 +212,11 @@ public class ProcurementService {
                 var units=StoreItemUnits.from(current);
                 if(!l.get("base_unit").equals(current.get("unit"))||units.factorFor(text(l,"input_unit")).compareTo(decimal(l,"factor"))!=0)
                     throw conflict("物品单位配置变化，请重新保存并核对采购数量");}
-            validateFinancialLines(p.tenantId(),uuid(row,"hotel_id"),id);updateStatus(p.tenantId(),id,"SUBMITTED");new FinanceBudgetBridge(jdbc).procurement(p,id,"SUBMIT");event(p.tenantId(),id,p.actorId(),"SUBMITTED",Map.of("lines",lines));
+            lock(p.tenantId(),"config:"+row.get("hotel_id"));conf=config(p.tenantId(),uuid(row,"hotel_id"),true);
+            boolean strict=!FinanceCostDimensions.procurementSwitchInstalled(jdbc)||Boolean.TRUE.equals(row.get("financial_dimensions_required"))||Boolean.TRUE.equals(conf.get("financial_dimensions_required"));
+            if(strict)validateFinancialLines(p.tenantId(),uuid(row,"hotel_id"),id);
+            if(FinanceCostDimensions.procurementSwitchInstalled(jdbc))jdbc.update("update procurement_order set financial_dimensions_required=:strict where tenant_id=:tenantId and id=:id",base(p).addValue("id",id).addValue("strict",strict));
+            updateStatus(p.tenantId(),id,"SUBMITTED");new FinanceBudgetBridge(jdbc).procurement(p,id,"SUBMIT");event(p.tenantId(),id,p.actorId(),"SUBMITTED",Map.of("lines",lines,"financialDimensionsRequired",strict));
             notify(p.tenantId(),uuid(conf,"buyer_id"),id,"SUBMITTED","采购待办理",text(row,"title"),"submit:"+id+":"+version(row));return id;});return detail(id);
     }
     public Map<String,Object> purchase(UUID id,ProcurementModels.Purchase in) {
@@ -207,7 +225,7 @@ public class ProcurementService {
             var conf=config(p.tenantId(),uuid(row,"hotel_id"),true);requireActor(p,conf,"buyer_id");
             // Handler is an explicit store responsibility, not a caller-supplied impersonation.
             if(!in.buyerId().equals(conf.get("buyer_id")))throw bad("经办人须为本门店配置的采购负责人");
-            validateFinancialLines(p.tenantId(),uuid(row,"hotel_id"),id);var lines=lines(p.tenantId(),id);var prices=new HashMap<UUID,BigDecimal>();
+            if(!FinanceCostDimensions.procurementSwitchInstalled(jdbc)||Boolean.TRUE.equals(row.get("financial_dimensions_required")))validateFinancialLines(p.tenantId(),uuid(row,"hotel_id"),id);var lines=lines(p.tenantId(),id);var prices=new HashMap<UUID,BigDecimal>();
             for(var price:in.prices())if(prices.put(price.lineId(),amount(price.unitPrice(),"采购单价"))!=null)throw bad("采购价格重复");
             if(prices.size()!=lines.size())throw bad("请逐项填写采购单价");
             for(var line:lines){var price=prices.get(uuid(line,"id"));if(price==null)throw bad("采购价格不属于本单");

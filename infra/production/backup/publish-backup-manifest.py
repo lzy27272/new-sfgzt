@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import grp
 import hashlib
 import json
 import os
@@ -23,7 +22,11 @@ ALLOWED = (
     re.compile(r"sifangguan-ota/daily/sifangguan-ota-state-daily-[0-9]{8}T[0-9]{6}[+-][0-9]{4}[.]tar[.]gz[.]enc"),
     re.compile(r"sifangguan-ota/monthly/sifangguan-ota-state-monthly-[0-9]{6}[.]tar[.]gz[.]enc"),
     re.compile(r"sifangguan-ota/yearly/sifangguan-ota-state-yearly-[0-9]{4}[.]tar[.]gz[.]enc"),
-    re.compile(r"analytics-raw/daily/analytics-raw-[0-9]{4}-[0-9]{2}-[0-9]{2}[.]tar[.]gz[.]enc"),
+    re.compile(r"analytics-raw/daily/analytics-raw-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[0-9a-f]{64})?[.]tar[.]gz[.]enc"),
+    re.compile(r"sifangguan-ota/daily/sifangguan-ota-state-daily-[0-9]{8}T[0-9]{6}[+-][0-9]{4}[.]snapshot[.]json[.]enc"),
+    re.compile(r"sifangguan-ota/monthly/sifangguan-ota-state-monthly-[0-9]{6}[.]snapshot[.]json[.]enc"),
+    re.compile(r"sifangguan-ota/yearly/sifangguan-ota-state-yearly-[0-9]{4}[.]snapshot[.]json[.]enc"),
+    re.compile(r"sifangguan-ota/objects/[0-9a-f]{64}[.]pack[.]enc"),
 )
 HEX_256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -58,7 +61,43 @@ def write_atomic(path: Path, payload: bytes, gid: int) -> None:
             pass
 
 
+def validate_recovery_points(entries, selection):
+    """No key/plaintext original metadata is ever exported to the device."""
+    by_path = {item["path"]: item for item in entries}
+    roots = set()
+    objects = set()
+    result = selection.get("recoveryPoints", []) if selection else []
+    for point in result:
+        state = by_path.get(point.get("statePath"))
+        database = by_path.get(point.get("databasePath"))
+        if not state or not database or not str(state["path"]).endswith(".snapshot.json.enc"):
+            fail("recovery point is missing a state/database artifact")
+        if state["sha256"] != point.get("stateSha256") or database["sha256"] != point.get("databaseSha256"):
+            fail("recovery point pair digest mismatch")
+        if not re.fullmatch(r"[0-9]{8}T[0-9]{6}[+-][0-9]{4}", str(point.get("snapshotId", ""))):
+            fail("invalid recovery point snapshot")
+        if point["statePath"] in roots or state["tier"] != database["tier"]:
+            fail("duplicate or cross-tier recovery point")
+        roots.add(point["statePath"])
+        dependencies = point.get("objects", [])
+        if not dependencies or len(set(dependencies)) != len(dependencies):
+            fail("invalid recovery closure")
+        for path in dependencies:
+            entry = by_path.get(path)
+            if not entry or not re.fullmatch(r"sifangguan-ota/objects/[0-9a-f]{64}[.]pack[.]enc", path):
+                fail("missing or invalid recovery object")
+            if Path(path).name[:64] != entry["sha256"]:
+                fail("content-addressed object digest mismatch")
+            objects.add(path)
+    expected_roots = {x["path"] for x in entries if str(x["path"]).endswith(".snapshot.json.enc")}
+    expected_objects = {x["path"] for x in entries if x["tier"] == "objects"}
+    if roots != expected_roots or objects != expected_objects:
+        fail("unbound snapshot/object export is not recoverable")
+    return result
+
+
 def main() -> None:
+    import grp  # Unix only; pure manifest validation remains portable in tests.
     if len(sys.argv) != 3:
         fail("usage: publish-backup-manifest.py EXPORT_ROOT EXPORT_GROUP")
     root = Path(sys.argv[1]).resolve(strict=True)
@@ -69,11 +108,25 @@ def main() -> None:
     if not data_root.is_dir() or data_root.is_symlink():
         fail("missing safe export data directory")
 
+    selection_path = root / ".recovery-closure.json"
+    selection = None
+    selected = None
+    if selection_path.exists():
+        if selection_path.is_symlink() or not selection_path.is_file():
+            fail("unsafe recovery closure")
+        selection = json.loads(selection_path.read_text(encoding="ascii"))
+        if selection.get("kind") != "SFG_RECOVERY_CLOSURE_V2":
+            fail("invalid recovery closure")
+        selected = set(selection.get("artifactPaths", []))
+        if not selected or len(selected) != len(selection["artifactPaths"]):
+            fail("empty or duplicate export selection")
     entries: list[dict[str, object]] = []
     for path in sorted(data_root.rglob("*.enc")):
         relative = path.relative_to(data_root).as_posix()
         if not relative.isascii() or not any(rule.fullmatch(relative) for rule in ALLOWED):
             fail(f"unapproved export artifact: {relative}")
+        if selected is not None and relative not in selected:
+            continue  # Previous accepted manifest remains usable until publish.
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
             fail(f"unsafe export artifact: {relative}")
@@ -88,6 +141,9 @@ def main() -> None:
         expected = checksum_fields[0].lower()
         if not HEX_256.fullmatch(expected) or hash_file(path) != expected:
             fail(f"checksum mismatch: {relative}")
+        raw_revision = re.fullmatch(r"analytics-raw-[0-9]{4}-[0-9]{2}-[0-9]{2}-([0-9a-f]{64})[.]tar[.]gz[.]enc", path.name)
+        if raw_revision and raw_revision[1] != expected:
+            fail(f"immutable raw revision digest mismatch: {relative}")
         category, tier, _ = relative.split("/", 2)
         entries.append(
             {
@@ -103,6 +159,11 @@ def main() -> None:
     present = {str(entry["category"]) for entry in entries}
     if not entries or not required.issubset(present):
         fail("manifest is missing a required backup category")
+    if selected is not None and selected != {item["path"] for item in entries}:
+        fail("missing selected export artifact")
+    if len(entries) > 200000:
+        fail("export manifest exceeds bounded device capacity")
+    recovery = validate_recovery_points(entries, selection)
 
     entries_bytes = json.dumps(
         entries, ensure_ascii=True, separators=(",", ":"), sort_keys=True
@@ -137,9 +198,22 @@ def main() -> None:
         },
         "receiptPath": receipt_relative,
         "entries": entries,
+        "recoveryPoints": recovery,
     }
     manifest_bytes = (json.dumps(manifest, ensure_ascii=True, indent=2) + "\n").encode("ascii")
+    if len(manifest_bytes) > 128 * 1024 * 1024:
+        fail("export manifest exceeds device byte limit")
     write_atomic(root / "manifest-v1.json", manifest_bytes, group.gr_gid)
+    # Publication is the commit point. No old dependency is removed on a failed
+    # copy/validation/publication. An in-flight stale downloader fails closed.
+    if selected is not None:
+        for path in data_root.rglob("*.enc"):
+            relative = path.relative_to(data_root).as_posix()
+            if relative not in selected:
+                if path.is_symlink() or not path.is_file():
+                    fail("unsafe stale export artifact")
+                path.unlink()
+                path.with_name(path.name + ".sha256").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

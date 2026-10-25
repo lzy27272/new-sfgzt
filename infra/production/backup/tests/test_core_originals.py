@@ -84,6 +84,14 @@ class CoreOriginalsTest(unittest.TestCase):
   dump=source.index('sudo -u postgres pg_dump');capture=source.index('"${original_tool}" capture');resume=source.index('\nresume_writers\n')
   self.assertLess(stop,dump);self.assertLess(dump,capture);self.assertLess(capture,resume)
   self.assertNotIn('find "${source_core}"',source);self.assertIn('trap cleanup EXIT INT TERM',source)
+ def test_both_core_staging_copies_preserve_acls_xattrs_and_numeric_owners(self):
+  source=(MODULE.parent/'backup-postgres.sh').read_text()
+  copies=[line for line in source.splitlines() if line.startswith('rsync ') and '"${source_core}/"' in line]
+  self.assertEqual(len(copies),2,'Both the online bulk copy and quiesced final copy must preserve source metadata')
+  for line in copies:
+   self.assertTrue(line.startswith('rsync -aHAX --numeric-ids '),line)
+   self.assertIn('"${stage_core}/"',line)
+   self.assertNotIn('--no-acls',line);self.assertNotIn('--no-xattrs',line)
  def test_restore_never_targets_live_database_or_original_root(self):
   source=(MODULE.parent/'rehearse-core-originals-restore.sh').read_text();self.assertIn('hotel_ai_os_originals_restore_',source)
   self.assertIn('--dbname "$restore_db"',source);self.assertNotIn('--dbname hotel_ai_os ',source)

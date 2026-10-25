@@ -255,7 +255,31 @@ jobs:
           bash infra/production/bootstrap/tests/60-100-full-release-integrity.test.sh
           bash infra/production/bootstrap/tests/61-install-fast-lane-release.test.sh
           bash infra/production/health/health-check.test.sh
-          python3 -m unittest discover -s infra/production/backup/tests -p 'test_core_originals.py' -v
+          python3 -m unittest discover -s infra/production/backup/tests -p 'test_*.py' -v
+
+  backup-windows-contract:
+    name: Verify Windows backup acceptance and interruption contracts
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Test the real PowerShell 5.1 backup client with isolated fixtures
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($test in @(
+            'infra/production/backup/windows-device/tests/Test-BackupPull.ps1',
+            'infra/production/backup/windows-device/tests/Test-BackupSyncFlow.ps1',
+            'infra/production/backup/windows-device/tests/Test-BackupSystem.ps1'
+          )) {
+            & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $test
+            if ($LASTEXITCODE -ne 0) { throw "BACKUP_WINDOWS_CONTRACT_FAILED: $test" }
+          }
+          # Enrollment intentionally requires a Windows 11 workstation. Keep
+          # its separate workstation acceptance; do not bypass that production
+          # guard just to run it on GitHub's Windows Server runner.
 
   web:
     # Keep the historic check name so existing main protection remains valid.
@@ -383,11 +407,12 @@ jobs:
 
   assemble-release:
     name: Assemble immutable Pilot release artifact
-    needs: [classify, workflow-contract, web, core-api, ota-platform]
+    needs: [classify, workflow-contract, backup-windows-contract, web, core-api, ota-platform]
     if: >-
       always() &&
       needs.classify.result == 'success' &&
       needs.workflow-contract.result == 'success' &&
+      needs.backup-windows-contract.result == 'success' &&
       (needs.web.result == 'success' || needs.web.result == 'skipped') &&
       (needs.core-api.result == 'success' || needs.core-api.result == 'skipped') &&
       (needs.ota-platform.result == 'success' || needs.ota-platform.result == 'skipped')

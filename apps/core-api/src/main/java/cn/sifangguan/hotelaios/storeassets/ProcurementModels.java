@@ -12,7 +12,9 @@ public final class ProcurementModels {
     public record Configuration(long expectedVersion, boolean enabled,
             @NotNull UUID managerId, @NotNull UUID buyerId, @NotNull UUID reviewerId,
             @NotNull UUID financeId, @NotNull UUID financeDirectorId, @NotNull UUID deputyId, @NotNull UUID generalId,
-            @NotNull @Size(max=50) List<@NotNull UUID> receiverIds) { }
+            @NotNull @Size(max=50) List<@NotNull UUID> receiverIds,Boolean requireFinancialDimensions) {
+        public Configuration(long expectedVersion,boolean enabled,UUID managerId,UUID buyerId,UUID reviewerId,UUID financeId,UUID financeDirectorId,UUID deputyId,UUID generalId,List<UUID> receiverIds){this(expectedVersion,enabled,managerId,buyerId,reviewerId,financeId,financeDirectorId,deputyId,generalId,receiverIds,null);}
+    }
     public record Replenishment(long expectedVersion, boolean enabled,
             @NotNull @DecimalMin(value="0",inclusive=false) BigDecimal targetQuantity) { }
     public record Line(UUID itemId, @NotNull @DecimalMin(value="0",inclusive=false) BigDecimal quantity,
