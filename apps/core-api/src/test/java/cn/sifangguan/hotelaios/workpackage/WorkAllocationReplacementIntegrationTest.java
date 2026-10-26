@@ -63,7 +63,7 @@ class WorkAllocationReplacementIntegrationTest {
                 .put("businessDate",f.today().minusDays(1).toString()).put("periodType","DAY");
         request(identity(post("/api/v1/work-expectations/actions/generate"),ADMIN).contentType(MediaType.APPLICATION_JSON)
                 .content(generate.toString()),201);
-        assertThat(jdbc.queryForObject("select count(*) from work_expectation where work_package_version_id=?",Integer.class,f.oldVersion())).isOne();
+        assertThat(jdbc.queryForObject("select count(*) from work_expectation expectation join work_package_item item on item.id=expectation.work_package_item_id where item.work_package_version_id=?",Integer.class,f.oldVersion())).isOne();
         Map<String,String> facts=frozenFacts();
         JsonNode first=replace(f,f.body(),ADMIN,200);
         JsonNode again=replace(f,f.body(),ADMIN,200);

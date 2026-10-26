@@ -514,7 +514,7 @@ public class WorkPackageService {
         }
         lockAllocationRange(principal, workPackageId, request.positionAssignmentId(), request.targetOrgUnitId());
         List<Map<String, Object>> current = jdbc.queryForList("""
-                select allocation.*,(version.effective_to at time zone :tenantTimezone)::date as version_last_date
+                select allocation.*,(version.effective_to is null or version.effective_to>=:previousVersionBoundary) as version_covers_switch
                 from work_package_allocation allocation
                 join work_package_version version on version.tenant_id=allocation.tenant_id
                   and version.id=allocation.work_package_version_id
@@ -522,7 +522,7 @@ public class WorkPackageService {
                   and version.work_package_definition_id=:workPackageId
                 for update of allocation
                 """, base(principal).addValue("allocationId", allocationId).addValue("workPackageId", workPackageId)
-                .addValue("tenantTimezone", tenantZone.getId()));
+                .addValue("previousVersionBoundary", request.validFrom().atStartOfDay(tenantZone).toOffsetDateTime().minusNanos(1000)));
         if (current.isEmpty()) throw new IllegalArgumentException("原下发不存在或不属于所选工作包");
         Map<String, Object> old = current.getFirst();
         if (!"ACTIVE".equals(old.get("status")) || !request.positionAssignmentId().equals(old.get("position_assignment_id"))
@@ -553,8 +553,7 @@ public class WorkPackageService {
         if (previousTo != null && previousTo.isBefore(request.validFrom())) {
             throw new IllegalArgumentException("原下发已经结束或已有计划切换，请刷新核对，不能延长原有效期");
         }
-        if (old.get("version_last_date") != null
-                && ((java.sql.Date) old.get("version_last_date")).toLocalDate().isBefore(previousEnds)) {
+        if (!Boolean.TRUE.equals(old.get("version_covers_switch"))) {
             throw new IllegalArgumentException("原版本有效期无法覆盖切换前的日期，请让切换日期与新版本生效边界衔接");
         }
         Boolean ready = jdbc.queryForObject("""
