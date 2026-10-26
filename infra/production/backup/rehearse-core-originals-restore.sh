@@ -52,6 +52,15 @@ cleanup(){
 }
 trap cleanup EXIT INT TERM
 decrypt(){ openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$key"; }
+restore_database_file(){
+ local archive=$1 database=$2 plain=$3 key_file=$4
+ test -f "$plain" && test ! -L "$plain" || return 1
+ chmod 0600 "$plain" || return $?
+ openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$key_file" -in "$archive" -out "$plain" || return $?
+ test -s "$plain" || return 1
+ # Root opens the regular, seekable FD; postgres needs no access to this private directory.
+ sudo -u postgres pg_restore --exit-on-error --single-transaction --dbname "$database" <"$plain"
+}
 install -d -m 0700 "$work/state"
 if [[ "$state_format" == SNAPSHOT_V2 ]]; then
  "$snapshot_tool" restore --state-root /var/backups/sifangguan-ota/state \
@@ -64,7 +73,8 @@ fi
 test "$(sudo -u postgres psql -XAt --dbname postgres --command "select count(*) from pg_database where datname='$restore_db'")" = 0
 sudo -u postgres createdb --owner hotel_ai_os_owner "$restore_db"
 created=true
-decrypt <"$db_archive" | sudo -u postgres pg_restore --exit-on-error --single-transaction --dbname "$restore_db"
+database_plain="$(mktemp "$work/database.XXXXXXXX.dump")"
+restore_database_file "$db_archive" "$restore_db" "$database_plain" "$key"
 sudo -u postgres psql -XAtq --dbname "$restore_db" <"$reference_sql" >"$work/restored-references.json"
 "$tool" verify "$work/state/var/lib/hotel-ai-os/attachments" "$work/state/var/lib/hotel-ai-os/backup-core-originals-manifest.json" "$snapshot" "$work/restored-references.json" >"$work/proof.json"
 python3 - "$work/proof.json" "$state_format" "$work/state-proof.json" <<'PY'

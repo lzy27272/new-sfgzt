@@ -180,6 +180,28 @@ class FullCiReleaseTests(unittest.TestCase):
         database['availableBytes']+=1; restore['availableBytes']-=1
         self.assertEqual(F.restore_space_plan(100,200,restore,[database])['status'],'INSUFFICIENT')
 
+    def test_verified_ciphertext_bounds_plain_dump_once_on_shared_filesystem(self):
+        required=5*100+8*200+55+F.RESTORE_RESERVE
+        fs={'device':1,'availableBytes':required}
+        plan=F.restore_space_plan(100,200,fs,[fs,fs],55)
+        self.assertEqual(plan['status'],'PASS')
+        self.assertEqual(plan['databaseCipherBytes'],55)
+        self.assertEqual(plan['filesystems'][0]['requiredBytes'],required)
+        self.assertIn('verified ciphertext P',plan['formula'])
+        fs['availableBytes']-=1
+        self.assertEqual(F.restore_space_plan(100,200,fs,[fs],55)['status'],'INSUFFICIENT')
+
+    def test_plain_dump_is_reserved_on_restore_filesystem_when_database_is_separate(self):
+        restore={'device':1,'availableBytes':5*100+55+F.RESTORE_RESERVE}
+        database={'device':2,'availableBytes':8*200+F.RESTORE_RESERVE}
+        plan=F.restore_space_plan(100,200,restore,[database,database],55)
+        self.assertEqual(plan['status'],'PASS')
+        self.assertEqual([row['peakBytes'] for row in plan['filesystems']],[5*100+55,8*200])
+        restore['availableBytes']-=1
+        self.assertEqual(F.restore_space_plan(100,200,restore,[database],55)['status'],'INSUFFICIENT')
+        for invalid in (-1,True,1.0,'55'):
+            with self.assertRaises(ValueError): F.restore_space_plan(100,200,restore,[database],invalid)
+
     def test_external_wal_or_tablespace_has_its_own_reserve_without_duplicate_same_disk_cost(self):
         restore={'device':1,'availableBytes':5*100+F.RESTORE_RESERVE}
         database={'device':2,'availableBytes':8*200+F.RESTORE_RESERVE}

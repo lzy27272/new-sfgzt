@@ -232,9 +232,11 @@ def staged_state_bytes(root):
         raise ValueError('Empty snapshot cannot size the paired restore')
     return total
 
-def restore_space_plan(state_bytes, database_bytes, restore_filesystem, database_filesystems):
+def restore_space_plan(state_bytes, database_bytes, restore_filesystem, database_filesystems, database_cipher_bytes=0):
     if type(state_bytes) is not int or type(database_bytes) is not int or state_bytes <= 0 or database_bytes <= 0 or not database_filesystems:
         raise ValueError('Actual positive state/database sizes are required')
+    if type(database_cipher_bytes) is not int or database_cipher_bytes < 0:
+        raise ValueError('Actual nonnegative encrypted database bytes are required')
     devices = {}
     for role, filesystem in [('RESTORE_WORK', restore_filesystem), *(('DATABASE_STORAGE', row) for row in database_filesystems)]:
         device, available = filesystem['device'], filesystem['availableBytes']
@@ -244,13 +246,15 @@ def restore_space_plan(state_bytes, database_bytes, restore_filesystem, database
         row['availableBytes'] = min(row['availableBytes'], available)
         if role not in row['roles']: row['roles'].append(role)
     for row in devices.values():
-        # Staging and encrypted backups already occupy disk; only additional recovery peaks belong here.
-        peak = (5*state_bytes if 'RESTORE_WORK' in row['roles'] else 0) + (8*database_bytes if 'DATABASE_STORAGE' in row['roles'] else 0)
+        # Staging and ciphertext already occupy disk; reserve one additional
+        # private plaintext dump P on its work FS (AES-CBC plaintext <= P).
+        peak = (5*state_bytes + database_cipher_bytes if 'RESTORE_WORK' in row['roles'] else 0) + (8*database_bytes if 'DATABASE_STORAGE' in row['roles'] else 0)
         row.update(peakBytes=peak, reserveBytes=RESTORE_RESERVE, requiredBytes=peak+RESTORE_RESERVE)
         row['status'] = 'PASS' if row['availableBytes'] >= row['requiredBytes'] else 'INSUFFICIENT'
     rows = sorted(devices.values(), key=lambda row: row['device'])
     return {'status': 'PASS' if all(row['status']=='PASS' for row in rows) else 'INSUFFICIENT', 'gate': 'PAIRED_RESTORE_AND_CLONE',
-            'stateBytes': state_bytes, 'databaseBytes': database_bytes, 'formula': '5*S on restore FS + 8*D on each database storage FS + 4GiB per distinct FS', 'filesystems': rows}
+            'stateBytes': state_bytes, 'databaseBytes': database_bytes, 'databaseCipherBytes': database_cipher_bytes,
+            'formula': '(5*S + verified ciphertext P) on restore FS + 8*D on each database storage FS + 4GiB per distinct FS', 'filesystems': rows}
 
 def actual_filesystem(path):
     resolved = Path(path).resolve(strict=True)
@@ -307,8 +311,8 @@ def restore_capacity(snapshot_id,backup_log):
     if snapshot.resolve(strict=True) != snapshot or snapshot.stat().st_uid != 0 or stat.S_IMODE(snapshot.stat().st_mode) != 0o700:
         raise ValueError('Snapshot must remain protected in its fixed root-owned staging path')
     staged_bytes = selected_snapshot_bytes(snapshot,snapshot_id)
-    selected_bytes = successful_backup_state_bytes(log,snapshot_id,
-        Path('/var/backups/hotel-ai-os/postgres/daily')/f'hotel_ai_os-daily-{snapshot_id}.dump.enc',
+    selected_database = Path('/var/backups/hotel-ai-os/postgres/daily')/f'hotel_ai_os-daily-{snapshot_id}.dump.enc'
+    selected_bytes = successful_backup_state_bytes(log,snapshot_id, selected_database,
         Path('/var/backups/sifangguan-ota/state/daily')/f'sifangguan-ota-state-daily-{snapshot_id}.snapshot.json.enc')
     state_bytes = max(selected_bytes,staged_bytes)
     query = """select jsonb_build_object('databaseBytes',pg_database_size(current_database()),'locations',
@@ -322,7 +326,8 @@ def restore_capacity(snapshot_id,backup_log):
     locations = database.get('locations')
     if not isinstance(locations,list) or len(locations)<2 or any(not isinstance(path,str) or not path.startswith('/') for path in locations):
         raise ValueError('Actual PostgreSQL storage locations are required')
-    plan=restore_space_plan(state_bytes,database['databaseBytes'],actual_filesystem('/var/backups/hotel-ai-os/postgres'),[actual_filesystem(path) for path in locations])
+    plan=restore_space_plan(state_bytes,database['databaseBytes'],actual_filesystem('/var/backups/hotel-ai-os/postgres'),
+        [actual_filesystem(path) for path in locations],selected_database.stat().st_size)
     plan.update(snapshotId=snapshot_id,selectedStateBytes=selected_bytes,stagedStateBytes=staged_bytes)
     return plan
 

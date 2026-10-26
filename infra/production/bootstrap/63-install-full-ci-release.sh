@@ -18,7 +18,7 @@ readonly RESTORE='/usr/local/lib/hotel-ai-os/rehearse-core-originals-restore.sh'
 readonly REFERENCES='/usr/local/lib/hotel-ai-os/core-originals-reference.sql'
 readonly CORE='hotel-ai-os-core-api.service'
 readonly KEY='/etc/hotel-ai-os/backup-encryption.key'
-release_id='' source_commit='' previous_backend='' previous_web='' proof='' clone='' runtime=''
+release_id='' source_commit='' previous_backend='' previous_web='' proof='' clone='' runtime='' clone_dump=''
 begun=false switched=false migration_started=false audited=false ocr_prepared=false ocr_activation_started=false core_stop_started=false clone_created=false
 
 fail(){ printf 'FULL_CI_RELEASE_ERROR %s\n' "$*" >&2; return 1; }
@@ -59,6 +59,22 @@ drop_clone(){
     clone_created=false
   fi
 }
+cleanup_clone_dump(){
+  test -n "$clone_dump" || return 0
+  [[ "$clone_dump" =~ ^/var/backups/hotel-ai-os/postgres/[.]full-ci-clone[.][A-Za-z0-9]{8}[.]dump$ ]] || return 1
+  test ! -L "$clone_dump" && { test ! -e "$clone_dump" || test -f "$clone_dump"; } || return 1
+  rm -f -- "$clone_dump" || return $?
+  clone_dump=''
+}
+restore_database_file(){
+ local archive=$1 database=$2 plain=$3 key_file=$4
+ test -f "$plain" && test ! -L "$plain" || return 1
+ chmod 0600 "$plain" || return $?
+ openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$key_file" -in "$archive" -out "$plain" || return $?
+ test -s "$plain" || return 1
+ # Root opens the regular, seekable FD; postgres needs no access to this private directory.
+ sudo -u postgres pg_restore --exit-on-error --single-transaction --dbname "$database" <"$plain"
+}
 archive_stage(){
   if test -d "$STAGE" && test ! -L "$STAGE"; then
     test "$(stat -c '%u:%g' "$STAGE")" = '0:0'
@@ -96,6 +112,7 @@ cleanup(){
   local result=$?
   trap - EXIT INT TERM
   drop_clone || result=1
+  cleanup_clone_dump || result=1
   if test "$result" -ne 0; then rollback || true; fi
   if test -n "$proof"; then archive_stage || result=1; fi
   if test "$result" -ne 0; then printf 'FULL_CI_RELEASE_FAILED releaseId=%s evidence=%s\n' "$release_id" "$proof" >&2; fi
@@ -124,7 +141,9 @@ backup_restore_and_rehearse(){
   clone="hotel_ai_os_full_ci_$(date +%s)_$$"
   test "$(sudo -u postgres psql -XAt --set ON_ERROR_STOP=1 --dbname postgres --command "select count(*) from pg_database where datname='$clone'")" = 0
   sudo -u postgres createdb --owner hotel_ai_os_owner "$clone"; clone_created=true
-  openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$KEY" <"$db" | sudo -u postgres pg_restore --exit-on-error --single-transaction --dbname "$clone" >"$proof/clone-restore.log" 2>&1
+  clone_dump="$(mktemp /var/backups/hotel-ai-os/postgres/.full-ci-clone.XXXXXXXX.dump)"
+  restore_database_file "$db" "$clone" "$clone_dump" "$KEY" >"$proof/clone-restore.log" 2>&1 || return $?
+  cleanup_clone_dump || return $?
   before="$(sudo -u postgres psql -XAtq --set ON_ERROR_STOP=1 --dbname "$clone" --command "select coalesce(max(version::integer),0)||'|'||count(*) filter(where not success) from flyway_schema_history")"
   [[ "$before" =~ ^[0-9]+\|0$ ]]
   sudo -u postgres psql -XAtq --set ON_ERROR_STOP=1 --dbname "$clone" <"$REFERENCES" >"$proof/references-before.json"
