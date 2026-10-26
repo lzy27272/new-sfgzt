@@ -324,7 +324,9 @@ def create(source, root, index, snapshot, key, db):
         os.replace(encrypted, index)
         sync_directory(index.parent)
     validate_closure(root, index, key, db, True, verified)
-    return {"snapshotId": snapshot, "newPacks": len(set(catalog[x] for x in pending)), "closurePacks": len(used)}
+    return {"snapshotId": snapshot, "newPacks": len(set(catalog[x] for x in pending)), "closurePacks": len(used),
+            "stateBytes": sum(row["bytes"] for row in files if row["kind"] == "file"),
+            "indexSha256": sha(index), "databaseSha256": value["database"]["sha256"]}
 
 
 def restore(root, index, destination, key, db, snapshot):
@@ -591,7 +593,76 @@ def prepare_offsite(data_root, manifest_path=None, receipt_path=None, bundle_pat
     return {"preparation": "OFFSITE_MANIFEST_VERIFIED", "manifestId": manifest["manifestId"], "artifacts": len(entries), "authority": authority}
 
 
-def check_capacity(state_root, database_root, stage_root, export_root, state_bytes, database_bytes, raw_root=None, raw_bytes=0):
+def gzip_upper_bound(size):
+    # zlib compressBound plus room for gzip framing. This budgets expansion,
+    # never an assumed compression ratio (all payload may be incompressible).
+    return size + (size >> 12) + (size >> 14) + (size >> 25) + 64
+
+
+def numeric_lengths(path):
+    """Strict rsync operation/length records; legacy numeric fixtures remain valid.
+
+    Including %o makes rsync format deletions through the same machine log
+    instead of emitting '*deleting <filename>'. Deleted bytes are never credit.
+    """
+    values = []
+    with regular(path).open(encoding="ascii") as source:
+        for line in source:
+            value = line.rstrip("\r\n")
+            operation = "send"
+            if not re.fullmatch(r"[0-9]{1,19}", value):
+                record = re.fullmatch(r"(send|recv|del[.]) ([0-9]{1,19})", value)
+                if record is None:
+                    raise ValueError("Capacity measurement requires strict rsync operation and length records")
+                operation, value = record.groups()
+            number = int(value)
+            if number > 2**63 - 1 or len(values) >= 2_000_000:
+                raise ValueError("Capacity measurement exceeds supported limits")
+            if operation == "del.":
+                continue
+            values.append(number)
+    return values
+
+
+def capacity_measurements(state_lengths, core_lengths, raw_lengths, completed_lengths, pending_lengths, completed_archives):
+    if not isinstance(completed_archives, int) or not 0 <= completed_archives <= 100000:
+        raise ValueError("Invalid completed raw archive count")
+    state = numeric_lengths(state_lengths) + numeric_lengths(core_lengths)
+    raw, completed, pending = (numeric_lengths(path) for path in (raw_lengths, completed_lengths, pending_lengths))
+    if not state or sum(state) < 1 or sum(completed) > sum(raw):
+        raise ValueError("Invalid fresh source capacity measurement")
+    if completed and not completed_archives:
+        raise ValueError("Completed raw data has no date archive")
+    # Treat every selected entry as new content. rsync can include directories
+    # in %l; counting them as files only increases this bound. No dedup credit.
+    # Generated original-reference manifest/runtime config get a full 128MiB
+    # allowance even though they do not yet exist in the source dry run.
+    sizes = state + [MAX_INDEX]
+    payload = sum(sizes)
+    # create() sorts paths, whereas rsync emits another traversal order. Use
+    # order-independent next-fit bounds rather than simulate its batch order:
+    # at most 2*ceil(payload/limit)+1 batches (and never more than entries).
+    pack_count = min(len(sizes), 2 * ((payload + PACK_LIMIT - 1) // PACK_LIMIT) + 1)
+    # Hash member names are 64 ASCII chars; 4KiB per entry also covers PAX
+    # large-size headers, separately including each member's tar block padding.
+    overhead = sum(((size + 511) // 512) * 512 - size + 4096 for size in sizes)
+    total_tar = payload + overhead + 11264 * pack_count
+    state_packs = gzip_upper_bound(total_tar) + 128 * pack_count
+    largest_payload = max(PACK_LIMIT, max(sizes)) + overhead
+    largest_tar = ((largest_payload + 1024 + 10239) // 10240) * 10240
+    largest_pack = gzip_upper_bound(largest_tar) + 64
+    # Raw tar members retain paths, so allow 16KiB per entry for numeric-owner
+    # tar/PAX metadata and path headers, plus alignment/trailers per date.
+    raw_payload = sum(completed) + 16384 * len(completed) + 11264 * completed_archives
+    raw_archive = gzip_upper_bound(raw_payload) + 128 * completed_archives if completed_archives else 0
+    return {"kind": "SFG_BACKUP_CAPACITY_MEASUREMENT_V1", "stateBytes": sum(state), "stateEntries": len(state),
+            "stateMaxFileBytes": max(state), "newStatePackBytes": state_packs, "largestStatePackBytes": largest_pack,
+            "rawBytes": sum(raw), "rawCompletedBytes": sum(completed), "rawArchiveBytes": raw_archive,
+            "rawCompletedEntries": len(completed), "rawCompletedArchives": completed_archives,
+            "stagePendingBytes": sum(pending), "stagePendingEntries": len(pending)}
+
+
+def check_capacity(state_root, database_root, stage_root, export_root, state_bytes, database_bytes, raw_root=None, raw_bytes=0, measurements=None):
     """Conservative first-run bound; do not depend on compression/dedup ratios.
 
     Source staging + full new state packs + their export copy; five DB local
@@ -601,13 +672,38 @@ def check_capacity(state_root, database_root, stage_root, export_root, state_byt
     """
     if state_bytes < 1 or database_bytes < 1 or raw_bytes < 0:
         raise ValueError("Cannot establish actual state/database backup size")
-    requirements = [(state_root, state_bytes + 2 * max(PACK_LIMIT, state_bytes)),
-                    (stage_root, state_bytes + raw_bytes), (database_root, 5 * database_bytes),
-                    (export_root, state_bytes + 3 * database_bytes + raw_bytes)]
-    if raw_bytes:
+    if measurements is None:
+        requirements = [(state_root, state_bytes + 2 * max(PACK_LIMIT, state_bytes)),
+                        (stage_root, state_bytes + raw_bytes), (database_root, 5 * database_bytes),
+                        (export_root, state_bytes + 3 * database_bytes + raw_bytes)]
+        raw_required = 2 * raw_bytes
+    else:
+        m = measurements
+        fields = ("stateBytes", "stateEntries", "stateMaxFileBytes", "newStatePackBytes", "largestStatePackBytes",
+                  "rawBytes", "rawCompletedBytes", "rawArchiveBytes", "rawCompletedEntries", "rawCompletedArchives",
+                  "stagePendingBytes", "stagePendingEntries")
+        if (m.get("kind") != "SFG_BACKUP_CAPACITY_MEASUREMENT_V1" or
+            any(type(m.get(key)) is not int or m[key] < 0 for key in fields) or
+            m["stateBytes"] != state_bytes or m["rawBytes"] != raw_bytes or
+            not 0 < m["stateMaxFileBytes"] <= state_bytes or m["rawCompletedBytes"] > raw_bytes or
+            m["newStatePackBytes"] < state_bytes or m["largestStatePackBytes"] <= 0 or
+            m["rawArchiveBytes"] < m["rawCompletedBytes"]):
+            raise ValueError("Invalid fresh capacity measurements")
+        state_pack, temporary_pack = m["newStatePackBytes"], m["largestStatePackBytes"]
+        raw_archive = m["rawArchiveBytes"]
+        # Persistent all-new packs plus the largest simultaneous plaintext /
+        # encrypted verification pack. Index reserve covers daily/month/year
+        # copies and readback. Existing stage occupies current free already;
+        # rsync pending includes replacement temp files, never deleted space.
+        requirements = [(state_root, state_pack + 2 * temporary_pack + 5 * MAX_INDEX),
+                        (stage_root, m["stagePendingBytes"] + MAX_INDEX),
+                        (database_root, 5 * database_bytes),
+                        (export_root, state_pack + 3 * MAX_INDEX + 3 * database_bytes + raw_archive)]
+        raw_required = 2 * raw_archive
+    if raw_required:
         if raw_root is None:
             raise ValueError("Missing raw backup filesystem for capacity check")
-        requirements.append((raw_root, 2 * raw_bytes))
+        requirements.append((raw_root, raw_required))
     devices = {}
     for path, needed in requirements:
         path = Path(path)
@@ -622,7 +718,8 @@ def check_capacity(state_root, database_root, stage_root, export_root, state_byt
         if free < item["required"]:
             raise ValueError("BACKUP_CAPACITY_INSUFFICIENT before writer stop/prune: free=" + str(free) + " required=" + str(item["required"]))
         result.append({"path": str(item["path"]), "freeBytes": free, "requiredBytes": item["required"]})
-    return {"capacity": "PASS", "filesystems": result, "compressionAssumed": False}
+    return {"capacity": "PASS", "filesystems": result, "compressionAssumed": False,
+            "measurement": measurements, "reserveBytesPerFilesystem": CAPACITY_RESERVE}
 
 
 def prune_raw_dates(root, keep=90):
@@ -695,6 +792,11 @@ def main():
     capacity.add_argument("--database-bytes", type=int, required=True)
     capacity.add_argument("--raw-backup-root", type=Path)
     capacity.add_argument("--raw-bytes", type=int, default=0)
+    capacity.add_argument("--measurements", type=Path)
+    measure = commands.add_parser("measure")
+    for name in ("state-lengths", "core-lengths", "raw-lengths", "completed-lengths", "pending-lengths"):
+        measure.add_argument("--" + name, type=Path, required=True)
+    measure.add_argument("--completed-archives", type=int, required=True)
     offline = commands.add_parser("prepare-offsite")
     offline.add_argument("--data-root", type=Path, required=True)
     offline.add_argument("--manifest", type=Path)
@@ -724,7 +826,10 @@ def main():
     elif a.action == "prune-raw":
         result = prune_raw_dates(a.raw_root, a.keep)
     elif a.action == "capacity":
-        result = check_capacity(a.state_root, a.database_root, a.stage_root, a.export_root, a.state_bytes, a.database_bytes, a.raw_backup_root, a.raw_bytes)
+        measurement = json.loads(regular(a.measurements).read_text(encoding="ascii")) if a.measurements else None
+        result = check_capacity(a.state_root, a.database_root, a.stage_root, a.export_root, a.state_bytes, a.database_bytes, a.raw_backup_root, a.raw_bytes, measurement)
+    elif a.action == "measure":
+        result = capacity_measurements(a.state_lengths, a.core_lengths, a.raw_lengths, a.completed_lengths, a.pending_lengths, a.completed_archives)
     elif a.action == "prepare-offsite":
         result = prepare_offsite(a.data_root, a.manifest, a.receipt, a.bundle)
     elif a.action == "create":

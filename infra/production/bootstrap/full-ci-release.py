@@ -16,6 +16,7 @@ COMMIT = re.compile(r'[a-f0-9]{40}')
 FILES = {'deployment-plan.json', 'release-manifest.json', 'web.zip', 'core-api.jar', 'run-migration-once.sh', 'finance-ocr.zip'}
 ARTIFACTS = {'web': 'web.zip', 'core': 'core-api.jar', 'migration-runner': 'run-migration-once.sh', 'finance-ocr': 'finance-ocr.zip'}
 MAX_TOTAL = 3 * 1024**3
+RESTORE_RESERVE = 4 * 1024**3
 
 def account(name):
     import pwd
@@ -212,6 +213,119 @@ def runtime(jar_path, destination):
     for path in (destination, *destination.rglob('*')):
         os.chown(path, 0, group); path.chmod(0o750 if path.is_dir() else 0o640)
 
+def staged_state_bytes(root):
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('Actual protected snapshot tree is required')
+    total, pending = 0, [root]
+    device = root.stat().st_dev
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as children:
+            for entry in children:
+                info = Path(entry.path).lstat()
+                if info.st_dev != device or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+                    raise ValueError('Unsupported staged snapshot entry')
+                if stat.S_ISDIR(info.st_mode): pending.append(Path(entry.path))
+                else: total += info.st_size
+    if total <= 0:
+        raise ValueError('Empty snapshot cannot size the paired restore')
+    return total
+
+def restore_space_plan(state_bytes, database_bytes, restore_filesystem, database_filesystems):
+    if type(state_bytes) is not int or type(database_bytes) is not int or state_bytes <= 0 or database_bytes <= 0 or not database_filesystems:
+        raise ValueError('Actual positive state/database sizes are required')
+    devices = {}
+    for role, filesystem in [('RESTORE_WORK', restore_filesystem), *(('DATABASE_STORAGE', row) for row in database_filesystems)]:
+        device, available = filesystem['device'], filesystem['availableBytes']
+        if type(device) is not int or type(available) is not int or available < 0:
+            raise ValueError('Invalid actual filesystem capacity')
+        row = devices.setdefault(device, {'device': device, 'availableBytes': available, 'roles': []})
+        row['availableBytes'] = min(row['availableBytes'], available)
+        if role not in row['roles']: row['roles'].append(role)
+    for row in devices.values():
+        # Staging and encrypted backups already occupy disk; only additional recovery peaks belong here.
+        peak = (5*state_bytes if 'RESTORE_WORK' in row['roles'] else 0) + (8*database_bytes if 'DATABASE_STORAGE' in row['roles'] else 0)
+        row.update(peakBytes=peak, reserveBytes=RESTORE_RESERVE, requiredBytes=peak+RESTORE_RESERVE)
+        row['status'] = 'PASS' if row['availableBytes'] >= row['requiredBytes'] else 'INSUFFICIENT'
+    rows = sorted(devices.values(), key=lambda row: row['device'])
+    return {'status': 'PASS' if all(row['status']=='PASS' for row in rows) else 'INSUFFICIENT', 'gate': 'PAIRED_RESTORE_AND_CLONE',
+            'stateBytes': state_bytes, 'databaseBytes': database_bytes, 'formula': '5*S on restore FS + 8*D on each database storage FS + 4GiB per distinct FS', 'filesystems': rows}
+
+def actual_filesystem(path):
+    resolved = Path(path).resolve(strict=True)
+    if not resolved.is_dir(): raise ValueError('Actual recovery filesystem is required')
+    info, capacity = resolved.stat(), os.statvfs(resolved)
+    return {'device': info.st_dev, 'availableBytes': capacity.f_bavail*capacity.f_frsize}
+
+def selected_snapshot_bytes(snapshot, snapshot_id):
+    if not isinstance(snapshot_id,str) or not re.fullmatch(r'[0-9]{8}T[0-9]{6}[+-][0-9]{4}',snapshot_id):
+        raise ValueError('Strict selected snapshot identity is required')
+    snapshot = Path(snapshot)
+    manifest = snapshot/'var/lib/hotel-ai-os/backup-core-originals-manifest.json'
+    if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size>128*1024**2:
+        raise ValueError('Actual selected original snapshot manifest is required')
+    metadata = json_bytes(manifest.read_bytes())
+    if metadata.get('schemaVersion')!=1 or metadata.get('bundleType')!='CORE_AND_OTA_STATE_WITH_ORIGINALS' or metadata.get('snapshotId')!=snapshot_id:
+        raise ValueError('Staging does not belong to the selected successful backup')
+    return staged_state_bytes(snapshot)
+
+def successful_backup_state_bytes(backup_log,snapshot_id,database,index):
+    path = Path(backup_log)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size>128*1024**2:
+        raise ValueError('Bounded successful backup metadata is required')
+    matches=[]
+    fields={'stateBytes','indexSha256','databaseSha256'}
+    for line in path.read_bytes().splitlines():
+        if not line.lstrip().startswith(b'{'): continue
+        try: record=json_bytes(line)
+        except (ValueError,UnicodeError): continue
+        if not isinstance(record,dict) or record.get('snapshotId')!=snapshot_id or not fields.intersection(record): continue
+        if not fields.issubset(record) or type(record['stateBytes']) is not int or record['stateBytes']<=0 or any(not HEX.fullmatch(str(record[name])) for name in ('indexSha256','databaseSha256')):
+            raise ValueError('Malformed successful selected snapshot proof')
+        matches.append(record)
+    if len(matches)!=1:
+        raise ValueError('Exactly one successful selected snapshot proof is required')
+    record=matches[0]
+    for file,key in ((database,'databaseSha256'),(index,'indexSha256')):
+        file=Path(file)
+        if file.is_symlink() or not file.is_file(): raise ValueError('Selected backup must be a regular immutable archive')
+        with file.open('rb') as stream:
+            if hashlib.file_digest(stream,'sha256').hexdigest()!=record[key]:
+                raise ValueError('Selected backup no longer matches the successful snapshot proof')
+    return record['stateBytes']
+
+def restore_capacity(snapshot_id,backup_log):
+    log=Path(backup_log)
+    if log.name!='backup.log' or log.parent.parent!=Path('/var/lib/hotel-ai-os-deploy/full-ci') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}',log.parent.name) or '..' in log.parent.name or log.resolve(strict=True)!=log:
+        raise ValueError('Fixed private FULL backup evidence is required')
+    info=log.stat()
+    parent=log.parent.stat()
+    if info.st_uid!=0 or info.st_gid!=0 or info.st_nlink!=1 or info.st_mode & 0o077 or parent.st_uid!=0 or parent.st_gid!=0 or parent.st_mode & 0o077:
+        raise ValueError('Backup proof must remain root-private')
+    snapshot = Path('/var/backups/sifangguan-ota/staging/snapshot')
+    if snapshot.resolve(strict=True) != snapshot or snapshot.stat().st_uid != 0 or stat.S_IMODE(snapshot.stat().st_mode) != 0o700:
+        raise ValueError('Snapshot must remain protected in its fixed root-owned staging path')
+    staged_bytes = selected_snapshot_bytes(snapshot,snapshot_id)
+    selected_bytes = successful_backup_state_bytes(log,snapshot_id,
+        Path('/var/backups/hotel-ai-os/postgres/daily')/f'hotel_ai_os-daily-{snapshot_id}.dump.enc',
+        Path('/var/backups/sifangguan-ota/state/daily')/f'sifangguan-ota-state-daily-{snapshot_id}.snapshot.json.enc')
+    state_bytes = max(selected_bytes,staged_bytes)
+    query = """select jsonb_build_object('databaseBytes',pg_database_size(current_database()),'locations',
+      jsonb_build_array(current_setting('data_directory'),current_setting('data_directory')||'/pg_wal') ||
+      (select coalesce(jsonb_agg(pg_tablespace_location(oid)),'[]'::jsonb) from pg_tablespace
+       where oid in (select dattablespace from pg_database where datname=current_database()
+         union select distinct reltablespace from pg_class where reltablespace<>0)
+       and pg_tablespace_location(oid)<>''))"""
+    result = subprocess.run(['/usr/bin/sudo','-u','postgres','/usr/bin/psql','-XAtq','--set','ON_ERROR_STOP=1','--dbname','hotel_ai_os','--command',query], check=True, text=True, capture_output=True, timeout=30)
+    database = json_bytes(result.stdout.encode())
+    locations = database.get('locations')
+    if not isinstance(locations,list) or len(locations)<2 or any(not isinstance(path,str) or not path.startswith('/') for path in locations):
+        raise ValueError('Actual PostgreSQL storage locations are required')
+    plan=restore_space_plan(state_bytes,database['databaseBytes'],actual_filesystem('/var/backups/hotel-ai-os/postgres'),[actual_filesystem(path) for path in locations])
+    plan.update(snapshotId=snapshot_id,selectedStateBytes=selected_bytes,stagedStateBytes=staged_bytes)
+    return plan
+
 def flyway(runtime_root, database, mode):
     if database != 'hotel_ai_os' and not re.fullmatch(r'hotel_ai_os_full_ci_[0-9]+_[0-9]+', database):
         raise ValueError('Uncontrolled database name')
@@ -247,12 +361,15 @@ def main():
         for key in ('digest', 'commit', 'classifier'): command.add_argument('--'+key, required=True)
     command = sub.add_parser('runtime'); command.add_argument('jar'); command.add_argument('destination')
     command = sub.add_parser('flyway'); command.add_argument('root'); command.add_argument('database'); command.add_argument('mode')
+    command = sub.add_parser('restore-capacity'); command.add_argument('--snapshot',required=True); command.add_argument('--backup-log',required=True)
     args = parser.parse_args()
     if args.action == 'verify': result = verify(args.archive, args.digest, args.commit, args.classifier)
     elif args.action == 'snapshot': result = snapshot(args.incoming, args.destination, args.digest, args.commit, args.classifier)
     elif args.action == 'runtime': runtime(args.jar, args.destination); result = {'runtime': 'SQL_AND_LIBRARIES_ONLY'}
+    elif args.action == 'restore-capacity': result = restore_capacity(args.snapshot,args.backup_log)
     else: flyway(args.root, args.database, args.mode); result = {'flyway': 'PASS'}
     print(json.dumps(result, separators=(',', ':')))
+    if result.get('status') == 'INSUFFICIENT': raise SystemExit(3)
 
 if __name__ == '__main__':
     try: main()

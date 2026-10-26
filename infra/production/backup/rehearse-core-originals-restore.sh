@@ -25,8 +25,14 @@ reference_sql=/usr/local/lib/hotel-ai-os/core-originals-reference.sql
 key=/etc/hotel-ai-os/backup-encryption.key
 snapshot_tool=/usr/local/lib/hotel-ai-os/core-state-snapshots.py
 # Exclude backup/GC while reading this complete immutable closure.
-exec 9>/run/lock/hotel-ai-os-backup.lock
-flock -x 9
+acquire_backup_lock(){
+ if test "$(readlink "/proc/$$/fd/9" 2>/dev/null || true)" != /run/lock/hotel-ai-os-backup.lock; then
+  exec 9>/run/lock/hotel-ai-os-backup.lock
+ fi
+ # The trusted FULL parent can share its actual open lock description; no environment flag bypasses locking.
+ flock -x 9
+}
+acquire_backup_lock
 test "$(stat -c '%U:%a' "$key")" = root:600
 work="$(mktemp -d /var/backups/hotel-ai-os/postgres/.restore-originals.XXXXXXXX)"
 restore_db="hotel_ai_os_originals_restore_$(date +%s)_$$"

@@ -13,6 +13,48 @@ valid_hash "$(printf 'b%.0s' {1..64})"; ! valid_hash 123
 proof="$fixture"; release_id='fixture'; source_commit="$(printf 'a%.0s' {1..40})"; expected_source_commit="$(printf 'b%.0s' {1..40})"
 events="$fixture/events"
 record(){ printf '%s\n' "$*" >>"$events"; }
+# Exercise the actual backup/rehearsal function: capacity failure must return before any restore/clone.
+(
+  function /usr/local/lib/hotel-ai-os/backup-postgres.sh(){ record BACKUP; printf 'COMPLETE_BACKUP_EXPORT_OK\npairedOriginalsSnapshot=20261027T120000+0800 type=CORE_AND_OTA_STATE_WITH_ORIGINALS\n'; }
+  function /usr/local/lib/hotel-ai-os/rehearse-core-originals-restore.sh(){ record RESTORE; printf 'PAIRED_DATABASE_ORIGINALS_RESTORE_OK snapshot=20261027T120000+0800 proof=fixture\n'; }
+  sudo(){ record FORBIDDEN_CLONE_COMMAND; return 99; }
+  hold_backup_lock(){ record LOCK; }
+  check_restore_capacity(){ record "CAPACITY $1"; return 1; }
+  : >"$events"
+  if backup_restore_and_rehearse; then exit 1; fi
+  test "$(command cat "$events")" = $'BACKUP\nLOCK\nCAPACITY originals'
+  printf 'PASS insufficient restore space stops after successful backup before decrypting or restoring\n'
+  check_restore_capacity(){ record "CAPACITY $1"; test "$1" = originals; }
+  : >"$events"
+  if backup_restore_and_rehearse; then exit 1; fi
+  test "$(command cat "$events")" = $'BACKUP\nLOCK\nCAPACITY originals\nRESTORE\nCAPACITY migration'
+  printf 'PASS capacity is checked again before the separate migration clone can allocate storage\n'
+  hold_backup_lock(){ record LOCK_BUSY; return 1; }
+  : >"$events"
+  if backup_restore_and_rehearse; then exit 1; fi
+  test "$(command cat "$events")" = $'BACKUP\nLOCK_BUSY'
+  printf 'PASS competing backup lock fails closed before sizing, originals or clone\n'
+)
+restore_script="${here}/../../backup/rehearse-core-originals-restore.sh"
+if command -v flock >/dev/null && command -v timeout >/dev/null && test -d /proc; then
+  sed -n '/^hold_backup_lock(){/,/^}/p' "$script" >"$fixture/lock-functions"
+  sed -n '/^acquire_backup_lock(){/,/^}/p' "$restore_script" >>"$fixture/lock-functions"
+  sed "s|/run/lock/hotel-ai-os-backup.lock|$fixture/backup.lock|g" "$fixture/lock-functions" >"$fixture/isolated-lock-functions"
+  (
+    exec 9>"$fixture/backup.lock"; flock -n 9
+    if bash -c 'source "$1"; fail(){ return 1; }; hold_backup_lock' _ "$fixture/isolated-lock-functions"; then exit 1; fi
+    timeout 3 bash -c 'source "$1"; acquire_backup_lock' _ "$fixture/isolated-lock-functions"
+    flock -u 9; exec 9>&-
+    timeout 3 bash -c 'source "$1"; acquire_backup_lock' _ "$fixture/isolated-lock-functions"
+  )
+  printf 'PASS actual lock competition blocks, inherited FD9 avoids deadlock, standalone restore still locks\n'
+else
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) printf 'SKIP actual Linux flock/FD inheritance contract on Windows; Ubuntu CI must run it\n' ;;
+    *) printf 'Required native flock/timeout/procfs missing\n' >&2; exit 1 ;;
+  esac
+fi
+: >"$events"
 coordinator(){ record "COORDINATOR $1"; }
 ocr(){ record "OCR $1"; }
 backup_restore_and_rehearse(){ record PAIRED_RESTORE_AND_CLONE_MIGRATION; }

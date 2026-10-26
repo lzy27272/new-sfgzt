@@ -37,11 +37,12 @@ raw_retention_days=90
 timestamp="$(date '+%Y%m%dT%H%M%S%z')"
 month_key="$(date '+%Y%m')"
 year_key="$(date '+%Y')"
+backup_today="${timestamp:0:4}-${timestamp:4:2}-${timestamp:6:2}"
 
 install -d -m 0700 -o root -g root \
   "${db_root}" "${db_daily}" "${db_monthly}" "${db_yearly}" \
   "${state_root}" "${state_daily}" "${state_monthly}" "${state_yearly}" \
-  "${raw_backup_root}" "${stage_state}" "${stage_raw}" \
+  "${raw_backup_root}" "${stage_state}" "${stage_raw}" "${stage_core}" \
   "${stage_state}/var/lib/sifangguan-ota"
 
 exec 9>/run/lock/hotel-ai-os-backup.lock
@@ -65,21 +66,84 @@ test -r "${reference_sql}"
 test -r "${core_env}"
 getent group "${export_group}" >/dev/null
 
-check_backup_capacity() {
-  local source_bytes database_bytes raw_bytes=0
-  # Conservative live sizes, no compression/dedup discount. The raw evidence
-  # tree has its own existing 90-day job and is not Core state staging.
-  source_bytes="$(du --bytes --summarize --one-file-system --exclude='*/analytics-retention/raw' \
-    "${source_state}" "${source_core}" | awk '{total+=$1} END {printf "%.0f",total}')"
+# One set of copy rules serves actual rsync and both capacity measurements.
+# Cookies/login stores remain included; only regenerable browser caches are excluded.
+state_rsync_options=(
+  -aHAX --numeric-ids --delete --delete-excluded --one-file-system
+  --no-specials --no-devices
+  --exclude='/analytics-retention/raw/***'
+  --exclude='/**/Cache/***'
+  --exclude='/**/Code Cache/***'
+  --exclude='/**/GPUCache/***'
+  --exclude='/**/GPUPersistentCache/***'
+  --exclude='/**/GraphiteDawnCache/***'
+  --exclude='/**/DawnGraphiteCache/***'
+  --exclude='/**/DawnWebGPUCache/***'
+  --exclude='/**/GrShaderCache/***'
+  --exclude='/**/ShaderCache/***'
+  --exclude='/**/Crashpad/***'
+  --exclude='/**/BrowserMetrics*'
+  --exclude='/**/DevToolsActivePort'
+  --exclude='/**/Singleton*'
+  --exclude='/.cache/***'
+  --exclude='/.npm/***'
+)
+core_rsync_options=(-aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices)
+raw_rsync_options=(-a --delete --one-file-system --include='*/' --include='*.enc' --exclude='*')
+
+check_backup_capacity() (
+  local source_bytes database_bytes raw_bytes completed_archives=0 measurement_root raw_day_dir raw_day
+  measurement_root="$(mktemp -d "${stage_root}/.capacity-XXXXXXXX")"
+  shopt -s nullglob
+  # Only files created by this measurement are removed, never backup/source data.
+  trap 'rm -f -- "${measurement_root}"/*.lengths "${measurement_root}/measurement.json"; rmdir -- "${measurement_root}"/fresh-* "${measurement_root}"' EXIT
+  install -d -m 0700 "${measurement_root}/fresh-state" "${measurement_root}/fresh-core" "${measurement_root}/fresh-raw"
+  : >"${measurement_root}/raw.lengths"
+  : >"${measurement_root}/completed.lengths"
+  : >"${measurement_root}/pending.lengths"
+  # Fresh, empty dry-run destinations enumerate the complete selected
+  # source independently of existing staging. %o forces even deletions through
+  # the machine format; existing directories suppress human mkdir messages.
+  LC_ALL=C rsync "${state_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
+    "${source_state}/" "${measurement_root}/fresh-state/" >"${measurement_root}/state.lengths"
+  LC_ALL=C rsync "${core_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
+    "${source_core}/" "${measurement_root}/fresh-core/" >"${measurement_root}/core.lengths"
+  LC_ALL=C rsync "${state_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
+    "${source_state}/" "${stage_state}/var/lib/sifangguan-ota/" >>"${measurement_root}/pending.lengths"
+  LC_ALL=C rsync "${core_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
+    "${source_core}/" "${stage_core}/" >>"${measurement_root}/pending.lengths"
+  if [[ -d ${source_raw} ]]; then
+    LC_ALL=C rsync "${raw_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
+      "${source_raw}/" "${measurement_root}/fresh-raw/" >"${measurement_root}/raw.lengths"
+    LC_ALL=C rsync "${raw_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
+      "${source_raw}/" "${stage_raw}/" >>"${measurement_root}/pending.lengths"
+    for raw_day_dir in "${source_raw}"/????-??-??; do
+      [[ -d ${raw_day_dir} ]] || continue
+      raw_day="$(basename "${raw_day_dir}")"
+      [[ ${raw_day} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && ${raw_day} < ${backup_today} ]] || continue
+      install -d -m 0700 "${measurement_root}/fresh-${raw_day}"
+      LC_ALL=C rsync "${raw_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
+        "${raw_day_dir}/" "${measurement_root}/fresh-${raw_day}/" >>"${measurement_root}/completed.lengths"
+      completed_archives=$((completed_archives + 1))
+    done
+  fi
+  "${snapshot_tool}" measure --state-lengths "${measurement_root}/state.lengths" \
+    --core-lengths "${measurement_root}/core.lengths" --raw-lengths "${measurement_root}/raw.lengths" \
+    --completed-lengths "${measurement_root}/completed.lengths" --pending-lengths "${measurement_root}/pending.lengths" \
+    --completed-archives "${completed_archives}" >"${measurement_root}/measurement.json"
+  read -r source_bytes raw_bytes < <(python3 -I - "${measurement_root}/measurement.json" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1],encoding='ascii'));print(m['stateBytes'],m['rawBytes'])
+PY
+  )
   database_bytes="$(sudo -u postgres psql -XAtq --set ON_ERROR_STOP=1 --dbname hotel_ai_os \
     --command "select pg_database_size(current_database())")"
-  if [[ -d ${source_raw} ]]; then raw_bytes="$(du --bytes --summarize --one-file-system "${source_raw}" | awk '{print $1}')"; fi
   [[ ${source_bytes} =~ ^[1-9][0-9]*$ && ${database_bytes} =~ ^[1-9][0-9]*$ ]]
   "${snapshot_tool}" capacity --state-root "${state_root}" --database-root "${db_root}" \
     --stage-root "${stage_root}" --export-root "${export_root}" \
     --state-bytes "${source_bytes}" --database-bytes "${database_bytes}" \
-    --raw-backup-root "${raw_backup_root}" --raw-bytes "${raw_bytes}"
-}
+    --raw-backup-root "${raw_backup_root}" --raw-bytes "${raw_bytes}" --measurements "${measurement_root}/measurement.json"
+)
 # Fail before allocating the first bulk staging copy, and recheck immediately
 # before downtime. Insufficient capacity never triggers retention pruning.
 check_backup_capacity
@@ -186,34 +250,8 @@ done
 
 # First pass copies the bulk while writers remain online. Browser caches and
 # sockets are replaceable runtime material; login/session stores are retained.
-state_rsync_options=(
-  -aHAX --numeric-ids --delete --delete-excluded --one-file-system
-  --no-specials --no-devices
-  --exclude='/analytics-retention/raw/***'
-  --exclude='/**/Cache/***'
-  --exclude='/**/Code Cache/***'
-  --exclude='/**/GPUCache/***'
-  --exclude='/**/GPUPersistentCache/***'
-  --exclude='/**/GraphiteDawnCache/***'
-  --exclude='/**/DawnGraphiteCache/***'
-  --exclude='/**/DawnWebGPUCache/***'
-  --exclude='/**/GrShaderCache/***'
-  --exclude='/**/ShaderCache/***'
-  --exclude='/**/Crashpad/***'
-  --exclude='/**/BrowserMetrics*'
-  --exclude='/**/DevToolsActivePort'
-  --exclude='/**/Singleton*'
-  --exclude='/.cache/***'
-  --exclude='/.npm/***'
-)
-raw_rsync_options=(
-  -a --delete --one-file-system
-  --include='*/'
-  --include='*.enc'
-  --exclude='*'
-)
 rsync "${state_rsync_options[@]}" "${source_state}/" "${stage_state}/var/lib/sifangguan-ota/"
-rsync -aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices "${source_core}/" "${stage_core}/"
+rsync "${core_rsync_options[@]}" "${source_core}/" "${stage_core}/"
 if [[ -d ${source_raw} ]]; then
   rsync "${raw_rsync_options[@]}" "${source_raw}/" "${stage_raw}/"
 fi
@@ -246,7 +284,7 @@ if ((${#resume_timers[@]})); then systemctl stop "${resume_timers[@]}"; fi
 if ((${#resume_services[@]})); then systemctl stop "${resume_services[@]}"; fi
 sudo -u postgres pg_dump --format=custom --compress=9 --dbname hotel_ai_os >"${db_plain}"
 rsync "${state_rsync_options[@]}" "${source_state}/" "${stage_state}/var/lib/sifangguan-ota/"
-rsync -aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices "${source_core}/" "${stage_core}/"
+rsync "${core_rsync_options[@]}" "${source_core}/" "${stage_core}/"
 sudo -u postgres psql -XAtq --dbname hotel_ai_os <"${reference_sql}" >"${original_references}"
 "${original_tool}" capture "${stage_core}" "${original_manifest}" "${timestamp}" "${original_settings}" "${original_references}" >/dev/null
 if [[ -d ${source_raw} ]]; then
@@ -279,7 +317,7 @@ for raw_day_dir in "${stage_raw}"/????-??-??; do
   [[ -d ${raw_day_dir} ]] || continue
   raw_day="$(basename "${raw_day_dir}")"
   [[ ${raw_day} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
-  [[ ${raw_day} < "$(date '+%Y-%m-%d')" ]] || continue
+  [[ ${raw_day} < ${backup_today} ]] || continue
   raw_fingerprint_file="${raw_backup_root}/.analytics-raw-${raw_day}.source.sha256"
   source_fingerprint="$(
     find "${raw_day_dir}" -xdev -type f -name '*.enc' \

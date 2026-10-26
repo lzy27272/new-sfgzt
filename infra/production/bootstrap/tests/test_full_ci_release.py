@@ -159,4 +159,86 @@ class FullCiReleaseTests(unittest.TestCase):
         self.assertTrue((target/'classes/db/migration/V1__synthetic.sql').is_file())
         self.assertFalse((target/'classes/NotAllowed.class').exists())
 
+    def test_restore_capacity_exact_boundary_and_one_byte_short(self):
+        required=5*100+8*200+F.RESTORE_RESERVE
+        fs={'device':1,'availableBytes':required}
+        plan=F.restore_space_plan(100,200,fs,[fs,fs])
+        self.assertEqual(plan['status'],'PASS')
+        self.assertEqual(len(plan['filesystems']),1)
+        self.assertEqual(plan['filesystems'][0]['requiredBytes'],required)
+        fs={'device':1,'availableBytes':required-1}
+        self.assertEqual(F.restore_space_plan(100,200,fs,[fs])['status'],'INSUFFICIENT')
+
+    def test_restore_and_database_filesystems_are_checked_independently(self):
+        restore={'device':1,'availableBytes':5*100+F.RESTORE_RESERVE}
+        database={'device':2,'availableBytes':8*200+F.RESTORE_RESERVE}
+        self.assertEqual(F.restore_space_plan(100,200,restore,[database])['status'],'PASS')
+        database['availableBytes']-=1
+        plan=F.restore_space_plan(100,200,restore,[database])
+        self.assertEqual(plan['status'],'INSUFFICIENT')
+        self.assertEqual([row['status'] for row in plan['filesystems']],['PASS','INSUFFICIENT'])
+        database['availableBytes']+=1; restore['availableBytes']-=1
+        self.assertEqual(F.restore_space_plan(100,200,restore,[database])['status'],'INSUFFICIENT')
+
+    def test_external_wal_or_tablespace_has_its_own_reserve_without_duplicate_same_disk_cost(self):
+        restore={'device':1,'availableBytes':5*100+F.RESTORE_RESERVE}
+        database={'device':2,'availableBytes':8*200+F.RESTORE_RESERVE}
+        wal={'device':3,'availableBytes':8*200+F.RESTORE_RESERVE-1}
+        plan=F.restore_space_plan(100,200,restore,[database,wal,database])
+        self.assertEqual(plan['status'],'INSUFFICIENT')
+        self.assertEqual(len(plan['filesystems']),3)
+        self.assertEqual(plan['filesystems'][1]['peakBytes'],8*200)
+
+    def test_state_size_counts_only_selected_snapshot_not_raw_sibling_or_stage_again(self):
+        staging=self.root/'staging'; snapshot=staging/'snapshot'; snapshot.mkdir(parents=True)
+        (snapshot/'original').write_bytes(b'x'*1025)
+        raw=staging/'raw'; raw.mkdir(); (raw/'evidence').write_bytes(b'r'*32768)
+        self.assertEqual(F.staged_state_bytes(snapshot),1025)
+        fs={'device':1,'availableBytes':10**12}
+        plan=F.restore_space_plan(F.staged_state_bytes(snapshot),200,fs,[fs])
+        self.assertEqual(plan['filesystems'][0]['peakBytes'],5*1025+8*200)
+
+    def backup_size_proof(self):
+        database=self.root/'selected-db.enc'; database.write_bytes(b'synthetic cipher database')
+        index=self.root/'selected-index.enc'; index.write_bytes(b'synthetic cipher snapshot index')
+        record={'snapshotId':'20261027T120000+0800','stateBytes':123456,'indexSha256':F.sha(index.read_bytes()),'databaseSha256':F.sha(database.read_bytes())}
+        log=self.root/'backup.log'; log.write_bytes(encoded(record)+b'\nCOMPLETE_BACKUP_EXPORT_OK\n')
+        return database,index,record,log
+
+    def test_successful_snapshot_size_is_bound_to_both_exact_selected_cipher_archives(self):
+        database,index,record,log=self.backup_size_proof()
+        self.assertEqual(F.successful_backup_state_bytes(log,record['snapshotId'],database,index),123456)
+        index.write_bytes(b'changed selected index')
+        with self.assertRaisesRegex(ValueError,'matches'):
+            F.successful_backup_state_bytes(log,record['snapshotId'],database,index)
+
+    def test_successful_size_proof_rejects_duplicate_missing_or_malformed_fields(self):
+        database,index,record,log=self.backup_size_proof()
+        log.write_bytes(encoded(record)+b'\n'+encoded(record)+b'\n')
+        with self.assertRaisesRegex(ValueError,'Exactly one'):
+            F.successful_backup_state_bytes(log,record['snapshotId'],database,index)
+        for field,value in [('stateBytes',True),('stateBytes',0),('indexSha256','x'),('databaseSha256',None)]:
+            bad={**record,field:value};log.write_bytes(encoded(bad))
+            with self.subTest(field=field,value=value),self.assertRaisesRegex(ValueError,'Malformed'):
+                F.successful_backup_state_bytes(log,record['snapshotId'],database,index)
+        del record['stateBytes'];log.write_bytes(encoded(record))
+        with self.assertRaisesRegex(ValueError,'Malformed'):
+            F.successful_backup_state_bytes(log,record['snapshotId'],database,index)
+
+    def test_different_staged_snapshot_fails_before_sizing_or_any_restore(self):
+        snapshot=self.root/'snapshot';manifest=snapshot/'var/lib/hotel-ai-os/backup-core-originals-manifest.json'
+        manifest.parent.mkdir(parents=True)
+        manifest.write_bytes(encoded({'schemaVersion':1,'bundleType':'CORE_AND_OTA_STATE_WITH_ORIGINALS','snapshotId':'20261027T120000+0800'}))
+        with patch.object(F,'staged_state_bytes') as measure:
+            for selected in ('20261027T130000+0800','../bad'):
+                with self.subTest(selected=selected),self.assertRaises(ValueError): F.selected_snapshot_bytes(snapshot,selected)
+            measure.assert_not_called()
+
+    def test_successful_snapshot_size_prevents_shrunk_stage_underestimation(self):
+        database,index,record,log=self.backup_size_proof()
+        proof_size=F.successful_backup_state_bytes(log,record['snapshotId'],database,index)
+        state_size=max(proof_size,1)
+        fs={'device':1,'availableBytes':5*proof_size+8*200+F.RESTORE_RESERVE-1}
+        self.assertEqual(F.restore_space_plan(state_size,200,fs,[fs])['status'],'INSUFFICIENT')
+
 if __name__=='__main__': unittest.main()

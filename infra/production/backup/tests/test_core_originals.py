@@ -88,8 +88,9 @@ class CoreOriginalsTest(unittest.TestCase):
   source=(MODULE.parent/'backup-postgres.sh').read_text()
   copies=[line for line in source.splitlines() if line.startswith('rsync ') and '"${source_core}/"' in line]
   self.assertEqual(len(copies),2,'Both the online bulk copy and quiesced final copy must preserve source metadata')
+  self.assertIn('core_rsync_options=(-aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices)',source)
   for line in copies:
-   self.assertTrue(line.startswith('rsync -aHAX --numeric-ids '),line)
+   self.assertTrue(line.startswith('rsync "${core_rsync_options[@]}" '),line)
    self.assertIn('"${stage_core}/"',line)
    self.assertNotIn('--no-acls',line);self.assertNotIn('--no-xattrs',line)
  def test_restore_never_targets_live_database_or_original_root(self):

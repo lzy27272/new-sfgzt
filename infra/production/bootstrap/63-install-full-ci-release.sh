@@ -101,17 +101,26 @@ cleanup(){
   if test "$result" -ne 0; then printf 'FULL_CI_RELEASE_FAILED releaseId=%s evidence=%s\n' "$release_id" "$proof" >&2; fi
   exit "$result"
 }
+hold_backup_lock(){
+  exec 9>/run/lock/hotel-ai-os-backup.lock
+  flock -n 9 || fail 'Another backup holds the selected snapshot staging lock'
+}
+release_backup_lock(){ flock -u 9; exec 9>&-; }
+check_restore_capacity(){ python3 -I "$VERIFIER" restore-capacity --snapshot "$2" --backup-log "$proof/backup.log" >"$proof/restore-capacity-$1.json"; }
 backup_restore_and_rehearse(){
   "$BACKUP" >"$proof/backup.log" 2>&1
   grep -Fxq COMPLETE_BACKUP_EXPORT_OK "$proof/backup.log"
+  hold_backup_lock || return 1
   local snapshot db state before after
   snapshot="$(sed -n 's/^pairedOriginalsSnapshot=\([^ ]*\) type=CORE_AND_OTA_STATE_WITH_ORIGINALS$/\1/p' "$proof/backup.log")"
   [[ "$snapshot" =~ ^[0-9]{8}T[0-9]{6}[+-][0-9]{4}$ ]]
   db="/var/backups/hotel-ai-os/postgres/daily/hotel_ai_os-daily-${snapshot}.dump.enc"
   state="/var/backups/sifangguan-ota/state/daily/sifangguan-ota-state-daily-${snapshot}.snapshot.json.enc"
   if test ! -f "$state"; then state="/var/backups/sifangguan-ota/state/daily/sifangguan-ota-state-daily-${snapshot}.tar.gz.enc"; fi
+  check_restore_capacity originals "$snapshot" || return 1
   "$RESTORE" "$db" "$state" "$snapshot" >"$proof/paired-originals-restore.log" 2>&1
   grep -Fq "PAIRED_DATABASE_ORIGINALS_RESTORE_OK snapshot=$snapshot " "$proof/paired-originals-restore.log"
+  check_restore_capacity migration "$snapshot" || return 1
   clone="hotel_ai_os_full_ci_$(date +%s)_$$"
   test "$(sudo -u postgres psql -XAt --set ON_ERROR_STOP=1 --dbname postgres --command "select count(*) from pg_database where datname='$clone'")" = 0
   sudo -u postgres createdb --owner hotel_ai_os_owner "$clone"; clone_created=true
@@ -127,6 +136,7 @@ backup_restore_and_rehearse(){
   cmp --silent "$proof/references-before.json" "$proof/references-after.json"
   printf 'FULL_CI_CLONE_MIGRATION_PASS before=%s after=%s originals=UNCHANGED\n' "$before" "$after" >"$proof/clone-result.txt"
   drop_clone
+  release_backup_lock
 }
 install_candidate(){ "$LIBRARY/60-install-release.sh" "$release_id" "$source_commit" "$jar_sha" "$runner_sha" "$index_sha" "$web_tree_sha"; }
 migrate_live(){

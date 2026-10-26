@@ -6,6 +6,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shlex
+import socket
 import shutil
 import subprocess
 import struct
@@ -79,6 +82,24 @@ class StateSnapshotsTest(unittest.TestCase):
         self.assertEqual((new / self.photo.relative_to(self.source)).read_bytes(), self.photo.read_bytes())
         self.assertEqual(proof["restore"], "STATE_CONTENT_PASS")
         self.assertEqual(proof["indexSha256"], S.sha(first))
+
+    def test_successful_create_stdout_binds_actual_state_bytes_to_selected_encrypted_archives(self):
+        index, database, result = self.capture()
+        expected = sum(path.stat().st_size for path in self.source.rglob("*") if path.is_file())
+        self.assertEqual(result["snapshotId"], "20261025T010000+0800")
+        self.assertEqual(result["stateBytes"], expected)
+        self.assertEqual(result["indexSha256"], S.sha(index))
+        self.assertEqual(result["databaseSha256"], S.sha(database))
+        self.assertNotIn("kind", result)
+        frozen = S.read_index(index, self.key)
+        self.assertEqual(result["stateBytes"], sum(row["bytes"] for row in frozen["files"] if row["kind"] == "file"))
+        # A later/failed backup can shrink mutable staging while the completed
+        # archive and its success JSON still describe the original full state.
+        self.photo.write_bytes(b"smaller later staging")
+        current = sum(path.stat().st_size for path in self.source.rglob("*") if path.is_file())
+        self.assertGreater(result["stateBytes"], current)
+        self.assertEqual(result["indexSha256"], S.sha(index))
+        self.assertEqual(result["databaseSha256"], S.sha(database))
 
     def test_rename_delete_does_not_erase_previous_snapshot_and_dedups_duplicate_content(self):
         first, db, _ = self.capture()
@@ -360,7 +381,7 @@ class StateSnapshotsTest(unittest.TestCase):
         self.assertEqual(result["filesystems"][0]["requiredBytes"], S.CAPACITY_RESERVE + 2*S.PACK_LIMIT + 300 + 64 + 80)
         self.assertFalse(result["compressionAssumed"])
         script = (BASE / "backup-postgres.sh").read_text()
-        self.assertLess(script.index("\ncheck_backup_capacity\n"), script.index('rsync "${state_rsync_options[@]}"'))
+        self.assertLess(script.index("\ncheck_backup_capacity\n"), script.index('\nrsync "${state_rsync_options[@]}"'))
         self.assertLess(script.rindex("\ncheck_backup_capacity\n"), script.index("quiesced=true"))
 
     def test_atomic_bundle_is_authoritative_over_torn_legacy_pair_and_never_silently_falls_back(self):
@@ -451,6 +472,191 @@ class StateSnapshotsTest(unittest.TestCase):
         result=S.prune_raw_dates(raw,90)
         self.assertEqual((result["retainedSourceDates"],result["retainedArtifacts"],result["removed"]),(90,181,4))
         self.assertTrue(legacy.is_file())
+
+
+class CapacityMeasurementTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="backup-capacity-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.serial = 0
+
+    def lengths(self, values):
+        self.serial += 1
+        path = self.base / (str(self.serial) + ".lengths")
+        path.write_text("".join(str(value) + "\n" for value in values), encoding="ascii")
+        return path
+
+    def measure(self, state, core=(), raw=(), completed=(), pending=(), days=0):
+        return S.capacity_measurements(*(self.lengths(values) for values in (state, core, raw, completed, pending)), days)
+
+    def check(self, m, db=100, free=10**15):
+        with mock.patch.object(S.shutil, "disk_usage", return_value=types.SimpleNamespace(free=free)):
+            return S.check_capacity(self.base, self.base, self.base, self.base, m["stateBytes"], db,
+                                    self.base, m["rawBytes"], m)
+
+    def test_large_real_tree_uses_selected_file_sizes_not_whole_tree_for_temporary_pack(self):
+        tree = self.base / "tree"
+        tree.mkdir()
+        paths = []
+        for number in range(1200):
+            path = tree / (str(number) + ".bin")
+            path.write_bytes(bytes([number % 255]) * (1000 + number % 900))
+            paths.append(path)
+        m = self.measure([path.stat().st_size for path in paths])
+        self.assertEqual(m["stateEntries"], 1200)
+        self.assertEqual(m["stateBytes"], sum(path.stat().st_size for path in paths))
+        self.assertEqual(m["stateMaxFileBytes"], max(path.stat().st_size for path in paths))
+        # Includes all-new content, headers and a 128MiB generated-manifest allowance.
+        self.assertGreater(m["newStatePackBytes"], m["stateBytes"] + S.MAX_INDEX)
+
+    def test_realistic_five_gigabyte_tree_fits_without_compression_or_dedup_discount(self):
+        size, raw, pending = 5019996180, 12238019573, 5309658495
+        chunk = 4 * 1024**2
+        state = [chunk] * (size // chunk) + [size % chunk]
+        per_day = raw // 60
+        raw_sizes = [per_day] * 59 + [raw - per_day * 59]
+        m = self.measure(state, raw=raw_sizes, completed=raw_sizes, pending=[pending], days=60)
+        result = self.check(m, db=287996951, free=64289742848)
+        required = result["filesystems"][0]["requiredBytes"]
+        self.assertGreater(required, 59 * 10**9)
+        self.assertLess(required, 62 * 10**9)
+        self.assertFalse(result["compressionAssumed"])
+        self.assertEqual(result["reserveBytesPerFilesystem"], 4 * 1024**3)
+        self.assertLess(m["largestStatePackBytes"], 300 * 1024**2)
+        self.assertGreater(m["newStatePackBytes"], size)
+
+    def test_large_single_file_reserves_its_full_temporary_pack(self):
+        large = 10 * 1024**3
+        m = self.measure([large, 17])
+        self.assertGreater(m["largestStatePackBytes"], large)
+        result = self.check(m)
+        self.assertGreater(result["filesystems"][0]["requiredBytes"], 4 * large)
+        with self.assertRaisesRegex(ValueError, "CAPACITY_INSUFFICIENT"):
+            self.check(m, free=4 * 1024**3 + large)
+
+    def test_pack_bounds_are_independent_of_rsync_and_inventory_order(self):
+        values = [60, 40, 60, 40, 99, 1, 1, 98, 2]
+        results = []
+        with mock.patch.object(S, "PACK_LIMIT", 100), mock.patch.object(S, "MAX_INDEX", 17):
+            for order in (values, list(reversed(values)), sorted(values), values[3:] + values[:3]):
+                m = self.measure(order)
+                results.append((m["newStatePackBytes"], m["largestStatePackBytes"]))
+                batches, batch, size = [], [], 0
+                for value in order + [17]:
+                    if batch and size + value > 100:
+                        batches.append(batch); batch, size = [], 0
+                    batch.append(value); size += value
+                if batch:
+                    batches.append(batch)
+                actual_upper = []
+                for group in batches:
+                    payload = sum(((value + 511) // 512) * 512 + 4096 for value in group)
+                    tar_size = ((payload + 1024 + 10239) // 10240) * 10240
+                    actual_upper.append(S.gzip_upper_bound(tar_size) + 64)
+                self.assertLessEqual(sum(actual_upper), m["newStatePackBytes"])
+                self.assertLessEqual(max(actual_upper), m["largestStatePackBytes"])
+        self.assertEqual(len(set(results)), 1)
+
+    def test_staged_files_do_not_get_reserved_again_and_deletion_does_not_free_budget(self):
+        pending = self.measure([123456], raw=[12345], completed=[12345], pending=[123456, 12345], days=1)
+        staged = self.measure([123456], raw=[12345], completed=[12345], pending=[], days=1)
+        a, b = self.check(pending), self.check(staged)
+        self.assertEqual(a["filesystems"][0]["requiredBytes"] - b["filesystems"][0]["requiredBytes"], 123456 + 12345)
+        self.assertEqual(pending["newStatePackBytes"], staged["newStatePackBytes"])
+        # No planned deletions, retention quota or existing pack catalogue enters the measurement.
+        self.assertEqual(staged["stagePendingBytes"], 0)
+
+    def test_completed_raw_only_changes_archive_and_export_not_all_date_staging(self):
+        m = self.measure([1000], raw=[100, 200, 300], completed=[100, 200], pending=[600], days=2)
+        self.assertEqual((m["rawBytes"], m["rawCompletedBytes"], m["stagePendingBytes"]), (600, 300, 600))
+        all_days = self.measure([1000], raw=[100, 200, 300], completed=[100, 200, 300], pending=[600], days=3)
+        self.assertGreater(self.check(all_days)["filesystems"][0]["requiredBytes"], self.check(m)["filesystems"][0]["requiredBytes"])
+
+    def test_same_filesystem_sums_roles_once_and_low_space_does_not_mutate_files(self):
+        m = self.measure([1234, 555], raw=[4321], completed=[4321], pending=[111], days=1)
+        actual = self.check(m, db=100)["filesystems"]
+        self.assertEqual(len(actual), 1)
+        expected = (S.CAPACITY_RESERVE + 2 * m["newStatePackBytes"] + 2 * m["largestStatePackBytes"] +
+                    9 * S.MAX_INDEX + 8 * 100 + m["stagePendingBytes"] + 3 * m["rawArchiveBytes"])
+        self.assertEqual(actual[0]["requiredBytes"], expected)
+        before = {p: p.read_bytes() for p in self.base.iterdir() if p.is_file()}
+        with self.assertRaisesRegex(ValueError, "before writer stop/prune"):
+            self.check(m, db=100, free=expected - 1)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.iterdir() if p.is_file()})
+
+    def test_numeric_logs_and_mismatched_measurements_fail_closed(self):
+        for content in ("12\nfilename\n", "-100\n", "1,234\n", "4\ndeleting secret\n", "1\n\n"):
+            path = self.lengths([])
+            path.write_text(content, encoding="ascii")
+            with self.assertRaises(ValueError):
+                S.numeric_lengths(path)
+        m = self.measure([1234])
+        for key, value in (("stateBytes", 1), ("largestStatePackBytes", 0), ("stagePendingBytes", -1), ("newStatePackBytes", 5)):
+            tampered = {**m, key: value}
+            with self.assertRaises(ValueError):
+                S.check_capacity(self.base, self.base, self.base, self.base, 1234, 100, self.base, 0, tampered)
+
+    def test_machine_operations_count_sends_and_receives_without_any_deletion_credit(self):
+        path = self.lengths([])
+        path.write_text("send 123\nrecv 456\ndel. 999999999\nsend 0\n", encoding="ascii")
+        self.assertEqual(S.numeric_lengths(path), [123, 456, 0])
+        for content in ("*deleting private-name\n", "created directory private-target\n", "del. 1 private-name\n", "send -1\n", "unknown 100\n",
+                        "send 1\nprivate-name\n", "skipping non-regular file private-name\n", "del. 9223372036854775808\n"):
+            path.write_text(content, encoding="ascii")
+            with self.assertRaises(ValueError):
+                S.numeric_lengths(path)
+
+    @unittest.skipIf(os.name == "nt" and not shutil.which("rsync"), "Windows host lacks native rsync; Linux CI must run this contract")
+    def test_native_rsync_selection_pending_and_deleted_filename_are_numeric_only(self):
+        self.assertIsNotNone(shutil.which("rsync"), "Linux backup contract requires actual rsync, never a silent skip")
+        script = (BASE / "backup-postgres.sh").read_text()
+        def options(name):
+            match = re.search(name + r"=\((.*?)\)", script, re.S)
+            self.assertIsNotNone(match)
+            return shlex.split(match[1])
+        state_options, raw_options = options("state_rsync_options"), options("raw_rsync_options")
+        source, raw, target = (self.base / name for name in ("native-source", "native-raw", "native-stage"))
+        source.mkdir(); raw.mkdir(); target.mkdir()
+        for relative, content in (("profile/Cookies", b"keep-session"), ("profile/Cache/drop.bin", b"cache" * 100),
+                                  ("analytics-retention/raw/drop.enc", b"raw-not-in-state")):
+            path = source / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(content)
+        (source / "empty-directory").mkdir()
+        os.mkfifo(source / "profile/special-fifo")
+        special_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(special_socket.close)
+        special_socket.bind(str(source / "profile/special-socket"))
+        for relative in ("2026-10-25/keep.enc", "2026-10-25/drop.txt", "2026-10-27/today.enc"):
+            path = raw / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b"12345")
+        def dry(arguments, src, dst):
+            env = {**os.environ, "LC_ALL": "C"}
+            # Match production: an existing empty destination avoids rsync's
+            # independent human 'created directory' stdout status record.
+            dst.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(["rsync", *arguments, "--dry-run", "--info=NONE,NAME1", "--out-format=%o %l", str(src) + "/", str(dst) + "/"],
+                                    check=True, capture_output=True, text=True, env=env)
+            self.last_dry_output = result.stdout
+            path = self.lengths([]); path.write_text(result.stdout, encoding="ascii")
+            return S.numeric_lengths(path)
+        fresh = dry(state_options, source, self.base / "fresh-destination")
+        self.assertIn(len(b"keep-session"), fresh)
+        self.assertNotIn(len(b"cache" * 100), fresh)
+        subprocess.run(["rsync", *state_options, str(source) + "/", str(target) + "/"], check=True, capture_output=True)
+        (target / "stale-filename-with-newline\nnot-a-number").write_bytes(b"never deletion credit")
+        (target / "old-cache/nested").mkdir(parents=True)
+        (target / "old-cache/nested/stale.bin").write_bytes(b"deleted bytes are not available credit")
+        pending = dry(state_options, source, target)
+        self.assertIn("del. ", self.last_dry_output)
+        self.assertNotIn("stale-filename", self.last_dry_output)
+        self.assertNotIn("special-fifo", self.last_dry_output)
+        self.assertNotIn("created ", self.last_dry_output)
+        self.assertFalse((target / "profile/special-fifo").exists())
+        self.assertFalse((target / "profile/special-socket").exists())
+        self.assertLess(sum(pending), sum(fresh))
+        self.assertFalse((target / "profile/Cache/drop.bin").exists())
+        raw_fresh = dry(raw_options, raw, self.base / "fresh-raw")
+        self.assertEqual(raw_fresh.count(5), 2)
+        self.assertEqual(dry(raw_options, raw / "2026-10-25", self.base / "fresh-completed").count(5), 1)
 
 
 if __name__ == "__main__":
