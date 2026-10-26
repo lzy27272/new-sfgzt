@@ -12,6 +12,7 @@ import { OwnDailyReportShortcut, TeamDailyReportShortcut } from './DailyReportSh
 import { DailyReportTodo } from './DailyReportTodo'
 import { AcademyTodo } from '../academy/AcademyTodo'
 import { ProcurementTodo } from '../procurement/ProcurementTodo'
+import { FinanceTodo } from '../finance/FinanceTodo'
 import { canProcure } from '../procurement/model'
 import { AiRuleReference } from '../aiEvidence/AiRuleReference'
 import { ManagerCycles, cycleType } from './ManagerCycles'
@@ -109,6 +110,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
         {canReadNotices && <button className="secondary" onClick={() => go('notifications')}>消息提醒{unreadNotices.length ? ' ' + unreadNotices.length : ''}</button>}
       </div></header>
     {navigation}
+    {['finance.submit', 'finance.review', 'finance.pay', 'finance.configure', 'finance.read', 'finance.accounting.review', 'finance.accounting.post', 'finance.archive.grant'].some(code => allows(permissions, code)) && <FinanceTodo key={identity.key} identity={identity} go={go} />}
     {allows(permissions, 'academy.learn') && allows(permissions, 'ui.module.academy') && <AcademyTodo identity={identity} go={go} />}
     {canProcure(permissions) && <ProcurementTodo key={identity.key} identity={identity} go={go} />}
     {managerCycles && <ManagerCycles key={identity.key} identity={identity} routeParams={routeParams} go={go} />}

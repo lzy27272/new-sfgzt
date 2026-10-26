@@ -33,4 +33,18 @@ class FinanceRulesTest {
             assertThatThrownBy(()->FinanceEvidenceService.inspect(bytes.toByteArray(),"application/pdf")).isInstanceOf(RuntimeException.class).hasMessageContaining("脚本");
         }
     }
+    @Test void acceptsOriginalXmlAndOfdButBlocksExternalEntitiesAndZipTraversal() throws Exception {
+        byte[] xml="<Invoice><Text>发票号码：00123456789012345678</Text></Invoice>".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(FinanceEvidenceService.mediaType(xml)).isEqualTo("application/xml");
+        assertThat(FinanceEvidenceService.inspect(xml,"application/xml")).containsEntry("source","XML_TEXT").containsEntry("externalVerificationStatus","NOT_VERIFIED");
+        byte[] xxe="<!DOCTYPE Invoice [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><Invoice>&xxe;</Invoice>".getBytes();
+        assertThatThrownBy(()->FinanceEvidenceService.mediaType(xxe)).hasMessageContaining("不安全");
+        var bytes=new ByteArrayOutputStream();try(var zip=new java.util.zip.ZipOutputStream(bytes)) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("OFD.xml"));zip.write("<OFD/>".getBytes());zip.closeEntry();
+            zip.putNextEntry(new java.util.zip.ZipEntry("Doc_0/Pages/Page_0/Content.xml"));zip.write(xml);zip.closeEntry();
+        }
+        assertThat(FinanceEvidenceService.mediaType(bytes.toByteArray())).isEqualTo("application/ofd");
+        bytes.reset();try(var zip=new java.util.zip.ZipOutputStream(bytes)) {zip.putNextEntry(new java.util.zip.ZipEntry("../OFD.xml"));zip.write("<OFD/>".getBytes());zip.closeEntry();}
+        assertThatThrownBy(()->FinanceEvidenceService.mediaType(bytes.toByteArray())).hasMessageContaining("不安全");
+    }
 }

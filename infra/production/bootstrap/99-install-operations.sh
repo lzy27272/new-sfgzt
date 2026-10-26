@@ -2,7 +2,14 @@
 set -Eeuo pipefail
 
 stage=/tmp/hotel-ai-os-release
+for helper in core-originals-manifest.py core-state-snapshots.py rehearse-core-originals-restore.sh; do
+  test -f "${stage}/${helper}" && test ! -L "${stage}/${helper}"
+done
 install -d -o root -g root -m 0755 /usr/local/lib/hotel-ai-os
+for helper in core-originals-manifest.py core-state-snapshots.py rehearse-core-originals-restore.sh; do
+  install -o root -g root -m 0750 "${stage}/${helper}" "/usr/local/lib/hotel-ai-os/${helper}"
+done
+install -o root -g root -m 0640 "${stage}/core-originals-reference.sql" /usr/local/lib/hotel-ai-os/core-originals-reference.sql
 install -o root -g root -m 0750 \
   "${stage}/backup-postgres.sh" \
   /usr/local/lib/hotel-ai-os/backup-postgres.sh
@@ -29,6 +36,9 @@ done
 bash -n /usr/local/lib/hotel-ai-os/backup-postgres.sh
 bash -n /usr/local/lib/hotel-ai-os/configure-backup-pull.sh
 python3 -m py_compile /usr/local/lib/hotel-ai-os/publish-backup-manifest.py
+python3 -m py_compile /usr/local/lib/hotel-ai-os/core-originals-manifest.py
+python3 -m py_compile /usr/local/lib/hotel-ai-os/core-state-snapshots.py
+bash -n /usr/local/lib/hotel-ai-os/rehearse-core-originals-restore.sh
 bash -n /usr/local/lib/hotel-ai-os/health-check.sh
 systemd-analyze verify \
   /etc/systemd/system/hotel-ai-os-postgres-backup.service \

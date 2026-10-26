@@ -467,7 +467,7 @@ public class StoreResourceService {
                 baseUnit, BigDecimal.ONE, quantity, key, sha256(key), "PROCUREMENT", receiptId, receivedValue);
     }
 
-    private Map<String, Object> postMovementFact(TenantPrincipal principal, UUID hotelId,
+    Map<String, Object> postMovementFact(TenantPrincipal principal, UUID hotelId,
             StoreResourceModels.CreateMovementRequest request, Map<String, Object> item, String type,
             BigDecimal inputQuantity, StoreItemUnits units, String inputUnit, BigDecimal factor,
             BigDecimal delta, String key, String requestHash, String sourceType, UUID sourceId, BigDecimal reversalValue) {

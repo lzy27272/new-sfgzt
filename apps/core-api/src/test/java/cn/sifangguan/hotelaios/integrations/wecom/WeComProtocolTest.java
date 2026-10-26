@@ -45,6 +45,10 @@ class WeComProtocolTest {
     @Test
     void rejectsUnsafeOrTasklessReturnTargets() {
         String task = UUID.randomUUID().toString();
+        assertThat(WeComOAuthService.validateReturnTo("#/finance?tab=review&id="+task)).isEqualTo("#/finance?tab=review&id="+task);
+        assertThat(WeComDeliveryWorker.returnToFor("FINANCE",UUID.fromString(task),"FINANCE_REVIEW_PENDING")).isEqualTo("#/finance?tab=review&id="+task);
+        assertThatThrownBy(()->WeComOAuthService.validateReturnTo("#/finance?tab=configuration&id="+task)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(()->WeComOAuthService.validateReturnTo("#/finance?tab=review&id="+task+"&id="+task)).isInstanceOf(IllegalArgumentException.class);
         assertThat(WeComOAuthService.validateReturnTo("#/tasks?view=mine&taskId=" + task))
                 .isEqualTo("#/tasks?view=mine&taskId=" + task);
         assertThat(WeComOAuthService.validateReturnTo("#/daily-reports/" + task))

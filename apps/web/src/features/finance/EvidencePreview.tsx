@@ -25,7 +25,7 @@ export function EvidencePreview({ identity, claimId, evidence }: { identity: Api
   return <div className={s.evidenceCard} ref={container}>
     <div className={s.preview}>{url ? evidence.media_type.startsWith('image/')
       ? <img src={url} alt={evidence.original_name} />
-      : <><iframe title={`PDF凭证 ${evidence.original_name}`} src={url} sandbox="" /><small>若手机未显示PDF，请下载原件查看</small></>
+      : evidence.media_type === 'application/pdf' ? <><iframe title={`PDF凭证 ${evidence.original_name}`} src={url} sandbox="" /><small>若手机未显示PDF，请下载原件查看</small></> : <span>原件已保存。此格式不在浏览器内展示，请下载至可信查看器核对。</span>
       : <span>{error || '正在读取原始凭证…'}</span>}</div>
     <strong>{evidence.original_name}</strong><small>{(evidence.size_bytes / 1024).toFixed(0)} KB · 原件保留</small>
     <button type="button" onClick={() => void financeDownload(identity, `/claims/${claimId}/attachments/${evidence.id}`, evidence.original_name).catch(e => setError(errorMessage(e)))}>下载原件</button>

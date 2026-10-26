@@ -460,6 +460,71 @@ class OrganizationMaintenanceIntegrationTest {
         assertThat(activeOperationalAllocationCount(replacementId)).isZero();
     }
 
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void actualEmploymentExitBlocksOutstandingLoanWithoutDisclosingMoneyButAssignmentChangeIsAllowed() throws Exception {
+        String suffix=UUID.randomUUID().toString().substring(0,8);
+        UUID employee=UUID.fromString(json(postJson("/api/v1/org/employees",CEO,"""
+                {"employeeNo":"LOAN-EXIT-%s","name":"借款离职守卫员工","employeeType":"REGULAR",
+                 "loginName":"loan.exit.%s","temporaryPassword":"TempPass!2026"}
+                """.formatted(suffix,suffix))).path("id").asText());
+        UUID account=jdbc.queryForObject("select account_id from employee where id=?",UUID.class,employee);
+        UUID assignment=UUID.fromString(json(postJson("/api/v1/org/employees/"+employee+"/assignments",CEO,"""
+                {"orgUnitId":"%s","positionId":"%s","primary":true,"assignmentType":"PERMANENT","validFrom":"%s"}
+                """.formatted(FRONT_OFFICE,FRONT_OFFICE_SUPERVISOR_POSITION,LocalDate.now()))).path("id").asText());
+        UUID loan=actualLoanForEmployee(account);
+        deleteJson("/api/v1/org/assignments/"+assignment,CEO,204);
+        assertThat(jdbc.queryForObject("select employment_status from employee where id=?",String.class,employee)).isEqualTo("ACTIVE");
+        String inactive="""
+                {"employeeNo":"LOAN-EXIT-%s","name":"借款离职守卫员工","employeeType":"REGULAR",
+                 "employmentStatus":"INACTIVE","loginName":"loan.exit.%s"}
+                """.formatted(suffix,suffix);
+        var blocked=putJson("/api/v1/org/employees/"+employee,CEO,inactive,409);
+        // Organization currently uses Servlet sendError for ResponseStatusException, not a JSON body.
+        assertThat(blocked.getResponse().getErrorMessage()).isEqualTo("存在未清借款，请联系财务核对");
+        assertThat(blocked.getResolvedException()).isInstanceOf(org.springframework.web.server.ResponseStatusException.class);
+        assertThat(((org.springframework.web.server.ResponseStatusException)blocked.getResolvedException()).getReason()).isEqualTo("存在未清借款，请联系财务核对");
+        assertThat(blocked.getResponse().getContentAsString()).doesNotContain("50.00",loan.toString(),account.toString());
+        assertThat(jdbc.queryForObject("select employment_status from employee where id=?",String.class,employee)).isEqualTo("ACTIVE");
+        assertThat(jdbc.queryForObject("select status from user_account where id=?",String.class,account)).isEqualTo("ACTIVE");
+        actualLoanRepayment(loan);
+        putJson("/api/v1/org/employees/"+employee,CEO,inactive,200);
+        deleteJson("/api/v1/org/employees/"+employee,CEO,204);
+        assertThat(jdbc.queryForObject("select count(*) from fo_action where document_id=?",Integer.class,loan)).isEqualTo(2);
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void historicalInactiveAndRecycleBinEmployeesCannotBypassLoanCheckOnDeletion() throws Exception {
+        String suffix=UUID.randomUUID().toString().substring(0,8);
+        UUID employee=UUID.fromString(json(postJson("/api/v1/org/employees",CEO,"""
+                {"employeeNo":"OLD-LOAN-%s","name":"历史借款员工","employeeType":"REGULAR",
+                 "loginName":"old.loan.%s","temporaryPassword":"TempPass!2026"}
+                """.formatted(suffix,suffix))).path("id").asText());
+        UUID account=jdbc.queryForObject("select account_id from employee where id=?",UUID.class,employee),loan=actualLoanForEmployee(account);
+        // Simulate historical inactive data, not an HR settlement or bypass of the new endpoint.
+        jdbc.update("update employee set employment_status='INACTIVE' where id=?",employee);
+        deleteJson("/api/v1/org/employees/"+employee,CEO,409);
+        jdbc.update("update employee set deleted_at=now(),deleted_by=? where id=?",UUID.fromString(CEO),employee);
+        deleteJson("/api/v1/org/employees/"+employee+"/permanent",CEO,409);
+        assertThat(jdbc.queryForObject("select permanently_deleted_at is null from employee where id=?",Boolean.class,employee)).isTrue();
+        actualLoanRepayment(loan);
+        deleteJson("/api/v1/org/employees/"+employee+"/permanent",CEO,204);
+    }
+
+    private UUID actualLoanForEmployee(UUID account) {
+        UUID company=UUID.randomUUID(),loan=UUID.randomUUID();
+        jdbc.update("insert into finance_company(id,tenant_id,name,tax_number) values(?,?,'借款实际主体',?)",company,UUID.fromString(TENANT),company.toString().replace("-",""));
+        jdbc.update("insert into fo_document(id,tenant_id,hotel_id,applicant_id,company_id,type,title,business_date,amount,details,lines,status) values(?,?,?,?,?,'LOAN','真实已发放员工借款',current_date,50,cast(? as jsonb),'[]','APPROVED')",loan,UUID.fromString(TENANT),UUID.fromString(HOTEL),account,company,"{\"borrowerAccountId\":\""+account+"\"}");
+        jdbc.update("insert into fo_action(tenant_id,document_id,actor_id,action,amount,occurred_on,reference,request_id) values(?,?,?,'PAYMENT',50,current_date,'既有财务真实发放原记录',?)",UUID.fromString(TENANT),loan,UUID.fromString(CEO),UUID.randomUUID());
+        return loan;
+    }
+
+    private void actualLoanRepayment(UUID loan) {
+        // An existing financial repayment fact is distinct from the tested HR action.
+        jdbc.update("insert into fo_action(tenant_id,document_id,actor_id,action,amount,occurred_on,reference,request_id) values(?,?,?,'REPAYMENT',50,current_date,'财务另行确认的真实还款',?)",UUID.fromString(TENANT),loan,UUID.fromString(CEO),UUID.randomUUID());
+    }
+
     private void assertOneActiveOperationalAllocation(UUID assignmentId, String definitionCode) {
         assertThat(jdbc.queryForObject("""
                 select count(*)

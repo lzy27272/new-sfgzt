@@ -114,7 +114,7 @@ try {
     if ($downloads.Count -gt 0) {
         $stage = 'DOWNLOAD_BACKUPS'
         $transfers = @($downloads | ForEach-Object { [pscustomobject]@{ Remote = $_.Remote; Local = $_.Local } })
-        Invoke-BackupSftpGet $connection $root $keyPath $knownHosts $transfers
+        Invoke-BackupSftpBatches $connection $root $keyPath $knownHosts $transfers
     }
     $stage = 'VERIFY_BACKUPS'
     $quarantineRun = $null
@@ -138,6 +138,30 @@ try {
         $verified[[string]$download.Entry.path] = $true
     }
 
+    # Receipt and atomic acceptance precede ALL stale object/history cleanup.
+    # Missing closure files or a failed receipt must not erase an accepted point.
+    $stage = 'VERIFY_RECEIPT'
+    $receiptName = 'control/receipt-' + [guid]::NewGuid().ToString('N') + '.incoming.json'
+    $receiptIncoming = Join-Path $root ($receiptName.Replace('/', '\'))
+    Invoke-BackupSftpGet $connection $root $keyPath $knownHosts @(
+        [pscustomobject]@{ Remote = '/' + [string]$manifest.receiptPath; Local = $receiptName }
+    )
+    $receipt = Read-BackupPullJson $receiptIncoming 16384
+    if ($receipt.kind -cne 'SFG_BACKUP_RECEIPT_TOKEN_V1' -or $receipt.manifestId -cne $manifest.manifestId) {
+        throw '服务器回执令牌与已验证清单不一致。'
+    }
+    $stage = 'COMMIT_ACCEPTED_BUNDLE'
+    # One flushed, atomic replacement is authoritative; the two legacy files
+    # below may be torn after a crash and are compatibility/display only.
+    Write-BackupPullJsonAtomic (Join-Path $root 'control\accepted-bundle.json') ([pscustomobject][ordered]@{
+        kind='SFG_ACCEPTED_BACKUP_BUNDLE_V1'; schemaVersion=1
+        manifest=$manifest; receipt=$receipt
+    })
+    $stage = 'WRITE_COMPATIBILITY_FILES'
+    Write-BackupPullJsonAtomic (Join-Path $root 'control\accepted-manifest.json') $manifest
+    Write-BackupPullJsonAtomic (Join-Path $root 'control\last-receipt.json') $receipt
+    Remove-Item -LiteralPath $manifestIncoming, $receiptIncoming -Force
+    $stage = 'PRUNE_ACCEPTED_HISTORY'
     $desired = @{}
     foreach ($entry in $entries) { $desired[[string]$entry.path] = $true }
     $dataRoot = Join-Path $root 'data'
@@ -170,25 +194,6 @@ try {
             [IO.Directory]::Delete($safe, $true)
         }
     }
-
-    $stage = 'VERIFY_RECEIPT'
-    $receiptName = 'control/receipt-' + [guid]::NewGuid().ToString('N') + '.incoming.json'
-    $receiptIncoming = Join-Path $root ($receiptName.Replace('/', '\'))
-    Invoke-BackupSftpGet $connection $root $keyPath $knownHosts @(
-        [pscustomobject]@{ Remote = '/' + [string]$manifest.receiptPath; Local = $receiptName }
-    )
-    $receipt = Read-BackupPullJson $receiptIncoming 16384
-    if ($receipt.kind -cne 'SFG_BACKUP_RECEIPT_TOKEN_V1' -or $receipt.manifestId -cne $manifest.manifestId) {
-        throw '服务器回执令牌与已验证清单不一致。'
-    }
-    $acceptedManifest = Join-Path $root 'control\accepted-manifest.json'
-    [IO.File]::Copy($manifestIncoming, $acceptedManifest + '.new', $true)
-    # PowerShell 5.1 binds plain $null to an empty string for this .NET string
-    # parameter, which makes the second sync fail with an invalid backup path.
-    if (Test-Path -LiteralPath $acceptedManifest) { [IO.File]::Replace($acceptedManifest + '.new', $acceptedManifest, [System.Management.Automation.Language.NullString]::Value) }
-    else { [IO.File]::Move($acceptedManifest + '.new', $acceptedManifest) }
-    [IO.File]::Copy($receiptIncoming, (Join-Path $root 'control\last-receipt.json'), $true)
-    Remove-Item -LiteralPath $manifestIncoming, $receiptIncoming -Force
 
     $categoryCounts = [ordered]@{}
     $categoryBytes = [ordered]@{}

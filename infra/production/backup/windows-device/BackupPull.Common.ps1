@@ -23,7 +23,7 @@ function Write-BackupPullJsonAtomic {
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes($payload + [Environment]::NewLine)
     try {
         $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() }
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
         finally { $stream.Dispose() }
         if ([IO.File]::Exists($Path)) {
             $backup = $Path + '.previous'
@@ -77,7 +77,11 @@ function Test-BackupManagedRelativePath {
         '^sifangguan-ota/daily/sifangguan-ota-state-daily-[0-9]{8}T[0-9]{6}[+-][0-9]{4}[.]tar[.]gz[.]enc$',
         '^sifangguan-ota/monthly/sifangguan-ota-state-monthly-[0-9]{6}[.]tar[.]gz[.]enc$',
         '^sifangguan-ota/yearly/sifangguan-ota-state-yearly-[0-9]{4}[.]tar[.]gz[.]enc$',
-        '^analytics-raw/daily/analytics-raw-[0-9]{4}-[0-9]{2}-[0-9]{2}[.]tar[.]gz[.]enc$'
+        '^analytics-raw/daily/analytics-raw-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[0-9a-f]{64})?[.]tar[.]gz[.]enc$',
+        '^sifangguan-ota/daily/sifangguan-ota-state-daily-[0-9]{8}T[0-9]{6}[+-][0-9]{4}[.]snapshot[.]json[.]enc$',
+        '^sifangguan-ota/monthly/sifangguan-ota-state-monthly-[0-9]{6}[.]snapshot[.]json[.]enc$',
+        '^sifangguan-ota/yearly/sifangguan-ota-state-yearly-[0-9]{4}[.]snapshot[.]json[.]enc$',
+        '^sifangguan-ota/objects/[0-9a-f]{64}[.]pack[.]enc$'
     )
     return @($patterns | Where-Object { $Path -cmatch $_ }).Count -eq 1
 }
@@ -98,7 +102,7 @@ function Test-LowerSha256 {
 
 function New-BackupIncomingName {
     param([int]$Ordinal, [string]$Sha256)
-    if ($Ordinal -lt 1 -or $Ordinal -gt 500 -or -not (Test-LowerSha256 $Sha256)) {
+    if ($Ordinal -lt 1 -or $Ordinal -gt 200000 -or -not (Test-LowerSha256 $Sha256)) {
         throw '下载临时文件编号或校验值无效。'
     }
     return ('incoming/{0:D4}-{1}.part' -f $Ordinal, $Sha256)
@@ -109,7 +113,7 @@ function Clear-BackupPullIncoming {
     $incoming = New-BackupPullDirectory $Root (Join-Path $Root 'incoming')
     foreach ($entry in Get-ChildItem -LiteralPath $incoming -Force -ErrorAction Stop) {
         if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-            $entry.Name -cnotmatch '^(?:[0-9]{4}-)?[0-9a-f]{64}[.]part$') {
+            $entry.Name -cnotmatch '^(?:[0-9]{4,6}-)?[0-9a-f]{64}[.]part$') {
             throw '下载临时目录包含非受管文件，拒绝自动清理。'
         }
         [IO.File]::Delete($entry.FullName)
@@ -118,7 +122,7 @@ function Clear-BackupPullIncoming {
 
 function Get-ValidatedBackupManifest {
     param([Parameter(Mandatory=$true)][string]$Path)
-    $manifest = Read-BackupPullJson $Path
+    $manifest = Read-BackupPullJson $Path 134217728
     if ($manifest.kind -cne 'SFG_BACKUP_MANIFEST_V1' -or [int]$manifest.schemaVersion -ne 1 -or
         -not (Test-LowerSha256 ([string]$manifest.manifestId)) -or
         [string]$manifest.receiptPath -cne ('receipts/' + [string]$manifest.manifestId + '.ok')) {
@@ -133,7 +137,7 @@ function Get-ValidatedBackupManifest {
         throw '服务器备份清单时间异常或已超过48小时。'
     }
     $entries = @($manifest.entries)
-    if ($entries.Count -lt 2 -or $entries.Count -gt 500) { throw '服务器备份清单条目数量异常。' }
+    if ($entries.Count -lt 2 -or $entries.Count -gt 200000) { throw '服务器备份清单条目数量异常。' }
     $seen = @{}
     $categories = @{}
     foreach ($entry in $entries) {
@@ -149,13 +153,59 @@ function Get-ValidatedBackupManifest {
         if ($length -le 0 -or $length -gt 1099511627776 -or -not (Test-LowerSha256 ([string]$entry.sha256))) {
             throw '服务器备份清单包含异常文件大小或校验值。'
         }
-        $seen[$relative] = $true
+        if ($parts[1] -ceq 'objects' -and $parts[2].Substring(0,64) -cne [string]$entry.sha256) {
+            throw '内容包名称与密文校验值不一致。'
+        }
+        if ($relative -cmatch '^analytics-raw/daily/analytics-raw-[0-9]{4}-[0-9]{2}-[0-9]{2}-([0-9a-f]{64})[.]tar[.]gz[.]enc$') {
+            if ($Matches[1] -cne [string]$entry.sha256) { throw '原始证据修订包名称与密文校验值不一致。' }
+        }
+        $seen[$relative] = $entry
         $categories[$parts[0]] = $true
     }
     foreach ($required in @('hotel-ai-os', 'sifangguan-ota')) {
         if (-not $categories.ContainsKey($required)) { throw ('服务器清单缺少必要分类：' + $required) }
     }
+    $roots = @{}; $objects = @{}
+    $points = @()
+    if ($manifest.PSObject.Properties.Name -contains 'recoveryPoints') { $points = @($manifest.recoveryPoints) }
+    foreach ($point in $points) {
+        $statePath = [string]$point.statePath; $databasePath = [string]$point.databasePath
+        if (-not $seen.ContainsKey($statePath) -or -not $seen.ContainsKey($databasePath) -or
+            -not $statePath.EndsWith('.snapshot.json.enc') -or $roots.ContainsKey($statePath)) {
+            throw '增量恢复点缺少唯一的状态索引或数据库配对。'
+        }
+        $stateEntry = $seen[$statePath]; $databaseEntry = $seen[$databasePath]
+        if ([string]$stateEntry.sha256 -cne [string]$point.stateSha256 -or
+            [string]$databaseEntry.sha256 -cne [string]$point.databaseSha256 -or
+            [string]$stateEntry.tier -cne [string]$databaseEntry.tier -or
+            [string]$databaseEntry.category -cne 'hotel-ai-os' -or
+            [string]$point.snapshotId -cnotmatch '^[0-9]{8}T[0-9]{6}[+-][0-9]{4}$') {
+            throw '增量恢复点配对校验失败。'
+        }
+        $roots[$statePath] = $true; $pointSeen = @{}
+        if (@($point.objects).Count -eq 0) { throw '增量恢复点依赖闭包为空。' }
+        foreach ($dependency in @($point.objects)) {
+            $objectPath = [string]$dependency
+            if (-not $seen.ContainsKey($objectPath) -or [string]$seen[$objectPath].tier -cne 'objects' -or $pointSeen.ContainsKey($objectPath)) {
+                throw '增量恢复点内容包缺失或重复，已保留本地历史备份。'
+            }
+            $pointSeen[$objectPath] = $true; $objects[$objectPath] = $true
+        }
+    }
+    foreach ($entry in $entries) {
+        if (([string]$entry.path).EndsWith('.snapshot.json.enc') -and -not $roots.ContainsKey([string]$entry.path)) { throw '增量状态索引未绑定恢复闭包。' }
+        if ([string]$entry.tier -ceq 'objects' -and -not $objects.ContainsKey([string]$entry.path)) { throw '内容包未绑定保留恢复点。' }
+    }
     return $manifest
+}
+
+function Invoke-BackupSftpBatches {
+    param([object]$Connection, [string]$BackupRoot, [string]$KeyPath, [string]$KnownHostsPath, [array]$Transfers)
+    if ($Transfers.Count -lt 1 -or $Transfers.Count -gt 200000) { throw '下载任务总量异常。' }
+    for ($offset = 0; $offset -lt $Transfers.Count; $offset += 500) {
+        $last = [Math]::Min($offset + 499, $Transfers.Count - 1)
+        Invoke-BackupSftpGet $Connection $BackupRoot $KeyPath $KnownHostsPath @($Transfers[$offset..$last])
+    }
 }
 
 function Get-OpenSshTool {

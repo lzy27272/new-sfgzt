@@ -2,6 +2,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolveNotificationNavigation } from '../src/app/notificationNavigation.ts'
 
+test('V2 typed pending links retain independent ledger and tax permissions', () => {
+  const sourceId = '10000000-0000-0000-0000-000000000001'
+  const item = sourceType => ({ type: 'FINANCE_REVIEW_PENDING', sourceType, sourceId })
+  assert.equal(resolveNotificationNavigation(item('FINANCE_INPUT_BASIS'), ['finance.review']), undefined)
+  assert.deepEqual(resolveNotificationNavigation(item('FINANCE_INPUT_BASIS'), ['finance.review', 'finance.tax'])?.params, { tab: 'tax-control', section: 'inputs', basisId: sourceId })
+  assert.equal(resolveNotificationNavigation(item('FINANCE_ASSET_GAIN'), ['finance.review']), undefined)
+  assert.deepEqual(resolveNotificationNavigation(item('FINANCE_LOAN_OVERDUE'), ['finance.review'])?.params, { tab: 'operations', screen: 'loans', documentId: sourceId })
+})
+
 test('企业微信待确认通知直达对应绑定申请', () => {
   assert.deepEqual(resolveNotificationNavigation({
     type: 'WECOM_BINDING_PENDING', sourceType: 'WECOM_BINDING_REQUEST', sourceId: 'request-1',

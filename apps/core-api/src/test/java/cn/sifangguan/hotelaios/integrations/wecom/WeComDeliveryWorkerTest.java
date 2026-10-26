@@ -76,4 +76,11 @@ class WeComDeliveryWorkerTest {
         assertThat(returnTo).isEqualTo(expected);
         assertThat(WeComOAuthService.validateReturnTo(returnTo)).isEqualTo(expected);
     }
+
+    @Test void financialV2CurrentNodesKeepStrictInternalTargetsAndNeverGroupShare() {
+        for(String source:new String[]{"FINANCE_ASSET_GAIN","FINANCE_INPUT_BASIS","FINANCE_TAX_ACCRUAL","FINANCE_LOAN_OVERDUE","FINANCE_CASH","FINANCE_ACCRUAL","FINANCE_REVENUE","FINANCE_PAYROLL","FINANCE_INTERCOMPANY","FINANCE_CASH_ERROR","FINANCE_AR_ADJUSTMENT","FINANCE_AR_RECOVERY","FINANCE_TAX_CALENDAR","FINANCE_INSIGHT_ACTION","FINANCE_BUDGET_EXCEPTION","FINANCE_DELEGATION","FINANCE_CLOSE_REGISTER","FINANCE_CLOSE_BANK","FINANCE_ARCHIVE_REQUEST","FINANCE_ACCRUAL_POLICY","FINANCE_SUPPLY_INVOICE_RELEASE"}){
+            String target=WeComDeliveryWorker.returnToFor(source,SOURCE_ID);assertThat(WeComOAuthService.validateReturnTo(target)).isEqualTo(target);assertThat(WeComDeliveryWorker.useGroupChat(source,"chat-1")).isFalse();
+        }
+        for(String path:new String[]{"#/finance?tab=insight-actions&actionId=bad","#/finance?tab=insight-actions&actionId="+SOURCE_ID+"&redirect=https://evil.example","#/finance?tab=authorizations&delegationId="+SOURCE_ID+"&delegationId="+SOURCE_ID,"#/finance?tab=business-exceptions&section=other&exceptionId="+SOURCE_ID})assertThatThrownBy(()->WeComOAuthService.validateReturnTo(path)).isInstanceOf(IllegalArgumentException.class);
+    }
 }

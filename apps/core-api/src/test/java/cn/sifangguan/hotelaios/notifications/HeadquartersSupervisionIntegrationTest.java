@@ -335,7 +335,7 @@ class HeadquartersSupervisionIntegrationTest {
                 new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
                 new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc, true),
                 new TransactionTemplate(transactions),
-                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class), properties, 50);
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class), properties, org.mockito.Mockito.mock(cn.sifangguan.hotelaios.finance.FinanceDeliveryEligibilityService.class), 50);
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
         assertThat(jdbc.queryForObject("select count(*) from notification_delivery where channel='WECHAT'", Integer.class)).isZero();
         jdbc.update("""

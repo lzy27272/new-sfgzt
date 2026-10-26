@@ -1,5 +1,8 @@
 package cn.sifangguan.hotelaios.storeassets;
 
+import cn.sifangguan.hotelaios.finance.FinanceCostDimensions;
+import cn.sifangguan.hotelaios.finance.FinanceBudgetBridge;
+
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
@@ -68,6 +71,8 @@ public class ProcurementService {
         var p=prepareHotel(hotel);var b=base(p).addValue("hotel",hotel);
         var out=new LinkedHashMap<String,Object>();var config=config(p.tenantId(),hotel,false);
         out.put("config",config);out.put("canConfigure",has(p,"procurement.configure"));
+        out.put("financialTransitionAvailable",FinanceCostDimensions.procurementSwitchInstalled(jdbc));
+        out.put("canConfigureFinance",has(p,"procurement.configure")&&has(p,"finance.configure"));
         out.put("canManage",is(p,config,"manager_id"));out.put("canPurchase",is(p,config,"buyer_id"));
         out.put("canReview",is(p,config,"reviewer_id"));out.put("canReceive",canReceive(p,config));
         out.put("canRequest",has(p,"procurement.request"));
@@ -83,26 +88,33 @@ public class ProcurementService {
               and b.hotel_org_unit_id=i.hotel_org_unit_id and b.item_id=i.id
             left join procurement_replenishment r on r.tenant_id=i.tenant_id and r.hotel_id=i.hotel_org_unit_id and r.item_id=i.id
             where i.tenant_id=:tenantId and i.hotel_org_unit_id=:hotel and i.status='ACTIVE' order by i.category,i.name,i.id
-            """,b));return out;
+            """,b));out.put("financialMappingEnabled",FinanceCostDimensions.installed(jdbc));out.put("financialCategories",FinanceCostDimensions.categories(jdbc,p.tenantId(),hotel));out.put("financialDepartments",FinanceCostDimensions.departments(jdbc,p.tenantId(),hotel));return out;
     }
     public Map<String,Object> configure(UUID hotel,ProcurementModels.Configuration in) {
         var p=prepareHotel(hotel);access.requirePermission("procurement.configure");lock(p.tenantId(),"config:"+hotel);
         var old=config(p.tenantId(),hotel,false);expect(old.isEmpty()?-1:version(old),in.expectedVersion());
+        boolean transition=FinanceCostDimensions.procurementSwitchInstalled(jdbc),required=Boolean.TRUE.equals(old.get("financial_dimensions_required"));
+        if(in.requireFinancialDimensions()!=null&&in.requireFinancialDimensions()!=required){
+            access.requirePermission("finance.configure");
+            if(!transition)throw conflict("采购财务兼容切换迁移尚未安装");
+            required=in.requireFinancialDimensions();
+            if(required&&FinanceCostDimensions.categories(jdbc,p.tenantId(),hotel).isEmpty())throw conflict("请先由财务独立发布本门店真实分类，再开启新版采购前置校验");
+        }
         var actors=new LinkedHashSet<>(List.of(in.managerId(),in.buyerId(),in.reviewerId(),in.financeId(),in.financeDirectorId(),in.deputyId(),in.generalId()));
         actors.addAll(in.receiverIds());
         if(jdbc.queryForObject("select count(*) from user_account where tenant_id=:tenantId and status='ACTIVE' and id in (:actors)",base(p).addValue("actors",actors),Integer.class)!=actors.size()) throw bad("责任人或预警接收人不存在、跨租户或已停用");
         var b=base(p).addValue("hotel",hotel).addValue("enabled",in.enabled()).addValue("manager",in.managerId())
             .addValue("buyer",in.buyerId()).addValue("reviewer",in.reviewerId()).addValue("finance",in.financeId())
             .addValue("director",in.financeDirectorId()).addValue("deputy",in.deputyId()).addValue("general",in.generalId())
-            .addValue("receivers","{"+String.join(",",in.receiverIds().stream().distinct().map(UUID::toString).toList())+"}");
+            .addValue("receivers","{"+String.join(",",in.receiverIds().stream().distinct().map(UUID::toString).toList())+"}").addValue("financialRequired",required);
         jdbc.update("""
-            insert into procurement_config(tenant_id,hotel_id,enabled,manager_id,buyer_id,reviewer_id,finance_id,finance_director_id,deputy_id,general_id,receiver_ids)
-            values(:tenantId,:hotel,:enabled,:manager,:buyer,:reviewer,:finance,:director,:deputy,:general,cast(:receivers as uuid[]))
+            insert into procurement_config(tenant_id,hotel_id,enabled,manager_id,buyer_id,reviewer_id,finance_id,finance_director_id,deputy_id,general_id,receiver_ids
+            """+(transition?",financial_dimensions_required":"")+") values(:tenantId,:hotel,:enabled,:manager,:buyer,:reviewer,:finance,:director,:deputy,:general,cast(:receivers as uuid[])"+(transition?",:financialRequired":"")+")"+"""
             on conflict(tenant_id,hotel_id) do update set enabled=excluded.enabled,manager_id=excluded.manager_id,buyer_id=excluded.buyer_id,
              reviewer_id=excluded.reviewer_id,finance_id=excluded.finance_id,finance_director_id=excluded.finance_director_id,
              deputy_id=excluded.deputy_id,general_id=excluded.general_id,receiver_ids=excluded.receiver_ids,
              version=procurement_config.version+1,updated_at=now()
-            """,b);
+            """+(transition?",financial_dimensions_required=excluded.financial_dimensions_required":""),b);
         event(p.tenantId(),null,p.actorId(),"CONFIGURED",Map.of("hotelId",hotel,"before",old,"after",in));
         return hotel(hotel);
     }
@@ -146,12 +158,12 @@ public class ProcurementService {
             select l.*,b.quantity as current_quantity,b.inventory_value,
              coalesce((select sum(rl.accepted) from procurement_receipt_line rl join procurement_receipt r
                on r.tenant_id=rl.tenant_id and r.id=rl.receipt_id where rl.tenant_id=l.tenant_id and rl.line_id=l.id and r.status='SUBMITTED'),0) as pending_quantity
-            from procurement_line l join store_inventory_balance b on b.tenant_id=l.tenant_id and b.hotel_org_unit_id=l.hotel_id and b.item_id=l.item_id
+            from procurement_line l left join store_inventory_balance b on b.tenant_id=l.tenant_id and b.hotel_org_unit_id=l.hotel_id and b.item_id=l.item_id
             where l.tenant_id=:tenantId and l.order_id=:id order by l.item_id
             """,b));
         var receipts=jdbc.queryForList("select r.*,u.display_name as receiver_name from procurement_receipt r join user_account u on u.tenant_id=r.tenant_id and u.id=r.receiver_id where r.tenant_id=:tenantId and r.order_id=:id order by r.created_at desc,r.id",b);
         for(var receipt:receipts) receipt.put("lines",jdbc.queryForList("""
-            select rl.*,l.item_name,l.base_unit,m.quantity_before,m.quantity_after,m.value_delta,m.unit_cost_snapshot
+            select rl.*,l.item_name,l.line_kind,l.base_unit,m.quantity_before,m.quantity_after,coalesce(rl.accepted_value,m.value_delta) value_delta,m.unit_cost_snapshot
             from procurement_receipt_line rl join procurement_line l on l.tenant_id=rl.tenant_id and l.id=rl.line_id
             left join store_inventory_movement m on m.tenant_id=rl.tenant_id and m.id=rl.movement_id
             where rl.tenant_id=:tenantId and rl.receipt_id=:receipt order by l.item_id
@@ -171,7 +183,12 @@ public class ProcurementService {
             """,b));
         result.put("canEdit",EDITABLE.contains(row.get("status")) && (row.get("source").equals("LOW_STOCK")?is(p,config,"manager_id"):p.actorId().equals(row.get("applicant_id"))));
         result.put("canPurchase",is(p,config,"buyer_id"));result.put("canReview",is(p,config,"reviewer_id"));result.put("canReceive",canReceive(p,config));
-        result.put("config",config);return result;
+        result.put("config",config);
+        if(FinanceCostDimensions.installed(jdbc)){
+            int pending=jdbc.queryForObject("select count(*) from procurement_line l left join fs_procurement_finance_classification c on c.tenant_id=l.tenant_id and c.line_id=l.id where l.tenant_id=:tenantId and l.order_id=:id and (coalesce(l.financial_category_code,c.financial_category_code) is null or coalesce(l.financial_department_id,c.financial_department_id) is null)",b,Integer.class);
+            result.put("pendingFinancialClassificationCount",pending);result.put("financialClassificationStatus",pending>0?"PENDING_CLASSIFICATION":"CLASSIFIED");
+        }
+        return result;
     }
     public Map<String,Object> create(UUID hotel,ProcurementModels.Request in) {
         var p=prepareHotel(hotel);access.requirePermission("procurement.request");config(p.tenantId(),hotel,true);
@@ -191,11 +208,15 @@ public class ProcurementService {
         var p=prepare();command(p,in.commandId(),"submit:"+id,in,()->{
             var row=order(p,id,true);editable(p,row);expect(version(row),in.expectedVersion());var conf=config(p.tenantId(),uuid(row,"hotel_id"),true);
             var lines=lines(p.tenantId(),id);if(lines.isEmpty())throw bad("采购清单至少有一项物品");
-            for(var l:lines){var current=item(p.tenantId(),uuid(row,"hotel_id"),uuid(l,"item_id"));
+            for(var l:lines){if(!"INVENTORY".equals(text(l,"line_kind")))continue;var current=item(p.tenantId(),uuid(row,"hotel_id"),uuid(l,"item_id"));
                 var units=StoreItemUnits.from(current);
                 if(!l.get("base_unit").equals(current.get("unit"))||units.factorFor(text(l,"input_unit")).compareTo(decimal(l,"factor"))!=0)
                     throw conflict("物品单位配置变化，请重新保存并核对采购数量");}
-            updateStatus(p.tenantId(),id,"SUBMITTED");event(p.tenantId(),id,p.actorId(),"SUBMITTED",Map.of("lines",lines));
+            lock(p.tenantId(),"config:"+row.get("hotel_id"));conf=config(p.tenantId(),uuid(row,"hotel_id"),true);
+            boolean strict=!FinanceCostDimensions.procurementSwitchInstalled(jdbc)||Boolean.TRUE.equals(row.get("financial_dimensions_required"))||Boolean.TRUE.equals(conf.get("financial_dimensions_required"));
+            if(strict)validateFinancialLines(p.tenantId(),uuid(row,"hotel_id"),id);
+            if(FinanceCostDimensions.procurementSwitchInstalled(jdbc))jdbc.update("update procurement_order set financial_dimensions_required=:strict where tenant_id=:tenantId and id=:id",base(p).addValue("id",id).addValue("strict",strict));
+            updateStatus(p.tenantId(),id,"SUBMITTED");new FinanceBudgetBridge(jdbc).procurement(p,id,"SUBMIT");event(p.tenantId(),id,p.actorId(),"SUBMITTED",Map.of("lines",lines,"financialDimensionsRequired",strict));
             notify(p.tenantId(),uuid(conf,"buyer_id"),id,"SUBMITTED","采购待办理",text(row,"title"),"submit:"+id+":"+version(row));return id;});return detail(id);
     }
     public Map<String,Object> purchase(UUID id,ProcurementModels.Purchase in) {
@@ -204,21 +225,21 @@ public class ProcurementService {
             var conf=config(p.tenantId(),uuid(row,"hotel_id"),true);requireActor(p,conf,"buyer_id");
             // Handler is an explicit store responsibility, not a caller-supplied impersonation.
             if(!in.buyerId().equals(conf.get("buyer_id")))throw bad("经办人须为本门店配置的采购负责人");
-            var lines=lines(p.tenantId(),id);var prices=new HashMap<UUID,BigDecimal>();
+            if(!FinanceCostDimensions.procurementSwitchInstalled(jdbc)||Boolean.TRUE.equals(row.get("financial_dimensions_required")))validateFinancialLines(p.tenantId(),uuid(row,"hotel_id"),id);var lines=lines(p.tenantId(),id);var prices=new HashMap<UUID,BigDecimal>();
             for(var price:in.prices())if(prices.put(price.lineId(),amount(price.unitPrice(),"采购单价"))!=null)throw bad("采购价格重复");
             if(prices.size()!=lines.size())throw bad("请逐项填写采购单价");
             for(var line:lines){var price=prices.get(uuid(line,"id"));if(price==null)throw bad("采购价格不属于本单");
                 jdbc.update("update procurement_line set unit_price=:price where tenant_id=:tenantId and id=:line",base(p).addValue("price",price).addValue("line",line.get("id")));}
             jdbc.update("update procurement_order set status='ORDERED',supplier=:supplier,expected_on=:date,buyer_id=:buyer,ordered_at=now(),version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",
                 base(p).addValue("id",id).addValue("supplier",in.supplier().trim()).addValue("date",in.expectedOn()).addValue("buyer",in.buyerId()));
-            event(p.tenantId(),id,p.actorId(),"PURCHASED",in);
+            new FinanceBudgetBridge(jdbc).procurement(p,id,"APPROVE");event(p.tenantId(),id,p.actorId(),"PURCHASED",in);
             var recipients=new LinkedHashSet<UUID>(receiverIds(conf));recipients.add(uuid(conf,"manager_id"));
             for(UUID recipient:recipients)notify(p.tenantId(),recipient,id,"ORDERED","采购已办理，等待到货",text(row,"title"),"ordered:"+id);return id;});return detail(id);
     }
     public Map<String,Object> returnRequest(UUID id,ProcurementModels.Command in) {
         var p=prepare();command(p,in.commandId(),"return:"+id,in,()->{var row=order(p,id,true);expect(version(row),in.expectedVersion());requireState(row,"SUBMITTED");
             requireActor(p,config(p.tenantId(),uuid(row,"hotel_id"),true),"buyer_id");requireNote(in.note());updateStatus(p.tenantId(),id,"RETURNED");
-            event(p.tenantId(),id,p.actorId(),"REQUEST_RETURNED",in);notify(p.tenantId(),uuid(row,"applicant_id"),id,"RETURNED","采购申请退回补充",in.note(),"returned:"+in.commandId());return id;});return detail(id);
+            new FinanceBudgetBridge(jdbc).procurement(p,id,"RELEASE");event(p.tenantId(),id,p.actorId(),"REQUEST_RETURNED",in);notify(p.tenantId(),uuid(row,"applicant_id"),id,"RETURNED","采购申请退回补充",in.note(),"returned:"+in.commandId());return id;});return detail(id);
     }
     public Map<String,Object> saveReceipt(UUID id,UUID receiptId,ProcurementModels.Receipt in) {
         var p=prepare();command(p,in.commandId(),"receipt:"+id+":"+receiptId,in,()->{
@@ -277,10 +298,13 @@ public class ProcurementService {
                     var approved=decimal(line,"approved_quantity");var price=decimal(line,"unit_price");var factor=decimal(line,"factor");
                     var value=approved.add(accepted).multiply(price).divide(factor,4,RoundingMode.HALF_UP)
                         .subtract(approved.multiply(price).divide(factor,4,RoundingMode.HALF_UP));
-                    var movement=stock.postProcurementReceipt(p,uuid(row,"hotel_id"),receiptId,uuid(line,"item_id"),text(line,"base_unit"),accepted,value);
-                    snapshots.add(movement);
-                    jdbc.update("update procurement_receipt_line set movement_id=:movement where tenant_id=:tenantId and receipt_id=:receipt and line_id=:line",
-                        base(p).addValue("receipt",receiptId).addValue("line",line.get("line_id")).addValue("movement",movement.get("id")));
+                    UUID movementId=null;
+                    if("INVENTORY".equals(text(line,"line_kind"))){
+                        var movement=stock.postProcurementReceipt(p,uuid(row,"hotel_id"),receiptId,uuid(line,"item_id"),text(line,"base_unit"),accepted,value);
+                        snapshots.add(movement);movementId=uuid(movement,"id");
+                    }else snapshots.add(Map.of("lineId",line.get("line_id"),"lineKind",line.get("line_kind"),"acceptedQuantity",accepted,"acceptedValue",value,"inventoryPosted",false));
+                    jdbc.update("update procurement_receipt_line set movement_id=:movement,accepted_value=:value where tenant_id=:tenantId and receipt_id=:receipt and line_id=:line",
+                        base(p).addValue("receipt",receiptId).addValue("line",line.get("line_id")).addValue("movement",movementId).addValue("value",value));
                     jdbc.update("update procurement_line set approved_quantity=approved_quantity+:quantity where tenant_id=:tenantId and id=:line",
                         base(p).addValue("line",line.get("line_id")).addValue("quantity",accepted));
                 }
@@ -290,7 +314,7 @@ public class ProcurementService {
             boolean complete=in.approved() && readyToComplete(p.tenantId(),id);
             jdbc.update("update procurement_order set status=:status,completed_at=case when :complete then now() else null end,version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",
                 b.addValue("status",complete?"COMPLETED":"PARTIAL").addValue("complete",complete));
-            event(p.tenantId(),id,p.actorId(),in.approved()?"RECEIPT_APPROVED":"RECEIPT_RETURNED",Map.of("receiptId",receiptId,"note",clean(in.note()),"movements",snapshots,"completed",complete));
+            if(in.approved())new FinanceBudgetBridge(jdbc).procurement(p,id,"REFRESH");event(p.tenantId(),id,p.actorId(),in.approved()?"RECEIPT_APPROVED":"RECEIPT_RETURNED",Map.of("receiptId",receiptId,"note",clean(in.note()),"movements",snapshots,"completed",complete));
             for(UUID recipient:new LinkedHashSet<>(List.of(uuid(r,"receiver_id"),uuid(conf,"manager_id"),uuid(conf,"buyer_id"))))
                 notify(p.tenantId(),recipient,id,complete?"COMPLETED":"REVIEWED",complete?"采购已全部入库，流程完成":in.approved()?"本批已入库，采购数量尚未全部对齐":"收货复核退回补充",text(row,"title"),"review:"+in.commandId());return id;});return detail(id);
     }
@@ -413,17 +437,26 @@ public class ProcurementService {
         if(row.get("source").equals("LOW_STOCK"))requireActor(p,c,"manager_id");else{access.requirePermission("procurement.request");if(!p.actorId().equals(row.get("applicant_id")))throw forbidden();}}
     private List<Map<String,Object>> lines(UUID tenant,UUID order){return jdbc.queryForList("select * from procurement_line where tenant_id=:tenantId and order_id=:id order by item_id",new MapSqlParameterSource("tenantId",tenant).addValue("id",order));}
     private Map<String,Object> receipt(UUID tenant,UUID order,UUID id){var rows=jdbc.queryForList("select * from procurement_receipt where tenant_id=:tenantId and order_id=:order and id=:id for update",new MapSqlParameterSource("tenantId",tenant).addValue("order",order).addValue("id",id));if(rows.isEmpty())throw missing();return rows.getFirst();}
-    private List<Map<String,Object>> receiptLines(UUID tenant,UUID id){return jdbc.queryForList("select rl.*,l.item_id,l.base_unit,l.quantity,l.approved_quantity,l.factor,l.unit_price from procurement_receipt_line rl join procurement_line l on l.tenant_id=rl.tenant_id and l.id=rl.line_id where rl.tenant_id=:tenantId and rl.receipt_id=:id order by l.item_id",new MapSqlParameterSource("tenantId",tenant).addValue("id",id));}
+    private List<Map<String,Object>> receiptLines(UUID tenant,UUID id){return jdbc.queryForList("select rl.*,l.item_id,l.line_kind,l.base_unit,l.quantity,l.approved_quantity,l.factor,l.unit_price from procurement_receipt_line rl join procurement_line l on l.tenant_id=rl.tenant_id and l.id=rl.line_id where rl.tenant_id=:tenantId and rl.receipt_id=:id order by l.item_id nulls last,l.id",new MapSqlParameterSource("tenantId",tenant).addValue("id",id));}
     private void insertOrder(UUID tenant,UUID hotel,UUID id,UUID actor,String source,String title){jdbc.update("insert into procurement_order(id,tenant_id,hotel_id,source,status,applicant_id,title) values(:id,:tenantId,:hotel,:source,'DRAFT',:actor,:title)",new MapSqlParameterSource("tenantId",tenant).addValue("hotel",hotel).addValue("id",id).addValue("actor",actor).addValue("source",source).addValue("title",title.trim()));}
-    private void replaceLines(UUID tenant,UUID hotel,UUID order,List<ProcurementModels.Line> lines){var seen=new HashSet<UUID>();for(var line:lines)if(!seen.add(line.itemId()))throw bad("同一物品不能重复添加，请合并数量");
+    private void replaceLines(UUID tenant,UUID hotel,UUID order,List<ProcurementModels.Line> lines){var seen=new HashSet<UUID>();for(var line:lines)if(line.itemId()!=null&&!seen.add(line.itemId()))throw bad("同一物品不能重复添加，请合并数量");
         jdbc.update("delete from procurement_line where tenant_id=:tenantId and order_id=:id",new MapSqlParameterSource("tenantId",tenant).addValue("id",order));
-        for(var line:lines)insertLine(tenant,hotel,order,item(tenant,hotel,line.itemId()),line.quantity(),line.unit());}
-    private void insertLine(UUID tenant,UUID hotel,UUID order,Map<String,Object> item,BigDecimal quantity,String unit){var units=StoreItemUnits.from(item);String selected=units.selectedUnit(unit);var factor=units.factorFor(selected);var input=amount(quantity,"采购数量");if(input.signum()<=0)throw bad("采购数量须大于0");
+        for(var line:lines){String kind=line.lineKind()==null?"INVENTORY":line.lineKind();UUID financialLine;
+            if("INVENTORY".equals(kind)){if(line.itemId()==null)throw bad("存货采购须选择现有品目");financialLine=insertLine(tenant,hotel,order,item(tenant,hotel,line.itemId()),line.quantity(),line.unit());}
+            else{if(!Set.of("SERVICE","ASSET","PROJECT").contains(kind)||line.itemId()!=null||clean(line.description()).isBlank())throw bad("服务、资产、工程采购须填写真实事项且不得伪造库存品目");BigDecimal quantity=amount(line.quantity(),"履约验收数量");if(quantity.signum()<=0)throw bad("履约数量须大于0");
+                financialLine=UUID.randomUUID();jdbc.update("insert into procurement_line(id,tenant_id,hotel_id,order_id,item_id,line_kind,item_name,sku,specification,base_unit,input_unit,factor,input_quantity,quantity) values(:id,:tenantId,:hotel,:order,null,:kind,:description,'',:spec,:unit,:unit,1,:quantity,:quantity)",new MapSqlParameterSource("tenantId",tenant).addValue("hotel",hotel).addValue("order",order).addValue("id",financialLine).addValue("kind",kind).addValue("description",line.description().trim()).addValue("spec",clean(line.specification())).addValue("unit",line.unit()).addValue("quantity",quantity));
+            }
+            if(FinanceCostDimensions.installed(jdbc)){if(line.budgetUnitPrice()!=null&&line.budgetUnitPrice().signum()<0)throw bad("申请预估单价不可为负");jdbc.update("update procurement_line set budget_unit_price=:price where tenant_id=:tenantId and id=:line",new MapSqlParameterSource("tenantId",tenant).addValue("line",financialLine).addValue("price",line.budgetUnitPrice()));String code=clean(line.financialCategoryCode());UUID department=line.departmentId();if(!code.isBlank()||department!=null){FinanceCostDimensions.validate(jdbc,tenant,hotel,code,department,financialTreatments(kind));jdbc.update("update procurement_line set financial_category_code=:code,financial_department_id=:department where tenant_id=:tenantId and id=:line",new MapSqlParameterSource("tenantId",tenant).addValue("line",financialLine).addValue("code",code).addValue("department",department));}}
+            var project=FinanceCostDimensions.freezeProject(jdbc,access.principal(),hotel,line.projectKind(),line.projectId());if(FinanceCostDimensions.projectsInstalled(jdbc))jdbc.update("update procurement_line set project_kind=:projectKind,project_id=:projectId,project_key=:projectKey,project_snapshot=cast(:projectSnapshot as jsonb) where tenant_id=:tenantId and id=:line",new MapSqlParameterSource("tenantId",tenant).addValue("line",financialLine).addValue("projectKind",project.get("kind")).addValue("projectId",project.get("id")).addValue("projectKey",project.get("key")).addValue("projectSnapshot",json(project)));
+        }}
+    private UUID insertLine(UUID tenant,UUID hotel,UUID order,Map<String,Object> item,BigDecimal quantity,String unit){var units=StoreItemUnits.from(item);String selected=units.selectedUnit(unit);var factor=units.factorFor(selected);var input=amount(quantity,"采购数量");if(input.signum()<=0)throw bad("采购数量须大于0");UUID line=UUID.randomUUID();
         jdbc.update("""
             insert into procurement_line(id,tenant_id,hotel_id,order_id,item_id,item_name,sku,specification,base_unit,input_unit,factor,input_quantity,quantity)
             values(:id,:tenantId,:hotel,:order,:item,:name,:sku,:spec,:base,:unit,:factor,:input,:quantity)
-            """,new MapSqlParameterSource("tenantId",tenant).addValue("hotel",hotel).addValue("order",order).addValue("id",UUID.randomUUID()).addValue("item",item.get("id"))
-            .addValue("name",item.get("name")).addValue("sku",item.get("sku")).addValue("spec",clean(text(item,"specification"))).addValue("base",units.baseUnit()).addValue("unit",selected).addValue("factor",factor).addValue("input",input).addValue("quantity",units.baseQuantity(input,selected)));}
+            """,new MapSqlParameterSource("tenantId",tenant).addValue("hotel",hotel).addValue("order",order).addValue("id",line).addValue("item",item.get("id"))
+            .addValue("name",item.get("name")).addValue("sku",item.get("sku")).addValue("spec",clean(text(item,"specification"))).addValue("base",units.baseUnit()).addValue("unit",selected).addValue("factor",factor).addValue("input",input).addValue("quantity",units.baseQuantity(input,selected)));return line;}
+    private Set<String> financialTreatments(String kind){return switch(kind){case "SERVICE"->Set.of("EXPENSE");case "ASSET","PROJECT"->Set.of("ASSET");default->Set.of("EXPENSE","INVENTORY");};}
+    private void validateFinancialLines(UUID tenant,UUID hotel,UUID order){if(!FinanceCostDimensions.installed(jdbc))return;for(var line:lines(tenant,order))FinanceCostDimensions.validate(jdbc,tenant,hotel,text(line,"financial_category_code"),uuid(line,"financial_department_id"),financialTreatments(text(line,"line_kind")));}
     private void saveHeader(TenantPrincipal p,UUID id,ProcurementModels.Request in){jdbc.update("update procurement_order set title=:title,note=:note,expected_on=:date,edited=true,version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",base(p).addValue("id",id).addValue("title",in.title().trim()).addValue("note",clean(in.note())).addValue("date",in.expectedOn()));}
     private void updateStatus(UUID tenant,UUID id,String state){jdbc.update("update procurement_order set status=:state,version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",new MapSqlParameterSource("tenantId",tenant).addValue("id",id).addValue("state",state));}
     private UUID command(TenantPrincipal p,UUID request,String operation,Object body,Supplier<UUID> action){String hash=hash((operation+"|"+json(body)).getBytes(StandardCharsets.UTF_8));lock(p.tenantId(),"command:"+p.actorId()+":"+request);

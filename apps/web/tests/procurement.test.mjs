@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { canProcure, filterCatalog, mergeImport, remaining } from '../src/features/procurement/model.ts'
+import { canProcure, filterCatalog, mergeImport, remaining, requiresFinancialDimensions } from '../src/features/procurement/model.ts'
 import { buildNavigationCenters, navigationCenterForSection } from '../src/app/navigationModel.ts'
 import { applyPublishedModuleVisibility, desktopModuleForRoute } from '../src/app/rolePresentationPolicy.ts'
 import { resolveNotificationNavigation } from '../src/app/notificationNavigation.ts'
@@ -26,4 +26,13 @@ test('item search, configured units, pending reservations and import duplicates 
   assert.equal(remaining({ quantity: 100, approved_quantity: 70, pending_quantity: 20 }), 10)
   assert.throws(() => mergeImport([{ itemId: '1' }], [{ itemId: '1' }]), /重复/)
   assert.deepEqual(mergeImport([{ itemId: '1' }], [{ itemId: '2' }]), [{ itemId: '1' }, { itemId: '2' }])
+})
+
+test('installed procurement transition uses only the explicit switch, not finance schema availability', () => {
+  assert.equal(requiresFinancialDimensions({ financialTransitionAvailable: true, financialMappingEnabled: true, config: { financial_dimensions_required: false } }), false)
+  assert.equal(requiresFinancialDimensions({ financialTransitionAvailable: true, financialMappingEnabled: true, config: { financial_dimensions_required: true } }), true)
+  assert.equal(requiresFinancialDimensions({ financialTransitionAvailable: true, financialMappingEnabled: true, config: {} }), false)
+  assert.equal(requiresFinancialDimensions({ financialTransitionAvailable: false, financialMappingEnabled: true, config: {} }), true)
+  assert.equal(requiresFinancialDimensions({ financialMappingEnabled: true, config: {} }), true)
+  assert.equal(requiresFinancialDimensions({ config: {} }), false)
 })

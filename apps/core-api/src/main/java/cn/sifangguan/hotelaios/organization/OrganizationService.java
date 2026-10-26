@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.organization;
 
 import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
+import cn.sifangguan.hotelaios.finance.FinanceEmployeeExitGuard;
 import cn.sifangguan.hotelaios.workpackage.OperationalDailyAllocationService;
 import cn.sifangguan.hotelaios.workpackage.WorkPackageService;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
@@ -917,6 +918,10 @@ public class OrganizationService {
         Map<String, Object> current = requireEmployee(principal, employeeId);
         requireUniqueCode("employee", principal, employeeId, request.employeeNo(), "员工编号已存在");
         String employmentStatus = lifecycleStatus(request.employmentStatus());
+        if ("INACTIVE".equals(employmentStatus)) {
+            new FinanceEmployeeExitGuard(jdbc, databaseContext, accessPolicy).assertCanEndEmployment(employeeId);
+            current = requireEmployee(principal, employeeId);
+        }
         String employeeType = request.employeeType() == null ? (String) current.get("employee_type")
                 : EmployeeType.validate(request.employeeType(), true);
         UUID accountId = (UUID) current.get("account_id");
@@ -1042,7 +1047,6 @@ public class OrganizationService {
                 where tenant_id = :tenantId and employment_status = 'INACTIVE'
                   and deleted_at is null
                 order by id
-                for update
                 """, base(principal));
         for (Map<String, Object> row : rows) {
             softDeleteEmployee(principal, row);
@@ -1085,7 +1089,12 @@ public class OrganizationService {
         accessPolicy.requirePermission("org.manage");
         TenantPrincipal principal = prepare();
         requireTenantScope(principal, "员工永久删除只能由集团级管理员执行");
-        Map<String, Object> current = requireDeletedEmployee(principal, employeeId);
+        Map<String, Object> current = requireDeletedEmployee(principal, employeeId, false);
+        if (current.get("permanently_deleted_at") != null) {
+            throw new IllegalArgumentException("该员工已永久删除");
+        }
+        new FinanceEmployeeExitGuard(jdbc, databaseContext, accessPolicy).assertCanEndEmployment(employeeId);
+        current = requireDeletedEmployee(principal, employeeId);
         if (current.get("permanently_deleted_at") != null) {
             throw new IllegalArgumentException("该员工已永久删除");
         }
@@ -1145,6 +1154,11 @@ public class OrganizationService {
 
     private void softDeleteEmployee(TenantPrincipal principal, Map<String, Object> current) {
         UUID employeeId = (UUID) current.get("id");
+        new FinanceEmployeeExitGuard(jdbc, databaseContext, accessPolicy).assertCanEndEmployment(employeeId);
+        current = requireEmployee(principal, employeeId);
+        if (!"INACTIVE".equals(String.valueOf(current.get("employment_status")))) {
+            throw new IllegalArgumentException("员工状态已变化，请先停用员工再执行删除");
+        }
         UUID accountId = (UUID) current.get("account_id");
         MapSqlParameterSource parameters = base(principal)
                 .addValue("id", employeeId)
@@ -1745,13 +1759,16 @@ public class OrganizationService {
     }
 
     private Map<String, Object> requireDeletedEmployee(TenantPrincipal principal, UUID employeeId) {
+        return requireDeletedEmployee(principal, employeeId, true);
+    }
+
+    private Map<String, Object> requireDeletedEmployee(TenantPrincipal principal, UUID employeeId, boolean locked) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 select id, account_id, employee_no, name, employment_status, employee_type,
                        deleted_at, permanently_deleted_at
                 from employee
                 where tenant_id = :tenantId and id = :id and deleted_at is not null
-                for update
-                """, base(principal).addValue("id", employeeId));
+                """ + (locked ? " for update" : ""), base(principal).addValue("id", employeeId));
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("员工不在已删除列表或不属于当前租户");
         }

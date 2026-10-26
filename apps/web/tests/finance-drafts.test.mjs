@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { saveFinanceDraft, loadFinanceDraft, removeFinanceDraft } from '../src/features/finance/encryptedDrafts.ts'
+import { saveFinanceDraft, loadFinanceDraft, removeFinanceDraft, savePrivateFinanceForm, loadPrivateFinanceForm, removePrivateFinanceForm } from '../src/features/finance/encryptedDrafts.ts'
 
 // Minimal asynchronous IndexedDB double; crypto is the real WebCrypto implementation.
 function fakeDatabase() {
@@ -78,4 +78,26 @@ test('unread changes by a different tab cannot be overwritten', async () => with
   await saveFinanceDraft('tabs', 'c1', draft())
   const record = tables.records.get('tabs/c1'); record.writer = 'another-page'; record.etag = 'new-revision'
   await assert.rejects(saveFinanceDraft('tabs', 'c1', draft()), /另一页面/)
+}))
+
+test('travel subform survives page destruction encrypted with its server version and assignment boundary', async () => withDb(async ({ tables }) => {
+  const scope = 'tenant:employee:assignment'
+  await savePrivateFinanceForm(scope, 'travel:claim1', { baseVersion: '7', values: { destination: '私人差旅目的地', lodgingAmount: '128.01', travelerIds: 'actual-account' } })
+  assert.ok(!JSON.stringify([...tables.records.values()]).includes('私人差旅目的地'))
+  assert.equal(tables.keys.get(scope).extractable, false)
+  const restored = await loadPrivateFinanceForm(scope, 'travel:claim1')
+  assert.equal(restored.baseVersion, '7'); assert.equal(restored.values.lodgingAmount, '128.01')
+  assert.equal(await loadPrivateFinanceForm('tenant:employee:another-assignment', 'travel:claim1'), null)
+  // Retaining the old version allows the UI to request explicit reconciliation, not silently overwrite version 8.
+  assert.notEqual(restored.baseVersion, '8')
+  await removePrivateFinanceForm(scope, 'travel:claim1'); assert.equal(await loadPrivateFinanceForm(scope, 'travel:claim1'), null)
+}))
+
+test('private subform serializes edits and rejects concurrent unread writes and tampering', async () => withDb(async ({ tables }) => {
+  await Promise.all(['1', '2', '3'].map(amount => savePrivateFinanceForm('form-race', 'travel:1', { baseVersion: '0', values: { amount } })))
+  assert.equal((await loadPrivateFinanceForm('form-race', 'travel:1')).values.amount, '3')
+  const record = tables.records.get('form-race/form:travel:1'); record.writer = 'other-page'; record.etag = 'unread-version'
+  await assert.rejects(savePrivateFinanceForm('form-race', 'travel:1', { baseVersion: '0', values: { amount: '4' } }), /另一页面/)
+  new Uint8Array(record.ciphertext)[0] ^= 1
+  await assert.rejects(loadPrivateFinanceForm('form-race', 'travel:1'))
 }))

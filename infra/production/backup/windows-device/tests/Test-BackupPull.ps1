@@ -54,6 +54,14 @@ try {
     $parsed = Get-ValidatedBackupManifest $manifestPath
     Assert-True (@($parsed.entries).Count -eq 3) 'Valid manifest accepted'
 
+    $rawRevision = New-ValidManifest
+    $rawRevision.entries[2].path = 'analytics-raw/daily/analytics-raw-2026-09-19-' + $rawRevision.entries[2].sha256 + '.tar.gz.enc'
+    Write-FixtureJson $manifestPath $rawRevision
+    Assert-True (@((Get-ValidatedBackupManifest $manifestPath).entries).Count -eq 3) 'Immutable raw ciphertext revision accepted alongside legacy paths'
+    $rawRevision.entries[2].sha256 = 'e'*64
+    Write-FixtureJson $manifestPath $rawRevision
+    Assert-Throws { Get-ValidatedBackupManifest $manifestPath } 'Raw revision name and ciphertext digest mismatch rejected'
+
     $duplicate = New-ValidManifest
     $duplicate.entries = @($duplicate.entries[0], $duplicate.entries[0], $duplicate.entries[1])
     Write-FixtureJson $manifestPath $duplicate
@@ -73,6 +81,41 @@ try {
     $stale.generatedAt = [DateTime]::UtcNow.AddHours(-49).ToString('o')
     Write-FixtureJson $manifestPath $stale
     Assert-Throws { Get-ValidatedBackupManifest $manifestPath } 'Stale manifest rejected'
+
+    $incremental = New-ValidManifest
+    $incremental.entries[1].path = $incremental.entries[1].path.Replace('.tar.gz.enc','.snapshot.json.enc')
+    $objectPaths = @()
+    for ($n=1; $n -le 501; $n++) {
+        $digest = $n.ToString('x64'); $objectPath = 'sifangguan-ota/objects/' + $digest + '.pack.enc'
+        $objectPaths += $objectPath
+        $incremental.entries += [pscustomobject]@{path=$objectPath;category='sifangguan-ota';tier='objects';bytes=12;sha256=$digest}
+    }
+    $incremental | Add-Member NoteProperty recoveryPoints @([pscustomobject]@{
+        statePath=$incremental.entries[1].path;stateSha256=$incremental.entries[1].sha256
+        databasePath=$incremental.entries[0].path;databaseSha256=$incremental.entries[0].sha256
+        snapshotId='20260920T030000+0800';objects=$objectPaths })
+    Write-FixtureJson $manifestPath $incremental
+    Assert-True (@((Get-ValidatedBackupManifest $manifestPath).entries).Count -eq 504) 'Complete incremental closure beyond 500 entries accepted'
+    $incremental.recoveryPoints[0].objects += ('sifangguan-ota/objects/' + ('f'*64) + '.pack.enc')
+    Write-FixtureJson $manifestPath $incremental
+    Assert-Throws { Get-ValidatedBackupManifest $manifestPath } 'Missing incremental dependency fails closed'
+    $incremental.recoveryPoints[0].objects = $objectPaths
+    $incremental.entries[3].sha256 = 'f'*64
+    Write-FixtureJson $manifestPath $incremental
+    Assert-Throws { Get-ValidatedBackupManifest $manifestPath } 'Object name and ciphertext digest mismatch rejected'
+    $incremental.entries[3].sha256 = [IO.Path]::GetFileName([string]$incremental.entries[3].path).Substring(0,64)
+    $incremental.recoveryPoints = @()
+    Write-FixtureJson $manifestPath $incremental
+    Assert-Throws { Get-ValidatedBackupManifest $manifestPath } 'Unbound incremental index cannot be accepted'
+    $script:batchSizes = @()
+    function Invoke-BackupSftpGet {
+        param($Connection,$BackupRoot,$KeyPath,$KnownHostsPath,$Transfers)
+        $script:batchSizes += $Transfers.Count
+    }
+    Invoke-BackupSftpBatches $null $testRoot 'test' 'test' @(1..1001)
+    Assert-True (($script:batchSizes -join ',') -ceq '500,500,1') 'More than 500 transfers split into bounded real caller batches'
+    Assert-True ((New-BackupIncomingName 200000 ('b'*64)).StartsWith('incoming/200000-')) 'Large manifest ordinals remain unique and bounded'
+    Assert-Throws { New-BackupIncomingName 200001 ('b'*64) } 'Manifest ordinal upper bound remains enforced'
 
     $atomicPath = Join-Path $testRoot 'status.json'
     Write-BackupPullJsonAtomic $atomicPath ([pscustomobject]@{ status='FIRST' })

@@ -21,7 +21,7 @@ public class AiDataService {
     static final Map<String,String> PERMISSIONS=Map.of(
         "WORK_RECORDS","work-record.read","DAILY_REPORTS","daily-report.read",
         "TASKS","task.read","KPI_FACTS","kpi.metric.read","OTA_DAILY","kpi.metric.read",
-        "OTA_HOURLY","kpi.metric.read","OTA_PERIODS","kpi.metric.read");
+        "OTA_HOURLY","kpi.metric.read","OTA_PERIODS","kpi.metric.read","FINANCE_CLAIMS","finance.read");
     private final NamedParameterJdbcTemplate jdbc;
     private final TenantDatabaseContext db;
     private final AccessPolicy access;
@@ -39,7 +39,7 @@ public class AiDataService {
         var p=prepare(); var params=base(p); var datasets=new ArrayList<Map<String,Object>>();
         Map<String,String> names=Map.of("WORK_RECORDS","工作执行记录","DAILY_REPORTS","日报提交与审核",
             "TASKS","任务执行状态","KPI_FACTS","绩效结构化指标","OTA_DAILY","盯盘助手每日经营事实",
-            "OTA_HOURLY","盯盘助手小时快照（48个月）","OTA_PERIODS","盯盘助手月/季/半年/年度汇总（5年）");
+            "OTA_HOURLY","盯盘助手小时快照（48个月）","OTA_PERIODS","盯盘助手月/季/半年/年度汇总（5年）","FINANCE_CLAIMS","报销审批与金额事实（非总账报表）");
         PERMISSIONS.keySet().stream().sorted().forEach(key->datasets.add(Map.of("id",key,"name",names.get(key),
             "project",key.startsWith("OTA")?"OTA":"PLATFORM","available",allowed(p,key))));
         var bindings=allowed(p,"OTA_DAILY")?jdbc.queryForList("""
@@ -63,6 +63,17 @@ public class AiDataService {
             .addValue("org",q.orgUnitId()).addValue("offset",q.offset());
         List<Map<String,Object>> rows; String caveat=""; UUID binding=null;
         switch(q.dataset()) {
+            case "FINANCE_CLAIMS" -> {
+                rows=jdbc.queryForList("""
+                    select c.id,c.hotel_id,c.business_date,c.status,c.version,c.updated_at,
+                     c.requested_amount::text,c.approved_amount::text,c.mismatch,c.treatment,
+                     coalesce((select sum(p.amount) from finance_payment p where p.tenant_id=c.tenant_id and p.claim_id=c.id),0)::text as paid_amount
+                    from finance_claim c where c.tenant_id=:tenantId and c.business_date between :from and :to
+                     and (:tenantScope or c.hotel_id in (:orgScopes)) and (cast(:org as uuid) is null or c.hotel_id=:org)
+                    order by c.business_date,c.id limit 501 offset :offset
+                    """,params);
+                caveat="报销审批金额事实，不是已过账总账或完整损益；不含银行账号、员工姓名、税号和凭证原件。每行来源FINANCE_CLAIM:id，version及updated_at标识快照；金额差异仅为待核实异常，不能自动拒绝或付款。";
+            }
             case "WORK_RECORDS" -> {
                 String scope=visibility.scope(p,params).record("w");
                 rows=jdbc.queryForList("""

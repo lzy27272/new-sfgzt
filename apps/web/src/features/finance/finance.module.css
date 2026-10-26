@@ -1,4 +1,20 @@
 .finance { --ink:#153e54; --muted:#738b9e; --border:#dce7ef; --blue:#2378ed; color:var(--ink); min-width:0; font-size:15px; line-height:1.55; }
+.unifiedPage { display:grid; gap:20px; min-width:0; }
+.hero { display:flex; justify-content:space-between; align-items:center; gap:24px; padding:30px; border-radius:12px; color:#fff; background:linear-gradient(110deg,#10384d,#176f83); }
+.hero small { color:#a6d7ed; letter-spacing:2px; }.hero h2 { margin-top:10px; }.hero p { color:#d8e7ef; }.hero button { flex-shrink:0; }
+.metricGrid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; }
+.finance .metricCard { background:white; border:1px solid var(--border); text-align:left; padding:22px; display:grid; gap:8px; border-radius:10px; }
+.metricCard strong { font-size:32px; color:#137d77; font-variant-numeric:tabular-nums; }.metricCard small { font-weight:400; }
+.detailPanel { margin-top:22px; padding-top:24px; border-top:1px solid var(--border); }
+.factPair { display:contents; }
+.todoPanel :global(.text-action) { min-height:44px; padding:9px 13px; font-size:13px; }
+.todoPanel :global(.wb-compact-row) { min-height:68px; }
+.todoPanel :global(.wb-compact-row) strong, .todoPanel :global(.wb-compact-row) b { font-size:14px; }
+.todoPanel :global(.wb-compact-row) small { font-size:12px; line-height:1.5; }
+.todoPanel button:focus-visible { outline:3px solid #80baff; outline-offset:-3px; }
+:global(.finance-todo-counts) { display:flex; flex-wrap:wrap; gap:16px; padding:12px 24px; color:#57778b; }
+:global(.finance-todo-counts strong) { color:#147a77; }
+@media(max-width:680px) { .hero { padding:22px; flex-direction:column; align-items:flex-start; }.metricGrid { grid-template-columns:1fr; gap:10px; }.finance .metricCard { grid-template-columns:1fr auto; padding:17px; }.metricCard small:last-child { grid-column:1/-1; }.metricCard strong { font-size:25px; }.unifiedPage { gap:14px; } }
 .finance *, .finance *::before, .finance *::after { box-sizing:border-box; }
 .finance h2 { font-size:27px; line-height:1.3; margin:0 0 10px; letter-spacing:0; }
 .finance h3 { font-size:19px; margin:0 0 16px; }

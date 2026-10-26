@@ -579,7 +579,7 @@ class StoreWorkUsageIntegrationTest {
                 new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
                 new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc,true),
                 new org.springframework.transaction.support.TransactionTemplate(transactions),
-                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,100);
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,org.mockito.Mockito.mock(cn.sifangguan.hotelaios.finance.FinanceDeliveryEligibilityService.class),100);
     }
 
     private JsonNode activityReport(int daysAgo) throws Exception {

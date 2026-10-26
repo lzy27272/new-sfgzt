@@ -21,6 +21,13 @@ stage_raw=${stage_root}/raw
 source_state=/var/lib/sifangguan-ota
 source_raw=${source_state}/analytics-retention/raw
 runtime_env=/etc/sifangguan-ota/runtime.env
+core_env=/etc/hotel-ai-os/core-api.env
+source_core=/var/lib/hotel-ai-os/attachments
+stage_core=${stage_state}/var/lib/hotel-ai-os/attachments
+original_manifest=${stage_state}/var/lib/hotel-ai-os/backup-core-originals-manifest.json
+original_tool=/usr/local/lib/hotel-ai-os/core-originals-manifest.py
+snapshot_tool=/usr/local/lib/hotel-ai-os/core-state-snapshots.py
+reference_sql=/usr/local/lib/hotel-ai-os/core-originals-reference.sql
 backup_key=/etc/hotel-ai-os/backup-encryption.key
 export_root=/srv/sfg-backup-export
 export_data=${export_root}/data
@@ -52,15 +59,40 @@ test "$(stat -c '%U:%a' "${backup_key}")" = 'root:600'
 test -d "${source_state}"
 test -r "${runtime_env}"
 test -x "${manifest_tool}"
+test -x "${original_tool}"
+test -x "${snapshot_tool}"
+test -r "${reference_sql}"
+test -r "${core_env}"
 getent group "${export_group}" >/dev/null
+
+check_backup_capacity() {
+  local source_bytes database_bytes raw_bytes=0
+  # Conservative live sizes, no compression/dedup discount. The raw evidence
+  # tree has its own existing 90-day job and is not Core state staging.
+  source_bytes="$(du --bytes --summarize --one-file-system --exclude='*/analytics-retention/raw' \
+    "${source_state}" "${source_core}" | awk '{total+=$1} END {printf "%.0f",total}')"
+  database_bytes="$(sudo -u postgres psql -XAtq --set ON_ERROR_STOP=1 --dbname hotel_ai_os \
+    --command "select pg_database_size(current_database())")"
+  if [[ -d ${source_raw} ]]; then raw_bytes="$(du --bytes --summarize --one-file-system "${source_raw}" | awk '{print $1}')"; fi
+  [[ ${source_bytes} =~ ^[1-9][0-9]*$ && ${database_bytes} =~ ^[1-9][0-9]*$ ]]
+  "${snapshot_tool}" capacity --state-root "${state_root}" --database-root "${db_root}" \
+    --stage-root "${stage_root}" --export-root "${export_root}" \
+    --state-bytes "${source_bytes}" --database-bytes "${database_bytes}" \
+    --raw-backup-root "${raw_backup_root}" --raw-bytes "${raw_bytes}"
+}
+# Fail before allocating the first bulk staging copy, and recheck immediately
+# before downtime. Insufficient capacity never triggers retention pruning.
+check_backup_capacity
 
 db_plain="$(mktemp "${db_root}/.hotel_ai_os-XXXXXX.dump")"
 db_check="$(mktemp "${db_root}/.hotel_ai_os-check-XXXXXX.dump")"
 db_encrypted_tmp="${db_root}/.hotel_ai_os-${timestamp}.dump.enc"
 db_encrypted_final="${db_daily}/hotel_ai_os-daily-${timestamp}.dump.enc"
-state_encrypted_tmp="${state_root}/.sifangguan-ota-state-${timestamp}.tar.gz.enc"
-state_encrypted_final="${state_daily}/sifangguan-ota-state-daily-${timestamp}.tar.gz.enc"
+state_encrypted_tmp="${state_root}/.sifangguan-ota-state-${timestamp}.snapshot.json.enc"
+state_encrypted_final="${state_daily}/sifangguan-ota-state-daily-${timestamp}.snapshot.json.enc"
 archive_list="$(mktemp "${state_root}/.archive-list-XXXXXX")"
+original_settings="$(mktemp "${state_root}/.core-original-settings-XXXXXX")"
+original_references="$(mktemp "${state_root}/.core-original-references-XXXXXX")"
 raw_tmp=''
 raw_list=''
 quiesced=false
@@ -90,11 +122,16 @@ cleanup() {
   fi
   rm -f -- \
     "${db_plain}" "${db_check}" "${db_encrypted_tmp}" \
-    "${state_encrypted_tmp}" "${archive_list}" \
+    "${state_encrypted_tmp}" "${archive_list}" "${original_settings}" "${original_references}" \
     ${raw_tmp:+"${raw_tmp}"} ${raw_list:+"${raw_list}"}
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
+core_pid="$(systemctl show hotel-ai-os-core-api.service -p MainPID --value)"
+[[ "${core_pid}" =~ ^[0-9]+$ ]]
+"${original_tool}" settings "${core_env}" "${core_pid}" >"${original_settings}"
+install -d -m 0700 -o root -g root "${stage_core}"
+test "$(readlink -f "${stage_core}")" = '/var/backups/sifangguan-ota/staging/snapshot/var/lib/hotel-ai-os/attachments'
 
 write_checksum() {
   local artifact=$1
@@ -146,25 +183,6 @@ for legacy_backup in "${db_root}"/hotel_ai_os-auto-*.dump.enc; do
   rm -f -- "${legacy_backup}" "${legacy_backup}.sha256"
 done
 
-sudo -u postgres pg_dump \
-  --format=custom \
-  --compress=9 \
-  --dbname hotel_ai_os \
-  >"${db_plain}"
-
-encrypt_stream <"${db_plain}" >"${db_encrypted_tmp}"
-chmod 0600 "${db_encrypted_tmp}"
-decrypt_stream <"${db_encrypted_tmp}" >"${db_check}"
-cmp --silent "${db_plain}" "${db_check}"
-sudo -u postgres pg_restore --list <"${db_check}" >/dev/null
-mv -- "${db_encrypted_tmp}" "${db_encrypted_final}"
-write_checksum "${db_encrypted_final}"
-copy_tier_once \
-  "${db_encrypted_final}" \
-  "${db_monthly}/hotel_ai_os-monthly-${month_key}.dump.enc"
-copy_tier_once \
-  "${db_encrypted_final}" \
-  "${db_yearly}/hotel_ai_os-yearly-${year_key}.dump.enc"
 
 # First pass copies the bulk while writers remain online. Browser caches and
 # sockets are replaceable runtime material; login/session stores are retained.
@@ -195,6 +213,7 @@ raw_rsync_options=(
   --exclude='*'
 )
 rsync "${state_rsync_options[@]}" "${source_state}/" "${stage_state}/var/lib/sifangguan-ota/"
+rsync -aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices "${source_core}/" "${stage_core}/"
 if [[ -d ${source_raw} ]]; then
   rsync "${raw_rsync_options[@]}" "${source_raw}/" "${stage_raw}/"
 fi
@@ -205,6 +224,7 @@ writer_timers=(
   sifangguan-kpi-monthly-refresh.timer
 )
 writer_services=(
+  hotel-ai-os-core-api.service
   hotel-ai-os-wecom-uat.service
   sifangguan-bieyanghong-browser.service
   sifangguan-ota-api.service
@@ -214,6 +234,7 @@ writer_services=(
   sifangguan-wecom-onboarding.service
   sifangguan-kpi-monthly-refresh.service
 )
+check_backup_capacity
 for unit in "${writer_timers[@]}"; do
   if systemctl is-active --quiet "${unit}"; then resume_timers+=("${unit}"); fi
 done
@@ -223,7 +244,11 @@ done
 quiesced=true
 if ((${#resume_timers[@]})); then systemctl stop "${resume_timers[@]}"; fi
 if ((${#resume_services[@]})); then systemctl stop "${resume_services[@]}"; fi
+sudo -u postgres pg_dump --format=custom --compress=9 --dbname hotel_ai_os >"${db_plain}"
 rsync "${state_rsync_options[@]}" "${source_state}/" "${stage_state}/var/lib/sifangguan-ota/"
+rsync -aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices "${source_core}/" "${stage_core}/"
+sudo -u postgres psql -XAtq --dbname hotel_ai_os <"${reference_sql}" >"${original_references}"
+"${original_tool}" capture "${stage_core}" "${original_manifest}" "${timestamp}" "${original_settings}" "${original_references}" >/dev/null
 if [[ -d ${source_raw} ]]; then
   rsync "${raw_rsync_options[@]}" "${source_raw}/" "${stage_raw}/"
 fi
@@ -231,30 +256,22 @@ install -d -m 0750 -o root -g root "${stage_state}/etc/sifangguan-ota"
 install -m 0640 -o root -g root "${runtime_env}" "${stage_state}/etc/sifangguan-ota/runtime.env"
 resume_writers
 
-tar --acls --xattrs --numeric-owner -C "${stage_state}" -czf - etc var |
-  encrypt_stream >"${state_encrypted_tmp}"
-chmod 0600 "${state_encrypted_tmp}"
-decrypt_stream <"${state_encrypted_tmp}" | tar -tzf - >"${archive_list}"
-for required_entry in \
-  etc/sifangguan-ota/runtime.env \
-  var/lib/sifangguan-ota/report-sources.json \
-  var/lib/sifangguan-ota/pms-login-secrets.json \
-  var/lib/sifangguan-ota/live-report-snapshots.json \
-  var/lib/sifangguan-ota/kpi-monthly-pms-summaries.json; do
-  grep -Fxq -- "${required_entry}" "${archive_list}"
-done
-if grep -Fq -- 'var/lib/sifangguan-ota/analytics-retention/raw/' "${archive_list}"; then
-  printf '%s\n' 'RAW_RETENTION_BOUNDARY_VIOLATION' >&2
-  exit 1
-fi
-mv -- "${state_encrypted_tmp}" "${state_encrypted_final}"
-write_checksum "${state_encrypted_final}"
-copy_tier_once \
-  "${state_encrypted_final}" \
-  "${state_monthly}/sifangguan-ota-state-monthly-${month_key}.tar.gz.enc"
-copy_tier_once \
-  "${state_encrypted_final}" \
-  "${state_yearly}/sifangguan-ota-state-yearly-${year_key}.tar.gz.enc"
+encrypt_stream <"${db_plain}" >"${db_encrypted_tmp}"
+chmod 0600 "${db_encrypted_tmp}"
+decrypt_stream <"${db_encrypted_tmp}" >"${db_check}"
+cmp --silent "${db_plain}" "${db_check}"
+sudo -u postgres pg_restore --list <"${db_check}" >/dev/null
+mv -- "${db_encrypted_tmp}" "${db_encrypted_final}"
+write_checksum "${db_encrypted_final}"
+
+"${snapshot_tool}" create --source "${stage_state}" --state-root "${state_root}" \
+  --index "${state_encrypted_final}" --snapshot "${timestamp}" \
+  --key "${backup_key}" --database "${db_encrypted_final}"
+# The first legacy OR incremental monthly/yearly pair is preserved. Promotion
+# uses the existing cp/reflink semantics and repairs interrupted half-pairs only
+# from an index/dump with the exact same frozen ciphertext digest.
+"${snapshot_tool}" promote --state-root "${state_root}" --database-root "${db_root}" \
+  --key "${backup_key}" --snapshot "${timestamp}"
 
 # Each completed source day becomes one encrypted raw-evidence package. A
 # source fingerprint rebuilds a day only when late files actually changed it.
@@ -263,15 +280,20 @@ for raw_day_dir in "${stage_raw}"/????-??-??; do
   raw_day="$(basename "${raw_day_dir}")"
   [[ ${raw_day} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
   [[ ${raw_day} < "$(date '+%Y-%m-%d')" ]] || continue
-  raw_target="${raw_backup_root}/analytics-raw-${raw_day}.tar.gz.enc"
-  raw_fingerprint_file="${raw_target}.source.sha256"
+  raw_fingerprint_file="${raw_backup_root}/.analytics-raw-${raw_day}.source.sha256"
   source_fingerprint="$(
     find "${raw_day_dir}" -xdev -type f -name '*.enc' \
       -printf '%P\0%s\0%T@\0' | sort -z | sha256sum | cut -d ' ' -f 1
   )"
-  if [[ -s ${raw_target} && -s ${raw_fingerprint_file} ]] \
-      && [[ $(<"${raw_fingerprint_file}") == "${source_fingerprint}" ]]; then
-    continue
+  if [[ -s ${raw_fingerprint_file} ]]; then
+    read -r cached_fingerprint cached_raw_name <"${raw_fingerprint_file}"
+    if [[ ${cached_fingerprint} == "${source_fingerprint}" \
+      && ${cached_raw_name} =~ ^analytics-raw-${raw_day}-[0-9a-f]{64}[.]tar[.]gz[.]enc$ \
+      && -s ${raw_backup_root}/${cached_raw_name} \
+      && -s ${raw_backup_root}/${cached_raw_name}.sha256 ]] \
+      && (cd "${raw_backup_root}" && sha256sum --check "${cached_raw_name}.sha256" >/dev/null); then
+      continue
+    fi
   fi
   if ! find "${raw_day_dir}" -xdev -type f -name '*.enc' -print -quit | grep -q .; then
     continue
@@ -285,20 +307,15 @@ for raw_day_dir in "${stage_raw}"/????-??-??; do
   grep -Eq "^${raw_day}/.+[.]enc$" "${raw_list}"
   rm -f -- "${raw_list}"
   raw_list=''
-  mv -f -- "${raw_tmp}" "${raw_target}"
+  # Late source files create an immutable revision, never overwrite a package
+  # referenced by a device's previous atomic accepted bundle.
+  "${snapshot_tool}" commit-raw --raw-root "${raw_backup_root}" --source-temporary "${raw_tmp}" \
+    --day "${raw_day}" --fingerprint "${source_fingerprint}"
   raw_tmp=''
-  write_checksum "${raw_target}"
-  printf '%s\n' "${source_fingerprint}" >"${raw_fingerprint_file}"
-  chmod 0600 "${raw_fingerprint_file}"
 done
 
-prune_tier "${db_daily}" 'hotel_ai_os-daily-*.dump.enc' 30
-prune_tier "${db_monthly}" 'hotel_ai_os-monthly-*.dump.enc' 12
-prune_tier "${db_yearly}" 'hotel_ai_os-yearly-*.dump.enc' 3
-prune_tier "${state_daily}" 'sifangguan-ota-state-daily-*.tar.gz.enc' 30
-prune_tier "${state_monthly}" 'sifangguan-ota-state-monthly-*.tar.gz.enc' 12
-prune_tier "${state_yearly}" 'sifangguan-ota-state-yearly-*.tar.gz.enc' 3
-prune_tier "${raw_backup_root}" 'analytics-raw-*.tar.gz.enc' "${raw_retention_days}"
+"${snapshot_tool}" prune --state-root "${state_root}" --database-root "${db_root}" --key "${backup_key}"
+"${snapshot_tool}" prune-raw --raw-root "${raw_backup_root}" --keep "${raw_retention_days}"
 
 if [[ -d ${source_raw} ]]; then
   find "${source_raw}" -xdev -type f -name '*.enc' \
@@ -314,6 +331,7 @@ for directory in \
   "${export_data}/sifangguan-ota/daily" \
   "${export_data}/sifangguan-ota/monthly" \
   "${export_data}/sifangguan-ota/yearly" \
+  "${export_data}/sifangguan-ota/objects" \
   "${export_data}/analytics-raw/daily" \
   "${export_root}/receipts"; do
   install -d -m 0750 -o root -g "${export_group}" "${directory}"
@@ -335,13 +353,8 @@ publish_directory() {
       install -m 0440 -o root -g "${export_group}" "${source}.sha256" "${target}.sha256"
     fi
   done
-  for existing in "${target_directory}"/${source_pattern}; do
-    [[ -f ${existing} ]] || continue
-    base="$(basename "${existing}")"
-    if [[ ! -f ${source_directory}/${base} ]]; then
-      rm -f -- "${existing}" "${existing}.sha256"
-    fi
-  done
+  # Stale export files are removed only AFTER the new complete manifest is
+  # atomically published. A failed copy/publish keeps the previous closure.
 }
 
 publish_directory "${db_daily}" 'hotel_ai_os-daily-*.dump.enc' "${export_data}/hotel-ai-os/daily"
@@ -350,13 +363,20 @@ publish_directory "${db_yearly}" 'hotel_ai_os-yearly-*.dump.enc' "${export_data}
 publish_directory "${state_daily}" 'sifangguan-ota-state-daily-*.tar.gz.enc' "${export_data}/sifangguan-ota/daily"
 publish_directory "${state_monthly}" 'sifangguan-ota-state-monthly-*.tar.gz.enc' "${export_data}/sifangguan-ota/monthly"
 publish_directory "${state_yearly}" 'sifangguan-ota-state-yearly-*.tar.gz.enc' "${export_data}/sifangguan-ota/yearly"
+publish_directory "${state_daily}" 'sifangguan-ota-state-daily-*.snapshot.json.enc' "${export_data}/sifangguan-ota/daily"
+publish_directory "${state_monthly}" 'sifangguan-ota-state-monthly-*.snapshot.json.enc' "${export_data}/sifangguan-ota/monthly"
+publish_directory "${state_yearly}" 'sifangguan-ota-state-yearly-*.snapshot.json.enc' "${export_data}/sifangguan-ota/yearly"
+publish_directory "${state_root}/objects" '*.pack.enc' "${export_data}/sifangguan-ota/objects"
 publish_directory "${raw_backup_root}" 'analytics-raw-*.tar.gz.enc' "${export_data}/analytics-raw/daily"
 
+"${snapshot_tool}" export-closure --state-root "${state_root}" --database-root "${db_root}" \
+  --raw-root "${raw_backup_root}" --key "${backup_key}" --output "${export_root}/.recovery-closure.json"
 "${manifest_tool}" "${export_root}" "${export_group}"
 
-rm -f -- "${db_plain}" "${db_check}" "${archive_list}"
+rm -f -- "${db_plain}" "${db_check}" "${archive_list}" "${original_settings}" "${original_references}"
 trap - EXIT INT TERM
 printf '%s\n' 'COMPLETE_BACKUP_EXPORT_OK'
+printf 'pairedOriginalsSnapshot=%s type=CORE_AND_OTA_STATE_WITH_ORIGINALS\n' "${timestamp}"
 printf 'retention=database:30/12/3,state:30/12/3,raw-days:%s export=%s\n' \
   "${raw_retention_days}" "${export_root}"
 stat -c '%U:%G:%a:%s:%n' \

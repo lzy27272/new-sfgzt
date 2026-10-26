@@ -1,0 +1,29 @@
+import { useState } from 'react'
+import type { ApiIdentity } from '../../api/client'
+import type { AppNavigate } from '../../app/routeConfig'
+import type { RouteParams } from '../../domain'
+import { FinanceFacts, FinanceMutation, FinanceTable } from './FinanceData'
+import { useFinanceResource } from './useFinanceResource'
+import { errorMessage } from './api'
+import { parseBusinessJson } from './businessModel'
+import { rowText, type FinanceRow, type FinanceList } from './unifiedModel'
+import s from './finance.module.css'
+
+type Props = { identity: ApiIdentity; permissions: string[]; go: AppNavigate; params: RouteParams }
+export default function FinanceCashCorrections({ identity, permissions, go, params }: Props) {
+ const has = (code: string) => permissions.includes('*') || permissions.includes(code)
+ const allowed = has('finance.read') || has('finance.review') || has('finance.pay')
+ const list = useFinanceResource<FinanceList & { complete: boolean }>(identity, allowed ? '/cash-corrections' : undefined)
+ const facts = useFinanceResource<FinanceList & { complete: boolean }>(identity, allowed ? '/cash-corrections/facts' : undefined)
+ const detail = useFinanceResource<FinanceRow>(identity, allowed && params.correctionId ? `/cash-corrections/${params.correctionId}` : undefined)
+ const [reversals, setReversals] = useState('[]')
+ const reload = () => { list.reload();facts.reload();detail.reload() }
+ if (!allowed) return <p role="alert" className={s.error}>当前身份无权查看资金差错；工资和税务仍需各自独立权限。</p>
+ return <section className={s.shell}><header className={s.hero}><div><small>CASH ERROR · INDEPENDENT REVIEW</small><h2>资金误登记的受控更正</h2><p>原付款、原流水、原银行匹配及原业务日期全部保留。这里不执行银行退款，也不撤销已发生费用。</p></div><button onClick={reload}>刷新当前身份资料</button></header>
+ {[list.error, facts.error, detail.error].filter(Boolean).map((error, index) => <p role="alert" key={index} className={s.error}>{errorMessage(error)}</p>)}
+ {!params.correctionId && <><p className={s.hint}>如果银行实际退回款项，应登记真实退款及反向流水，而不是使用“误登记更正”。已被借款核销、后续退款、折旧或摊销使用的金额会阻止直接冲回，需先独立核对关联事项。</p>{facts.data?.complete === false && <p className={s.hint}>仅显示最近 200 条来源，不能据此认定已检查全部资金。</p>}<FinanceTable rows={facts.data?.items ?? []} label="实际收付原事实与净有效金额" columns={[{ key: 'id', label: '原付款 / 动作 ID' }, { key: 'sourceKind', label: '来源类型' }, { key: 'title', label: '原业务' }, { key: 'action', label: '原动作' }, { key: 'sourceVersion', label: '当前原业务版本' }, { key: 'occurredOn', label: '保留原业务日' }, { key: 'amount', label: '原正额金额' }, { key: 'effectiveAmount', label: '净有效金额' }, { key: 'matchedAmount', label: '净银行分配' }, { key: 'reference', label: '原始依据' }]} />
+ {(has('finance.pay') || has('finance.review')) && <section className={s.card}><h3>申请差错更正，等待独立审核</h3><p className={s.hint}>审核人须为后台已配置的财务或财务总监，且不能是申请编制人、原资金登记人或原业务申请人。锁期差错须选当前开放日，系统不回写旧月。</p><label>明确的银行匹配逆向明细（未匹配填 []）<textarea rows={4} value={reversals} onChange={event => setReversals(event.target.value)} placeholder={'[{"matchId":"原fo_bank_match或fc_claim_bank_match ID","amount":"10.00"}]'} /></label><FinanceMutation identity={identity} path="/cash-corrections" label="保存更正申请（尚不冲回）" fields={[{ key: 'sourceKind', label: '原来源类型', required: true, type: 'select', options: [{ value: 'CLAIM', label: '报销原付款' }, { value: 'OPERATION', label: '财务业务原现金动作' }] }, { key: 'sourceId', label: '上表原付款 / 动作 ID，不是业务单据 ID', required: true }, { key: 'expectedSourceVersion', label: '上表当前原业务版本', required: true }, { key: 'reviewerId', label: '后台配置的独立财务 / 总监账号 ID', required: true }, { key: 'amount', label: '本次误登记冲回金额', required: true }, { key: 'accountingDate', label: '开放期间的更正记账日', type: 'date', required: true }, { key: 'reason', label: '原始依据、误登记原因及关联事项核对', type: 'textarea', required: true }]} build={(v, requestId) => ({ ...v, requestId, expectedSourceVersion: Number(v.expectedSourceVersion), matchingReversals: parseBusinessJson(reversals, '明确匹配逆向') })} onSuccess={row => { reload();go('finance', { ...params, tab: 'cash-errors', correctionId: rowText(row, 'id') }) }} /></section>}
+ <FinanceTable rows={list.data?.items ?? []} label="不可删除的更正申请及审核结果" columns={[{ key: 'id', label: '更正编号' }, { key: 'status', label: '待审核 / 已确认 / 已拒绝' }, { key: 'sourceKind', label: '来源' }, { key: 'sourceId', label: '原现金事实' }, { key: 'amount', label: '更正金额' }, { key: 'originalDate', label: '原业务日期' }, { key: 'accountingOn', label: '更正记账日' }, { key: 'reason', label: '独立核对依据' }]} onOpen={row => go('finance', { ...params, tab: 'cash-errors', correctionId: rowText(row, 'id') })} /></>}
+ {params.correctionId && detail.data && <section className={s.card}><button onClick={() => go('finance', { ...params, tab: 'cash-errors', correctionId: undefined })}>返回差错及原事实列表</button><FinanceFacts data={detail.data} labels={{ id: '更正编号', status: '审核状态', sourceKind: '来源类型', sourceId: '原现金事实 ID', sourceVersion: '冻结原业务版本', sourceHash: '原始来源快照哈希', originalSourceEventId: '原会计事件', originalDate: '保留原业务日期', accountingOn: '更正记账日', originalAmount: '原正额事实', amount: '本次更正金额', reason: '更正依据', reviewerId: '冻结独立审核人', reviewedBy: '实际审核人', reviewNote: '审核意见', externalExecution: '不执行银行操作' }} /><details><summary>冻结来源与明确匹配逆向</summary><pre className={s.hint}>{JSON.stringify({ snapshot: detail.data.snapshot, requestedReversals: detail.data.matchingReversals, actualReversals: detail.data.bankReversals }, null, 2)}</pre></details>{detail.data.status === 'REVIEW' && has('finance.review') && <FinanceMutation identity={identity} path={`/cash-corrections/${params.correctionId}/review`} label="提交独立核对结果" fields={[{ key: 'decision', label: '审核结论', type: 'select', options: [{ value: 'REJECT', label: '拒绝本次更正，原金额不变' }, { value: 'APPROVE', label: '确认误登记并追加差错冲回' }], required: true }, { key: 'note', label: '独立原件核对、关联业务和更正结论', type: 'textarea', required: true }]} build={v => ({ expectedVersion: Number(detail.data?.version), approve: v.decision === 'APPROVE', note: v.note })} onSuccess={reload} confirm="只有确认才追加差错及匹配逆向；这不是向银行退款，不删除原资金事实，不改旧期间。" />}</section>}
+ </section>
+}
