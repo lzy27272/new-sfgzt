@@ -13,6 +13,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -260,10 +261,10 @@ class WorkDataEvidencePolicyTest {
         TenantPrincipal principal=new TenantPrincipal(UUID.randomUUID(),UUID.randomUUID(),"TEST",Set.of(),UUID.randomUUID());
         UUID item=UUID.randomUUID(),record=UUID.randomUUID(),hotel=UUID.randomUUID();
         JsonNode payload=json("{\"roomNumber\":\"1208\",\"serviceContent\":\"补送浴巾\"}");
-        assertThatCode(()->ReflectionTestUtils.invokeMethod(service,"validateSubmissionPolicy",principal,item,record,payload,hotel,null,null,null)).doesNotThrowAnyException();
+        assertThatCode(()->ReflectionTestUtils.invokeMethod(service,"validateSubmissionPolicy",principal,item,record,payload,hotel,LocalDate.of(2026,10,26),null,null,null)).doesNotThrowAnyException();
         when(jdbc.queryForMap(contains("select submission_policy::text"),any(MapSqlParameterSource.class)))
             .thenReturn(Map.of("submission_policy","{\"attachmentRequired\":true,\"evidenceRequirements\":[{"+requirement+",\"captureSource\":\"CAMERA\"}]}","applicability_policy","{}","execution_policy","{}"));
-        assertThatThrownBy(()->ReflectionTestUtils.invokeMethod(service,"validateSubmissionPolicy",principal,item,record,payload,hotel,null,null,null))
+        assertThatThrownBy(()->ReflectionTestUtils.invokeMethod(service,"validateSubmissionPolicy",principal,item,record,payload,hotel,LocalDate.of(2026,10,26),null,null,null))
             .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("服务照片至少需要1份");
     }
 
@@ -308,6 +309,7 @@ class WorkDataEvidencePolicyTest {
                 null,
                 payload,
                 UUID.randomUUID(),
+                LocalDate.of(2026,10,26),
                 "已明确记录适用情况",
                 null,
                 null);
