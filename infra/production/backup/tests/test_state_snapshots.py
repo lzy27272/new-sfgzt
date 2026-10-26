@@ -382,7 +382,11 @@ class StateSnapshotsTest(unittest.TestCase):
         self.assertFalse(result["compressionAssumed"])
         script = (BASE / "backup-postgres.sh").read_text()
         self.assertLess(script.index("\ncheck_backup_capacity\n"), script.index('\nrsync "${state_rsync_options[@]}"'))
-        self.assertLess(script.rindex("\ncheck_backup_capacity\n"), script.index("quiesced=true"))
+        gates = [match.start() for match in re.finditer(r"\ncheck_backup_capacity\n", script)]
+        self.assertEqual(len(gates), 3)
+        self.assertLess(gates[1], script.index("quiesced=true"))
+        self.assertGreater(gates[2], script.index("quiesced=true"))
+        self.assertLess(gates[2], script.index("\nresume_writers\n"))
 
     def test_atomic_bundle_is_authoritative_over_torn_legacy_pair_and_never_silently_falls_back(self):
         self.capture(); raw = self.base / "raw"; raw.mkdir()
@@ -487,8 +491,9 @@ class CapacityMeasurementTest(unittest.TestCase):
         path.write_text("".join(str(value) + "\n" for value in values), encoding="ascii")
         return path
 
-    def measure(self, state, core=(), raw=(), completed=(), pending=(), days=0):
-        return S.capacity_measurements(*(self.lengths(values) for values in (state, core, raw, completed, pending)), days)
+    def measure(self, state, core=(), raw=(), completed=(), pending=(), days=0, rebuild=None, rebuild_days=None, export_pending=0):
+        return S.capacity_measurements(*(self.lengths(values) for values in (state, core, raw, completed, pending)), days,
+            self.lengths(rebuild) if rebuild is not None else None, rebuild_days, export_pending)
 
     def check(self, m, db=100, free=10**15):
         with mock.patch.object(S.shutil, "disk_usage", return_value=types.SimpleNamespace(free=free)):
@@ -601,6 +606,75 @@ class CapacityMeasurementTest(unittest.TestCase):
             self.measure([1000], raw=[100], completed=[100, 200], pending=[50], days=0)
         with self.assertRaisesRegex(ValueError, "Invalid fresh source"):
             self.measure([], raw=[100], completed=[100, 200], pending=[50], days=1)
+
+    def test_validated_raw_reuse_changes_only_rebuild_and_missing_export_budget(self):
+        reused = self.measure([1000], raw=[300], completed=[300], pending=[75], days=1, rebuild=[], rebuild_days=0)
+        rebuilt = self.measure([1000], raw=[300], completed=[300], pending=[75], days=1)
+        self.assertEqual(reused["rawArchiveBytes"], 0)
+        for key in ("stateBytes", "newStatePackBytes", "largestStatePackBytes", "rawBytes", "rawCompletedBytes", "stagePendingBytes"):
+            self.assertEqual(reused[key], rebuilt[key])
+        self.assertEqual(self.check(rebuilt)["filesystems"][0]["requiredBytes"] - self.check(reused)["filesystems"][0]["requiredBytes"],
+                         3 * rebuilt["rawArchiveBytes"])
+        backlog = self.measure([1000], raw=[300], completed=[300], pending=[75], days=1, rebuild=[], rebuild_days=0, export_pending=777)
+        self.assertEqual(self.check(backlog)["filesystems"][0]["requiredBytes"] - self.check(reused)["filesystems"][0]["requiredBytes"], 777)
+
+    def test_raw_export_backlog_validates_sources_and_charges_entire_bad_target_copy(self):
+        root, export = self.base / "raw-local", self.base / "raw-export"
+        root.mkdir(); export.mkdir()
+        payload = b"a real locally retained encrypted package"
+        source = root / ("analytics-raw-2026-10-25-" + hashlib.sha256(payload).hexdigest() + ".tar.gz.enc")
+        source.write_bytes(payload)
+        S.checksum(source)
+        expected = source.stat().st_size + Path(str(source) + ".sha256").stat().st_size
+        self.assertEqual(S.raw_export_pending(root, export), expected)
+        target = export / source.name
+        shutil.copyfile(source, target); shutil.copyfile(str(source) + ".sha256", str(target) + ".sha256")
+        self.assertEqual(S.raw_export_pending(root, export), 0)
+        target.write_bytes(b"x" * source.stat().st_size)
+        self.assertEqual(S.raw_export_pending(root, export), expected)
+        # Corrupt export bytes still occupy free space; neither deletion credit
+        # nor only a small size-difference may replace the full .part copy bound.
+        target.write_bytes(b"x" * 100000)
+        self.assertEqual(S.raw_export_pending(root, export), expected)
+        source.write_bytes(b"corrupt local package")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            S.raw_export_pending(root, export)
+
+    def test_validated_reuse_does_not_remove_late_source_staging_charge(self):
+        m = self.measure([1000], raw=[100], completed=[300], pending=[75], days=1, rebuild=[], rebuild_days=0)
+        self.assertEqual((m["rawBytes"], m["lateRawBytes"], m["stagePendingBytes"]), (300, 200, 275))
+        self.assertEqual(m["rawArchiveBytes"], 0)
+        self.check(m)
+
+    @unittest.skipIf(os.name == "nt", "Linux GNU find/stat/sha256 cache condition; CI must execute")
+    def test_native_raw_cache_hit_missing_package_corrupt_source_and_late_file_rebuild(self):
+        script = (BASE / "backup-postgres.sh").read_text()
+        function = script[script.index("raw_cache_reusable() {"):script.index("\ncheck_backup_capacity() (")]
+        root, day = self.base / "raw-backups", self.base / "source-raw/2026-10-25"
+        root.mkdir(); day.mkdir(parents=True)
+        (day / "first.enc").write_bytes(b"actual encrypted source")
+        payload = b"retained package bytes"
+        source = root / ("analytics-raw-2026-10-25-" + hashlib.sha256(payload).hexdigest() + ".tar.gz.enc")
+        source.write_bytes(payload); S.checksum(source)
+        command = 'set -Eeuo pipefail\nraw_backup_root=$1\n' + function + '\nif raw_cache_reusable "$2" 2026-10-25; then echo HIT; else echo REBUILD; fi\nprintf "%s\\n" "$source_fingerprint"\n'
+        def run():
+            return subprocess.run(["bash", "-c", command, "fixture", str(root), str(day)], check=True,
+                                  capture_output=True, text=True).stdout.splitlines()
+        first = run()
+        self.assertEqual(first[0], "REBUILD")
+        cache = root / ".analytics-raw-2026-10-25.source.sha256"
+        cache.write_text(first[1] + " " + source.name + "\n", encoding="ascii")
+        self.assertEqual(run()[0], "HIT")
+        (day / "late.enc").write_bytes(b"new arrival after the online first gate")
+        late = run(); self.assertEqual(late[0], "REBUILD")
+        cache.write_text(late[1] + " " + source.name + "\n", encoding="ascii")
+        self.assertEqual(run()[0], "HIT")
+        source.write_bytes(b"bad source sha")
+        self.assertEqual(run()[0], "REBUILD")
+        with self.assertRaises(ValueError):
+            S.raw_export_pending(root, self.base / "missing-export")
+        source.unlink()
+        self.assertEqual(run()[0], "REBUILD")
 
     def test_same_filesystem_sums_roles_once_and_low_space_does_not_mutate_files(self):
         m = self.measure([1234, 555], raw=[4321], completed=[4321], pending=[111], days=1)

@@ -91,8 +91,19 @@ state_rsync_options=(
 core_rsync_options=(-aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices)
 raw_rsync_options=(-a --delete --one-file-system --include='*/' --include='*.enc' --exclude='*')
 
+# Identical validated reuse condition for estimation and the actual archive loop.
+raw_cache_reusable() {
+  local raw_day_dir=$1 raw_day=$2 raw_fingerprint_file="${raw_backup_root}/.analytics-raw-$2.source.sha256"
+  source_fingerprint="$(find "${raw_day_dir}" -xdev -type f -name '*.enc' -printf '%P\0%s\0%T@\0' | sort -z | sha256sum | cut -d ' ' -f 1)" || exit 1
+  [[ -s ${raw_fingerprint_file} ]] || return 1
+  read -r cached_fingerprint cached_raw_name <"${raw_fingerprint_file}"
+  [[ ${cached_fingerprint} == "${source_fingerprint}" && ${cached_raw_name} =~ ^analytics-raw-${raw_day}-[0-9a-f]{64}[.]tar[.]gz[.]enc$ \
+     && -s ${raw_backup_root}/${cached_raw_name} && -s ${raw_backup_root}/${cached_raw_name}.sha256 ]] \
+    && (cd "${raw_backup_root}" && sha256sum --check "${cached_raw_name}.sha256" >/dev/null)
+}
+
 check_backup_capacity() (
-  local source_bytes database_bytes raw_bytes completed_archives=0 measurement_root raw_day_dir raw_day
+  local source_bytes database_bytes raw_bytes completed_archives=0 rebuild_archives=0 measurement_root raw_day_dir raw_day
   measurement_root="$(mktemp -d "${stage_root}/.capacity-XXXXXXXX")"
   shopt -s nullglob
   # Only files created by this measurement are removed, never backup/source data.
@@ -100,6 +111,7 @@ check_backup_capacity() (
   install -d -m 0700 "${measurement_root}/fresh-state" "${measurement_root}/fresh-core" "${measurement_root}/fresh-raw"
   : >"${measurement_root}/raw.lengths"
   : >"${measurement_root}/completed.lengths"
+  : >"${measurement_root}/rebuild.lengths"
   : >"${measurement_root}/pending.lengths"
   # Fresh, empty dry-run destinations enumerate the complete selected
   # source independently of existing staging. %o forces even deletions through
@@ -123,14 +135,20 @@ check_backup_capacity() (
       [[ ${raw_day} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && ${raw_day} < ${backup_today} ]] || continue
       install -d -m 0700 "${measurement_root}/fresh-${raw_day}"
       LC_ALL=C rsync "${raw_rsync_options[@]}" --dry-run --info=NONE,NAME1 --out-format='%o %l' \
-        "${raw_day_dir}/" "${measurement_root}/fresh-${raw_day}/" >>"${measurement_root}/completed.lengths"
+        "${raw_day_dir}/" "${measurement_root}/fresh-${raw_day}/" >"${measurement_root}/${raw_day}.lengths"
+      cat "${measurement_root}/${raw_day}.lengths" >>"${measurement_root}/completed.lengths"
       completed_archives=$((completed_archives + 1))
+      if ! raw_cache_reusable "${raw_day_dir}" "${raw_day}"; then
+        cat "${measurement_root}/${raw_day}.lengths" >>"${measurement_root}/rebuild.lengths"
+        rebuild_archives=$((rebuild_archives + 1))
+      fi
     done
   fi
   "${snapshot_tool}" measure --state-lengths "${measurement_root}/state.lengths" \
     --core-lengths "${measurement_root}/core.lengths" --raw-lengths "${measurement_root}/raw.lengths" \
     --completed-lengths "${measurement_root}/completed.lengths" --pending-lengths "${measurement_root}/pending.lengths" \
-    --completed-archives "${completed_archives}" >"${measurement_root}/measurement.json"
+    --completed-archives "${completed_archives}" --rebuild-lengths "${measurement_root}/rebuild.lengths" --rebuild-archives "${rebuild_archives}" \
+    --raw-backup-root "${raw_backup_root}" --raw-export-root "${export_data}/analytics-raw/daily" >"${measurement_root}/measurement.json"
   read -r source_bytes raw_bytes < <(python3 -I - "${measurement_root}/measurement.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1],encoding='ascii'));print(m['stateBytes'],m['rawBytes'])
@@ -292,6 +310,7 @@ if [[ -d ${source_raw} ]]; then
 fi
 install -d -m 0750 -o root -g root "${stage_state}/etc/sifangguan-ota"
 install -m 0640 -o root -g root "${runtime_env}" "${stage_state}/etc/sifangguan-ota/runtime.env"
+check_backup_capacity
 resume_writers
 
 encrypt_stream <"${db_plain}" >"${db_encrypted_tmp}"
@@ -318,21 +337,7 @@ for raw_day_dir in "${stage_raw}"/????-??-??; do
   raw_day="$(basename "${raw_day_dir}")"
   [[ ${raw_day} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
   [[ ${raw_day} < ${backup_today} ]] || continue
-  raw_fingerprint_file="${raw_backup_root}/.analytics-raw-${raw_day}.source.sha256"
-  source_fingerprint="$(
-    find "${raw_day_dir}" -xdev -type f -name '*.enc' \
-      -printf '%P\0%s\0%T@\0' | sort -z | sha256sum | cut -d ' ' -f 1
-  )"
-  if [[ -s ${raw_fingerprint_file} ]]; then
-    read -r cached_fingerprint cached_raw_name <"${raw_fingerprint_file}"
-    if [[ ${cached_fingerprint} == "${source_fingerprint}" \
-      && ${cached_raw_name} =~ ^analytics-raw-${raw_day}-[0-9a-f]{64}[.]tar[.]gz[.]enc$ \
-      && -s ${raw_backup_root}/${cached_raw_name} \
-      && -s ${raw_backup_root}/${cached_raw_name}.sha256 ]] \
-      && (cd "${raw_backup_root}" && sha256sum --check "${cached_raw_name}.sha256" >/dev/null); then
-      continue
-    fi
-  fi
+  if raw_cache_reusable "${raw_day_dir}" "${raw_day}"; then continue; fi
   if ! find "${raw_day_dir}" -xdev -type f -name '*.enc' -print -quit | grep -q .; then
     continue
   fi

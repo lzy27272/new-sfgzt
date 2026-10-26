@@ -624,7 +624,30 @@ def numeric_lengths(path):
     return values
 
 
-def capacity_measurements(state_lengths, core_lengths, raw_lengths, completed_lengths, pending_lengths, completed_archives):
+def raw_export_pending(root, destination):
+    """Validate local historical packages before budgeting complete export replacements."""
+    root, destination = Path(root), Path(destination)
+    total = 0
+    for source in sorted(root.glob("analytics-raw-*.tar.gz.enc")):
+        name = RAW_NAME.fullmatch(source.name)
+        if not name:
+            raise ValueError("Unmanaged raw archive blocks capacity calculation")
+        info = checked(source)
+        if name[2] and name[2] != info["sha256"]:
+            raise ValueError("Raw archive name differs from verified source SHA")
+        target = destination / source.name
+        try:
+            same = (regular(str(source) + ".sha256").read_bytes() == regular(str(target) + ".sha256").read_bytes()
+                    and checked(target) == info)
+        except (OSError, ValueError):
+            same = False
+        if not same:
+            total += info["bytes"] + regular(str(source) + ".sha256").stat().st_size
+    return total
+
+
+def capacity_measurements(state_lengths, core_lengths, raw_lengths, completed_lengths, pending_lengths, completed_archives,
+                          rebuild_lengths=None, rebuild_archives=None, raw_export_pending_bytes=0):
     if not isinstance(completed_archives, int) or not 0 <= completed_archives <= 100000:
         raise ValueError("Invalid completed raw archive count")
     state = numeric_lengths(state_lengths) + numeric_lengths(core_lengths)
@@ -633,6 +656,12 @@ def capacity_measurements(state_lengths, core_lengths, raw_lengths, completed_le
         raise ValueError("Invalid fresh source capacity measurement")
     if completed and not completed_archives:
         raise ValueError("Completed raw data has no date archive")
+    rebuild = numeric_lengths(rebuild_lengths) if rebuild_lengths is not None else completed
+    rebuild_archives = completed_archives if rebuild_archives is None else rebuild_archives
+    if (type(rebuild_archives) is not int or not 0 <= rebuild_archives <= completed_archives or
+        type(raw_export_pending_bytes) is not int or raw_export_pending_bytes < 0 or
+        sum(rebuild) > sum(completed) or (rebuild and not rebuild_archives)):
+        raise ValueError("Invalid validated raw rebuild measurement")
     # Writers remain online during the first gate. Completed-date scans can
     # see new files/directory metadata that the preceding whole-tree scan did
     # not see. Budget the larger view and charge that full late delta again to
@@ -659,13 +688,14 @@ def capacity_measurements(state_lengths, core_lengths, raw_lengths, completed_le
     largest_pack = gzip_upper_bound(largest_tar) + 64
     # Raw tar members retain paths, so allow 16KiB per entry for numeric-owner
     # tar/PAX metadata and path headers, plus alignment/trailers per date.
-    raw_payload = sum(completed) + 16384 * len(completed) + 11264 * completed_archives
-    raw_archive = gzip_upper_bound(raw_payload) + 128 * completed_archives if completed_archives else 0
+    raw_payload = sum(rebuild) + 16384 * len(rebuild) + 11264 * rebuild_archives
+    raw_archive = gzip_upper_bound(raw_payload) + 128 * rebuild_archives if rebuild_archives else 0
     return {"kind": "SFG_BACKUP_CAPACITY_MEASUREMENT_V1", "stateBytes": sum(state), "stateEntries": len(state),
             "stateMaxFileBytes": max(state), "newStatePackBytes": state_packs, "largestStatePackBytes": largest_pack,
             "rawBytes": max(source_raw_bytes, completed_raw_bytes), "rawCompletedBytes": completed_raw_bytes, "rawArchiveBytes": raw_archive,
             "sourceRawBytes": source_raw_bytes, "lateRawBytes": late_raw_bytes,
             "rawCompletedEntries": len(completed), "rawCompletedArchives": completed_archives,
+            "rawRebuildBytes": sum(rebuild), "rawRebuildArchives": rebuild_archives, "rawExportPendingBytes": raw_export_pending_bytes,
             "stagePendingBytes": sum(pending) + late_raw_bytes, "stagePendingEntries": len(pending)}
 
 
@@ -686,6 +716,7 @@ def check_capacity(state_root, database_root, stage_root, export_root, state_byt
         raw_required = 2 * raw_bytes
     else:
         m = measurements
+        rebuild_bytes, export_pending = m.get("rawRebuildBytes", m.get("rawCompletedBytes")), m.get("rawExportPendingBytes", 0)
         fields = ("stateBytes", "stateEntries", "stateMaxFileBytes", "newStatePackBytes", "largestStatePackBytes",
                   "rawBytes", "rawCompletedBytes", "rawArchiveBytes", "rawCompletedEntries", "rawCompletedArchives",
                   "stagePendingBytes", "stagePendingEntries")
@@ -694,7 +725,8 @@ def check_capacity(state_root, database_root, stage_root, export_root, state_byt
             m["stateBytes"] != state_bytes or m["rawBytes"] != raw_bytes or
             not 0 < m["stateMaxFileBytes"] <= state_bytes or m["rawCompletedBytes"] > raw_bytes or
             m["newStatePackBytes"] < state_bytes or m["largestStatePackBytes"] <= 0 or
-            m["rawArchiveBytes"] < m["rawCompletedBytes"]):
+            type(rebuild_bytes) is not int or not 0 <= rebuild_bytes <= m["rawCompletedBytes"] or
+            type(export_pending) is not int or export_pending < 0 or m["rawArchiveBytes"] < rebuild_bytes):
             raise ValueError("Invalid fresh capacity measurements")
         state_pack, temporary_pack = m["newStatePackBytes"], m["largestStatePackBytes"]
         raw_archive = m["rawArchiveBytes"]
@@ -705,7 +737,7 @@ def check_capacity(state_root, database_root, stage_root, export_root, state_byt
         requirements = [(state_root, state_pack + 2 * temporary_pack + 5 * MAX_INDEX),
                         (stage_root, m["stagePendingBytes"] + MAX_INDEX),
                         (database_root, 5 * database_bytes),
-                        (export_root, state_pack + 3 * MAX_INDEX + 3 * database_bytes + raw_archive)]
+                        (export_root, state_pack + 3 * MAX_INDEX + 3 * database_bytes + raw_archive + export_pending)]
         raw_required = 2 * raw_archive
     if raw_required:
         if raw_root is None:
@@ -804,6 +836,10 @@ def main():
     for name in ("state-lengths", "core-lengths", "raw-lengths", "completed-lengths", "pending-lengths"):
         measure.add_argument("--" + name, type=Path, required=True)
     measure.add_argument("--completed-archives", type=int, required=True)
+    measure.add_argument("--rebuild-lengths", type=Path)
+    measure.add_argument("--rebuild-archives", type=int)
+    measure.add_argument("--raw-backup-root", type=Path)
+    measure.add_argument("--raw-export-root", type=Path)
     offline = commands.add_parser("prepare-offsite")
     offline.add_argument("--data-root", type=Path, required=True)
     offline.add_argument("--manifest", type=Path)
@@ -836,7 +872,11 @@ def main():
         measurement = json.loads(regular(a.measurements).read_text(encoding="ascii")) if a.measurements else None
         result = check_capacity(a.state_root, a.database_root, a.stage_root, a.export_root, a.state_bytes, a.database_bytes, a.raw_backup_root, a.raw_bytes, measurement)
     elif a.action == "measure":
-        result = capacity_measurements(a.state_lengths, a.core_lengths, a.raw_lengths, a.completed_lengths, a.pending_lengths, a.completed_archives)
+        if bool(a.raw_backup_root) != bool(a.raw_export_root):
+            raise ValueError("Both raw source and export directories are required")
+        export_pending = raw_export_pending(a.raw_backup_root, a.raw_export_root) if a.raw_backup_root else 0
+        result = capacity_measurements(a.state_lengths, a.core_lengths, a.raw_lengths, a.completed_lengths, a.pending_lengths,
+            a.completed_archives, a.rebuild_lengths, a.rebuild_archives, export_pending)
     elif a.action == "prepare-offsite":
         result = prepare_offsite(a.data_root, a.manifest, a.receipt, a.bundle)
     elif a.action == "create":
