@@ -405,6 +405,7 @@ public class WorkPackageService {
         TenantPrincipal principal = prepare();
         accessPolicy.requirePermission("work-package.allocate");
         accessPolicy.requireOrgScope(request.targetOrgUnitId());
+        lockAllocationRange(principal, workPackageId, request.positionAssignmentId(), request.targetOrgUnitId());
         if (request.validTo() != null && request.validTo().isBefore(request.validFrom())) {
             throw new IllegalArgumentException("分配失效日期不能早于生效日期");
         }
@@ -492,6 +493,88 @@ public class WorkPackageService {
                         + request.positionAssignmentId() + "\",\"orgUnitId\":\"" + request.targetOrgUnitId() + "\"}");
         return response("id", allocationId, "workPackageId", workPackageId,
                 "workPackageVersionId", request.workPackageVersionId(), "status", "ACTIVE");
+    }
+
+    private void lockAllocationRange(TenantPrincipal principal, UUID workPackageId, UUID assignmentId, UUID targetId) {
+        jdbc.query("select pg_advisory_xact_lock(hashtextextended(:lockKey,0))",
+                new MapSqlParameterSource("lockKey", "work-allocation:" + principal.tenantId() + ":"
+                        + workPackageId + ":" + assignmentId + ":" + targetId), (rs, row) -> Boolean.TRUE);
+    }
+
+    /** Explicit, prospective replacement only; existing work and submitted facts are untouched. */
+    @Transactional
+    public Map<String, Object> replaceAllocation(UUID workPackageId, UUID allocationId,
+                                                WorkPackageModels.CreateAllocation request) {
+        TenantPrincipal principal = prepare();
+        accessPolicy.requirePermission("work-package.allocate");
+        accessPolicy.requireOrgScope(request.targetOrgUnitId());
+        ZoneId tenantZone = ZoneId.of(jdbc.queryForObject("select timezone from tenant where id=:tenantId", base(principal), String.class));
+        if (!request.validFrom().isAfter(LocalDate.now(tenantZone))) {
+            throw new IllegalArgumentException("版本切换须选择未来日期，不得修改今日或历史下发");
+        }
+        lockAllocationRange(principal, workPackageId, request.positionAssignmentId(), request.targetOrgUnitId());
+        List<Map<String, Object>> current = jdbc.queryForList("""
+                select allocation.*,(version.effective_to at time zone :tenantTimezone)::date as version_last_date
+                from work_package_allocation allocation
+                join work_package_version version on version.tenant_id=allocation.tenant_id
+                  and version.id=allocation.work_package_version_id
+                where allocation.tenant_id=:tenantId and allocation.id=:allocationId
+                  and version.work_package_definition_id=:workPackageId
+                for update of allocation
+                """, base(principal).addValue("allocationId", allocationId).addValue("workPackageId", workPackageId)
+                .addValue("tenantTimezone", tenantZone.getId()));
+        if (current.isEmpty()) throw new IllegalArgumentException("原下发不存在或不属于所选工作包");
+        Map<String, Object> old = current.getFirst();
+        if (!"ACTIVE".equals(old.get("status")) || !request.positionAssignmentId().equals(old.get("position_assignment_id"))
+                || !request.targetOrgUnitId().equals(old.get("target_org_unit_id"))) {
+            throw new IllegalArgumentException("版本切换必须保留原有效下发的任职及目标组织");
+        }
+        if (request.workPackageVersionId().equals(old.get("work_package_version_id")))
+            throw new IllegalArgumentException("请选择与原下发不同的新版本");
+        LocalDate previousFrom = ((java.sql.Date) old.get("valid_from")).toLocalDate();
+        LocalDate previousTo = old.get("valid_to") == null ? null : ((java.sql.Date) old.get("valid_to")).toLocalDate();
+        LocalDate previousEnds = request.validFrom().minusDays(1);
+        if (!previousFrom.isBefore(request.validFrom())) throw new IllegalArgumentException("切换日期必须晚于原下发生效日期");
+        MapSqlParameterSource params = base(principal).addValue("allocationId", allocationId)
+                .addValue("workPackageId", workPackageId).addValue("versionId", request.workPackageVersionId())
+                .addValue("assignmentId", request.positionAssignmentId()).addValue("targetOrgUnitId", request.targetOrgUnitId())
+                .addValue("validFrom", request.validFrom()).addValue("validTo", request.validTo());
+        if (previousEnds.equals(previousTo)) {
+            var replay = jdbc.queryForList("""
+                    select id from work_package_allocation where tenant_id=:tenantId
+                      and work_package_version_id=:versionId and position_assignment_id=:assignmentId
+                      and target_org_unit_id=:targetOrgUnitId and status='ACTIVE' and valid_from=:validFrom
+                      and valid_to is not distinct from cast(:validTo as date)
+                    """, params);
+            if (replay.size() == 1) return response("id", replay.getFirst().get("id"), "status", "ACTIVE",
+                    "previousAllocationId", allocationId, "workPackageVersionId", request.workPackageVersionId(),
+                    "validFrom", request.validFrom(), "validTo", request.validTo(), "replayed", true);
+        }
+        if (previousTo != null && previousTo.isBefore(request.validFrom())) {
+            throw new IllegalArgumentException("原下发已经结束或已有计划切换，请刷新核对，不能延长原有效期");
+        }
+        if (old.get("version_last_date") != null
+                && ((java.sql.Date) old.get("version_last_date")).toLocalDate().isBefore(previousEnds)) {
+            throw new IllegalArgumentException("原版本有效期无法覆盖切换前的日期，请让切换日期与新版本生效边界衔接");
+        }
+        Boolean ready = jdbc.queryForObject("""
+                select exists(select 1 from work_package_version where tenant_id=:tenantId and id=:versionId
+                  and work_package_definition_id=:workPackageId and lifecycle_status='PUBLISHED'
+                  and effective_from<=:startsAt and (effective_to is null or effective_to>:startsAt))
+                """, params.addValue("startsAt", request.validFrom().atStartOfDay(tenantZone).toOffsetDateTime()), Boolean.class);
+        if (!Boolean.TRUE.equals(ready)) throw new IllegalArgumentException("新版本须已发布，并在切换日期有效");
+        jdbc.update("""
+                update work_package_allocation set valid_to=:previousEnds,updated_at=now()
+                where tenant_id=:tenantId and id=:allocationId and status='ACTIVE'
+                """, params.addValue("previousEnds", previousEnds));
+        Map<String, Object> created = new LinkedHashMap<>(createAllocation(workPackageId, new WorkPackageModels.CreateAllocation(
+                request.workPackageVersionId(), request.positionAssignmentId(), request.targetOrgUnitId(),
+                request.validFrom(), request.validTo(), "MANUAL")));
+        auditWriter.record("WORK_PACKAGE_ALLOCATION_REPLACED", "WORK_PACKAGE_ALLOCATION", allocationId,
+                "{\"newAllocationId\":\"" + created.get("id") + "\",\"validFrom\":\"" + request.validFrom() + "\"}");
+        created.put("previousAllocationId", allocationId); created.put("validFrom", request.validFrom());
+        created.put("validTo", request.validTo()); created.put("replayed", false);
+        return created;
     }
 
     @Transactional(readOnly = true)

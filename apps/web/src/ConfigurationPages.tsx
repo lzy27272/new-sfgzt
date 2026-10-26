@@ -8,7 +8,7 @@ import { PersonnelDirectory, initialPersonnelDirectory } from './features/organi
 import { isEmployeePermanentDeleteConfirmation } from './features/organization/employeeDeleteConfirmation'
 import { WorkPackageItemEditor } from './features/workPackages/WorkPackageItemEditor'
 import { mapWorkPackageItem, serializeWorkPackageItems, validateWorkPackageItems, type WorkPackageItemDraft } from './features/workPackages/configuration'
-import { allocationDateIssue, conflictingAllocations, versionLocalDate, versionPublicationStart } from './features/workPackages/versionRelease'
+import { allocationDateIssue, allocationReplacementPlan, confirmAllocationReplacement, conflictingAllocations, versionLocalDate, versionPublicationStart } from './features/workPackages/versionRelease'
 import { WorkDutyPeriodEditor } from './features/workPackages/WorkDutyPeriodEditor'
 
 type Row = Record<string, unknown>
@@ -512,6 +512,28 @@ export function WorkPackageCenter({ identity, permissions }: { identity: RoleCon
     } catch (reason) { setError(reason instanceof Error ? reason.message : '工作包操作失败') }
     finally { setSaving(false) }
   }
+  const replaceAllocation = async (oldId: string) => {
+    if (!detail || saving || versionLoading || !versionConfiguration || !canAllocate) return
+    const latest = asList<Row>(detail.versions).find(version => text(version, 'id') === selectedVersionId)
+    if (!latest || text(latest, 'lifecycle_status', 'lifecycleStatus') !== 'PUBLISHED') return
+    const packageId = text(detail, 'id'), request = versionRequest.current
+    const target = { ...allocation, versionId: selectedVersionId, effectiveFrom: text(latest, 'effective_from', 'effectiveFrom'), timeZone: text(detail, 'publicationTimeZone') }
+    setSaving(true); setError(undefined)
+    try {
+      const outcome = await confirmAllocationReplacement(oldId, target, async () => {
+        const rows = mapAllocations(await apiRequest<unknown>(`/work-packages/${packageId}/allocations`, identity))
+        setDetailAllocations(rows)
+        return rows
+      }, message => request === versionRequest.current && window.confirm(message), previousId => apiRequest(
+        `/work-packages/${packageId}/allocations/${previousId}/replace`, identity,
+        { method: 'POST', body: JSON.stringify({ workPackageVersionId: target.versionId, positionAssignmentId: target.assignmentId, targetOrgUnitId: target.targetOrgUnitId, validFrom: target.validFrom, validTo: target.validTo || null }) },
+      ))
+      if (!outcome) return
+      setNotice(`已保存未来版本切换：旧分配截止 ${outcome.plan.closeOn}，新分配从 ${target.validFrom} 生效；历史工作和完成率保留。`)
+      setDetail(undefined); await reload()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '版本切换未完成，请刷新核对后重试。') }
+    finally { setSaving(false) }
+  }
   if (aiRulesOpen) return <AiEvidenceAdmin key={identity.key} identity={identity} onClose={() => setAiRulesOpen(false)} />
   return <section className="page-section configuration-page"><header className="page-title"><div><span className="eyebrow">WORK PACKAGE CENTER</span><h1>工作包中心</h1><p>创建岗位工作包草稿，绑定表单、标准和门店范围，校验后发布。</p></div><div className="page-actions"><span className="source-flag api">实时 API</span><button className="secondary" onClick={() => setAiRulesOpen(true)}>AI 检查规则</button>{canManage && <button className="primary" onClick={() => setModal(true)}>＋ 新建工作包</button>}</div></header>
     {error && <div className="inline-error page-error">{error}</div>}
@@ -526,6 +548,7 @@ export function WorkPackageCenter({ identity, permissions }: { identity: RoleCon
       const conflicts = conflictingAllocations(detailAllocations, allocation.assignmentId, allocation.targetOrgUnitId, allocation.validFrom, allocation.validTo)
       const prospective = itemDrafts.some(item => item.executionExtras.workflowRevision === 'THREE_ROLE_V88')
       const versionStart = versionLocalDate(text(latest, 'effective_from', 'effectiveFrom'), text(detail, 'publicationTimeZone'))
+      const replacement = lifecycle === 'PUBLISHED' && canAllocate ? allocationReplacementPlan(detailAllocations, { ...allocation, versionId: selectedVersionId, effectiveFrom: text(latest, 'effective_from', 'effectiveFrom'), timeZone: text(detail, 'publicationTimeZone') }) : undefined
       return <Modal wide title={`${text(detail, 'name')} · 版本与下发`} onClose={() => { versionRequest.current += 1; setDetail(undefined) }} onSave={detailAction} saving={saving}
         saveDisabled={versionLoading || !versionConfiguration || (lifecycle === 'DRAFT' && canPublish && (itemIssues.length > 0 || !effectiveDate)) || (lifecycle === 'PUBLISHED' && canAllocate && (!allocation.assignmentId || !allocation.targetOrgUnitId || !allocation.validFrom || conflicts.length > 0))}
         saveLabel={lifecycle === 'DRAFT' && canPublish ? '保存、校验并发布所选版本' : lifecycle === 'PUBLISHED' && canAllocate ? '保存所选版本下发' : '关闭'}>
@@ -540,10 +563,11 @@ export function WorkPackageCenter({ identity, permissions }: { identity: RoleCon
         {lifecycle === 'DRAFT' && canPublish && <div className="allocation-box"><h3>所选版本生效日期</h3><label>生效日期<input type="date" aria-label="工作包版本生效日期" value={effectiveDate} disabled={saving || versionLoading} onChange={event => setEffectiveDate(event.target.value)} /></label>
           <p>按服务端时区 {text(detail, 'publicationTimeZone') || '尚未读取'} 的本地00:00生效。{prospective ? '三岗位优化只能选择未来日期，不追溯改写已有工作。' : '请确认该日期符合实际执行安排。'}</p></div>}
         {detailAllocations.length > 0 && <div className="allocation-box"><h3>已有有效或计划下发</h3><div className="version-summary">{detailAllocations.filter((item) => item.status === 'ACTIVE').map((item) => <div key={item.id}><span>{item.assigneeName || '已分配员工'}</span><b>{item.status === 'ACTIVE' ? '已保存' : item.status}</b><small>{item.targetOrgName || '任职组织'} · {item.validFrom}</small></div>)}</div></div>}
-        {lifecycle === 'PUBLISHED' && canAllocate && !versionLoading && versionConfiguration && <div className="allocation-box"><h3>下发所选版本到岗位任职</h3>{matchingAssignments.length === 0 && <div className="inline-warning">当前权限范围内没有该岗位的有效任职。请先到“组织与权限”创建员工并分配对应岗位。</div>}<div className="form-grid"><label>负责人任职<select value={allocation.assignmentId} onChange={(event) => { const assignmentId = event.target.value; const selected = matchingAssignments.find((item) => item.assignmentId === assignmentId); setAllocation({ ...allocation, assignmentId, targetOrgUnitId: selected?.orgUnitId ?? '' }) }}><option value="">请选择同岗位员工</option>{matchingAssignments.map((item) => <option value={item.assignmentId} key={item.assignmentId}>{item.name} · {item.positionName} · {item.orgUnitName}</option>)}</select></label><label>目标门店/部门<select value={allocation.targetOrgUnitId} onChange={(event) => setAllocation({ ...allocation, targetOrgUnitId: event.target.value })}><option value="">请选择</option>{orgs.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
-          <label>下发生效日期<input type="date" aria-label="下发生效日期" min={versionStart || undefined} value={allocation.validFrom} onChange={event => setAllocation({ ...allocation, validFrom: event.target.value })} /></label>
-          <label>下发结束日期（选填）<input type="date" min={allocation.validFrom || versionStart || undefined} value={allocation.validTo} onChange={event => setAllocation({ ...allocation, validTo: event.target.value })} /></label></div>
+        {lifecycle === 'PUBLISHED' && canAllocate && !versionLoading && versionConfiguration && <div className="allocation-box"><h3>下发所选版本到岗位任职</h3>{matchingAssignments.length === 0 && <div className="inline-warning">当前权限范围内没有该岗位的有效任职。请先到“组织与权限”创建员工并分配对应岗位。</div>}<div className="form-grid"><label>负责人任职<select disabled={saving} value={allocation.assignmentId} onChange={(event) => { const assignmentId = event.target.value; const selected = matchingAssignments.find((item) => item.assignmentId === assignmentId); setAllocation({ ...allocation, assignmentId, targetOrgUnitId: selected?.orgUnitId ?? '' }) }}><option value="">请选择同岗位员工</option>{matchingAssignments.map((item) => <option value={item.assignmentId} key={item.assignmentId}>{item.name} · {item.positionName} · {item.orgUnitName}</option>)}</select></label><label>目标门店/部门<select disabled={saving} value={allocation.targetOrgUnitId} onChange={(event) => setAllocation({ ...allocation, targetOrgUnitId: event.target.value })}><option value="">请选择</option>{orgs.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+          <label>下发生效日期<input type="date" aria-label="下发生效日期" disabled={saving} min={versionStart || undefined} value={allocation.validFrom} onChange={event => setAllocation({ ...allocation, validFrom: event.target.value })} /></label>
+          <label>下发结束日期（选填）<input type="date" disabled={saving} min={allocation.validFrom || versionStart || undefined} value={allocation.validTo} onChange={event => setAllocation({ ...allocation, validTo: event.target.value })} /></label></div>
           {conflicts.length > 0 && <p className="inline-warning" role="alert">已有 {conflicts.length} 条有效下发与所选任职、组织及时间重叠，不能重复下发。原分配保持不变，请先核对原下发结束日期。</p>}
+          {replacement && <div><p>可单独确认未来版本切换：旧分配至 {replacement.closeOn}，新分配从 {allocation.validFrom} 生效。不会改写历史工作或完成率。</p><button type="button" className="secondary" style={{ minHeight: 44, fontSize: 14 }} disabled={saving || versionLoading} onClick={() => void replaceAllocation(replacement.previous.id)}>从所选日期切换版本</button></div>}
           <p>版本从 {versionStart || '待核对日期'} 生效；必须明确选择下发日期。保存下发不强制生成今日工作，实际工作依营业日、有效模板与真实排班生成。</p></div>}
         {lifecycle === 'DRAFT' && !canPublish && <div className="inline-warning">当前账号可查看草稿，但没有发布权限。</div>}
       </Modal>

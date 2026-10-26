@@ -95,4 +95,12 @@ public class WorkPackageController {
     ) {
         return service.createAllocation(workPackageId, request);
     }
+
+    @PostMapping("/{workPackageId}/allocations/{allocationId}/replace")
+    public Map<String, Object> replaceAllocation(
+            @PathVariable UUID workPackageId, @PathVariable UUID allocationId,
+            @Valid @RequestBody WorkPackageModels.CreateAllocation request
+    ) {
+        return service.replaceAllocation(workPackageId, allocationId, request);
+    }
 }
