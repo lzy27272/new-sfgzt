@@ -12,9 +12,17 @@ import java.util.*;
 public class DailyActivityController {
     private final DailyActivityService service;
     private final DailyActivityPhotoService photos;
-    public DailyActivityController(DailyActivityService service,DailyActivityPhotoService photos){this.service=service;this.photos=photos;}
+    private final DailyReportService reports;
+    public DailyActivityController(DailyActivityService service,DailyActivityPhotoService photos,DailyReportService reports){this.service=service;this.photos=photos;this.reports=reports;}
     @GetMapping("/daily-reports/{report}/activity-recipients")
     public List<Map<String,Object>> recipients(@PathVariable UUID report){return service.recipients(report);}
+    @GetMapping("/daily-reports/{report}/lost-property-entries")
+    public List<Map<String,Object>> entries(@PathVariable UUID report){return service.reportEntries(report);}
+    @PostMapping("/daily-reports/{report}/lost-property-entries/{entry}/submit")
+    public Map<String,Object> submitEntry(@PathVariable UUID report,@PathVariable UUID entry,
+            @RequestHeader("Idempotency-Key") String key,@RequestBody JsonNode request){
+        service.submitEntry(report,entry,key,request);return reports.detail(report);
+    }
     @PutMapping("/daily-reports/{report}/activity-photos/{id}")
     public Map<String,Object> uploadReport(@PathVariable UUID report,@PathVariable UUID id,@RequestPart("file") MultipartFile file){return photos.upload(report,null,id,file);}
     @GetMapping("/daily-reports/{report}/activity-photos/{id}")

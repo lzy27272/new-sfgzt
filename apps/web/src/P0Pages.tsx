@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { demoFallbackEnabled } from './api/client'
 import {
   createCorrectiveTask,
@@ -27,6 +27,9 @@ import { UsageEvidenceSummary } from './features/storeResources/WorkUsagePanel'
 import type { NavigationParams } from './domain'
 import { useWorkBoard, WorkDateToolbar, WorkStatusCards, CompletionRates, WorkQueueAlerts, WorkBoardList } from './features/workbench/WorkBoard'
 import { withBoardParams } from './features/workbench/workBoardModel'
+import { loadWorkBoard } from './features/workbench/workBoardApi'
+import { spotCheckImpactFromBoard, spotCheckPreviewParams, type SpotCheckPreview } from './features/workbench/spotCheckPreview'
+import './features/workbench/roleDailyWorkflow.css'
 import { AiEvidenceRecord, AiEvidenceTeam } from './features/aiEvidence/AiEvidenceReview'
 
 const statusLabels: Record<string, string> = {
@@ -107,6 +110,11 @@ export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { 
       </select></label>
       {routeParams.hotelId && <button className="text-action" onClick={() => change({ hotelId: undefined, departmentId: undefined, assignmentId: undefined })}>返回全部授权门店</button>}
     </div>
+    <nav className="wb-filter-tabs rw-review-filters" aria-label="工作审核分类">
+      {([['PERIOD', '全部工作'], ['SPOT_CHECK', '免审待抽查'], ['REVIEW', '待人工审核'], ['REPAIR', '待整改']] as const).map(([queue, title]) =>
+        <button type="button" key={queue} aria-pressed={resource.query.queue === queue} className={resource.query.queue === queue ? 'active' : ''}
+          onClick={() => change({ queue, status: 'ALL', lateOnly: undefined })}>{title}</button>)}
+    </nav>
     <article className="wb-panel"><WorkStatusCards metric={resource.data.period} loading={resource.loading || Boolean(resource.error)}
       selected={resource.query.status} onSelect={status => change({ status, queue: undefined })} />
       {!resource.loading && !resource.error && <CompletionRates metric={resource.data.period} />}</article>
@@ -294,6 +302,43 @@ function resultId(result: unknown) {
   return String(row.id ?? row.taskId ?? row.evaluationId ?? nested?.id ?? nested?.taskId ?? nested?.evaluationId ?? '')
 }
 
+export function WorkRecordReviewActions({ status, eligibility, reason, busy, isDemo, onReason, onReview, preview, onPrepareSpotCheck, onCancelSpotCheck }: {
+  status: string; eligibility: TeamWorkCase['reviewEligibility']; reason: string; busy?: string; isDemo: boolean
+  onReason: (reason: string) => void; onReview: (outcome: 'APPROVED' | 'REJECTED') => void
+  preview?: SpotCheckPreview; onPrepareSpotCheck?: () => void; onCancelSpotCheck?: () => void
+}) {
+  const spotCheck = eligibility?.spotCheck === true
+  const actionable = status === 'SUBMITTED' || (spotCheck && status === 'APPROVED')
+  const disabled = Boolean(busy) || isDemo || !eligibility?.canReview
+  return <section className="action-box" id="work-review-action"><h3>{spotCheck ? '免审工作抽查' : '工作记录复核'}</h3>
+    <p className="muted">{spotCheck
+      ? '抽查不合格须填写原因；按原工作日期撤销一次有效完成，非固定扣分。整改后须人工复验通过才恢复；按需事件不扣必做完成率。'
+      : '复核只判断记录是否完整，不替代标准评价和任务验收。'}</p>
+    {actionable ? <>
+      {!eligibility?.canReview && <div className="inline-error">{eligibility?.reason || '正在确认审核权限'}</div>}
+      <label>{spotCheck ? '抽查不合格原因' : '复核意见'}<textarea rows={2} value={reason} disabled={disabled}
+        onChange={event => onReason(event.target.value)} placeholder={spotCheck ? '请说明不合格事实及整改要求' : '退回时必须填写原因'} /></label>
+      <div><button className="primary" disabled={disabled} onClick={() => onReview('APPROVED')}>{busy === 'review-APPROVED' ? '处理中…' : spotCheck ? '抽查合格' : '复核通过'}</button>
+        <button className="danger-button" disabled={disabled || !reason.trim() || Boolean(preview?.loading)} onClick={() => spotCheck ? onPrepareSpotCheck?.() : onReview('REJECTED')}>{busy === 'review-REJECTED' ? '处理中…' : spotCheck ? '抽查不合格' : '退回补充'}</button></div>
+      {spotCheck && preview && <div className="rw-spot-confirm" role="group" aria-label="抽查不合格确认">
+        <h4>确认不合格前核对影响</h4>
+        <p>以下按当前授权范围内原执行任职、原工作日期统计预估，不是固定扣分。提交时服务端会再次核对资格与记录版本。</p>
+        {preview.loading ? <p role="status">正在读取原任职原日工作统计…</p> : preview.error ? <p className="inline-error" role="alert">{preview.error}</p> : preview.impact && <dl>
+          <div><dt>原工作日期</dt><dd>{preview.impact.businessDate}</dd></div>
+          <div><dt>当日应完成</dt><dd>{preview.impact.expected} 项</dd></div>
+          <div><dt>有效完成数</dt><dd>{preview.impact.completed} → {preview.impact.afterCompleted} 项</dd></div>
+          <div><dt>闭环完成率预估</dt><dd>{preview.impact.beforeRate}% → {preview.impact.afterRate}%</dd></div>
+        </dl>}
+        <p>不合格原因：{reason}</p><p>撤销该项一次有效完成；整改提交后须人工复验通过才恢复。实际统计以提交后刷新结果为准。</p>
+        <div className="rw-actions"><button type="button" className="secondary" disabled={Boolean(busy)} onClick={onCancelSpotCheck}>取消，不提交</button>
+          {preview.error && <button type="button" className="secondary" disabled={disabled} onClick={onPrepareSpotCheck}>重新读取预估</button>}
+          <button type="button" className="danger-button" disabled={disabled || !reason.trim() || Boolean(preview.loading) || !preview.impact}
+            onClick={() => onReview('REJECTED')}>{busy === 'review-REJECTED' ? '正在提交…' : '确认不合格并通知整改'}</button></div>
+      </div>}
+    </> : <p className="muted">当前记录状态不可复核。{eligibility?.reason || '如有整改，请等待员工重新提交后人工复验。'}</p>}
+  </section>
+}
+
 export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissions, go, onClose, onChanged }: {
   initial: WorkExpectation
   requestedRecordId?: string
@@ -308,6 +353,8 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   const resource = useResource(`${identity.key}:team-case:${initial.id}:${selectedRecordId ?? 'default'}`, () => loadTeamWorkCase(identity, initial, selectedRecordId), fallback)
   const { expectation, record, reviewEligibility } = resource.data
   const [reviewReason, setReviewReason] = useState('')
+  const [spotPreview, setSpotPreview] = useState<SpotCheckPreview>()
+  const previewRequest = useRef(0)
   const [taskTitle, setTaskTitle] = useState(`整改：${initial.title}`)
   const [taskDescription, setTaskDescription] = useState('请根据工作标准完成整改，补充结果说明和现场证据。')
   const [taskPriority, setTaskPriority] = useState('NORMAL')
@@ -328,6 +375,11 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   const imageAttachments = (record?.attachments ?? []).filter(isImageAttachment)
   const documentAttachments = (record?.attachments ?? []).filter((item) => !isImageAttachment(item))
   const attachmentLoadKey = imageAttachments.map((item) => item.id).join(':')
+  useEffect(() => {
+    previewRequest.current += 1
+    setSpotPreview(undefined)
+    return () => { previewRequest.current += 1 }
+  }, [identity.key, record?.id, record?.rowVersion])
 
   useEffect(() => {
     if (!selectedStandard && standards.length) setSelectedStandard(standards[0].standardVersionId)
@@ -386,10 +438,31 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   }
 
   const review = (outcome: 'APPROVED' | 'REJECTED') => {
-    if (!record || !reviewEligibility?.canReview) return
+    if (!record || !reviewEligibility?.canReview || isDemo) return
+    const spotCheck = reviewEligibility.spotCheck === true
+    if (record.status !== 'SUBMITTED' && !(spotCheck && record.status === 'APPROVED')) return
+    if (spotCheck && outcome === 'REJECTED' && (!spotPreview?.impact || spotPreview.loading)) return
+    if (outcome === 'REJECTED' && !reviewReason.trim()) {
+      setMessage({ tone: 'error', text: spotCheck ? '请填写抽查不合格原因。' : '退回时必须填写原因。' }); return
+    }
     void mutation(`review-${outcome}`, () => reviewWorkRecord(identity, record.id, outcome, reviewReason, record.rowVersion), outcome === 'APPROVED'
-      ? { tone: 'ok', text: '工作记录已复核通过。下一步可按工作标准创建评价。', next: { kind: 'section', targetId: 'standard-evaluation-action', label: '继续创建标准评价' } }
-      : { tone: 'ok', text: '工作记录已退回补充，员工可在“我的工作”中补齐说明和证据。' })
+      ? spotCheck ? { tone: 'ok', text: '抽查合格已留痕，原工作状态、提交事实和完成率保持不变。' } : { tone: 'ok', text: '工作记录已复核通过。下一步可按工作标准创建评价。', next: { kind: 'section', targetId: 'standard-evaluation-action', label: '继续创建标准评价' } }
+      : { tone: 'ok', text: spotCheck ? '抽查不合格已登记，已按原工作日期撤销本次有效完成。员工整改提交后须人工复验通过才恢复，不会重复扣减。' : '工作记录已退回补充，员工可在“我的工作”中补齐说明和证据。' })
+  }
+
+  const prepareSpotCheck = async () => {
+    if (!record || !reviewEligibility?.canReview || !reviewEligibility.spotCheck || isDemo || busy || !reviewReason.trim()) return
+    const request = ++previewRequest.current
+    setSpotPreview({ loading: true })
+    try {
+      const params = spotCheckPreviewParams(record, expectation)
+      const result = await loadWorkBoard(identity, 'team', params)
+      if (request !== previewRequest.current) return
+      if (result.source !== 'api') throw new Error('未读取到实际统计，无法预估。请刷新后重试。')
+      setSpotPreview({ impact: spotCheckImpactFromBoard(result.data, params) })
+    } catch (error) {
+      if (request === previewRequest.current) setSpotPreview({ error: error instanceof Error ? error.message : '无法读取完成率影响，请重试。' })
+    }
   }
 
   const createTask = () => {
@@ -482,7 +555,9 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
             {!!documentAttachments.length && <><h4 className="evidence-document-title">文档附件</h4><AttachmentList items={documentAttachments} disabled={!!busy || isDemo} loadingId={busy?.startsWith('preview-') ? busy.slice('preview-'.length) : undefined} onPreview={preview} /></>}
           </section>
 
-          {allows('work-record.review') && <section className="action-box" id="work-review-action"><h3>工作记录复核</h3><p className="muted">复核只判断记录是否完整，不替代标准评价和任务验收。</p>{record.status === 'SUBMITTED' ? <>{!reviewEligibility?.canReview ? <div className="inline-error">{reviewEligibility?.reason || '正在确认审核权限'}</div> : null}<label>复核意见<textarea rows={2} value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} placeholder="退回时必须填写原因" /></label><div><button className="primary" disabled={!!busy || isDemo || !reviewEligibility?.canReview} onClick={() => review('APPROVED')}>{busy === 'review-APPROVED' ? '处理中…' : '复核通过'}</button><button className="danger-button" disabled={!!busy || !reviewReason.trim() || isDemo || !reviewEligibility?.canReview} onClick={() => review('REJECTED')}>{busy === 'review-REJECTED' ? '处理中…' : '退回补充'}</button></div></> : <div className="inline-success">当前记录无需复核。</div>}</section>}
+          {(allows('work-record.review') || reviewEligibility?.canReview) && <WorkRecordReviewActions status={record.status}
+            eligibility={reviewEligibility} reason={reviewReason} busy={busy} isDemo={isDemo} onReason={setReviewReason} onReview={review}
+            preview={spotPreview} onPrepareSpotCheck={() => void prepareSpotCheck()} onCancelSpotCheck={() => { previewRequest.current += 1; setSpotPreview(undefined) }} />}
 
           {allows('evaluation.manual-review') && <section className="action-box" id="standard-evaluation-action"><h3>创建标准评价</h3><label>评价依据<select value={selectedStandard} onChange={(event) => setSelectedStandard(event.target.value)}><option value="">请选择已发布标准</option>{standards.map((standard) => <option value={standard.standardVersionId} key={standard.standardVersionId}>{standard.title}（第{standard.versionNo}版）</option>)}</select></label>{!standards.length && <div className="inline-warning">工作包条目尚未返回绑定标准，不能由页面猜测评价依据。</div>}<div><button className="primary" disabled={!!busy || !selectedStandard || isDemo} onClick={evaluate}>{busy === 'evaluation' ? '创建中…' : '按标准创建评价'}</button></div></section>}
 

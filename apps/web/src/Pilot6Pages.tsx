@@ -1,28 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { matchesTaskAssignee } from './app/workEntryPolicy'
-import { apiRequest, asList } from './api/client'
+import { useEffect, useState } from 'react'
+import { asList } from './api/client'
 import {
   createEnterpriseTemplate,
-  createManagementTask,
-  dispatchManagementTask,
   loadEnterpriseTemplates,
   publishEnterpriseTemplate,
   saveEnterpriseTemplateVersion,
-  uploadTaskDispatchAttachment,
 } from './api/resources'
-import { validateImageEvidence } from './app/imageEvidence'
-import { materializeSelectedFiles } from './app/uploadFiles'
 import { WorkPackageCenter } from './ConfigurationPages'
 import type { EnterpriseTemplate, EnterpriseTemplateType, RoleContext } from './domain'
-import { hasGrantedPermission, loadOptionalTaskContext } from './features/tasks/taskDispatchAccess'
 import { product } from './product'
 
 type Row = Record<string, unknown>
-type AssignmentOption = { id: string; employeeName: string; positionName: string; levelCode?: string; orgUnitId: string; orgName: string; hotelId?: string; hotelName?: string }
-type StandardOption = { versionId: string; name: string; status: string }
-
-const field = (row: Row, ...keys: string[]) => keys.map((key) => row[key]).find((candidate) => candidate !== undefined && candidate !== null)
-const text = (row: Row, ...keys: string[]) => String(field(row, ...keys) ?? '')
 
 function Modal({ title, children, onClose, footer }: { title: string; children: React.ReactNode; onClose: () => void; footer: React.ReactNode }) {
   return <div className="modal-backdrop"><section className="modal configuration-modal pilot6-editor" role="dialog" aria-modal="true">
@@ -125,137 +113,4 @@ export function EnterpriseTemplateCenter({ identity, permissions }: { identity: 
   </section>
 }
 
-export function TaskCreateDialog({ identity, permissions, initialHotelId, creationSource = 'MANUAL_TASK_CENTER', onClose, onCreated }: { identity: RoleContext; permissions: string[]; initialHotelId?: string; creationSource?: string; onClose: () => void; onCreated: () => Promise<void> }) {
-  const [assignments, setAssignments] = useState<AssignmentOption[]>([])
-  const [standards, setStandards] = useState<StandardOption[]>([])
-  const [templates, setTemplates] = useState<EnterpriseTemplate[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string>()
-  const [form, setForm] = useState({ hotelId: initialHotelId ?? '', assigneeAssignmentId: '', reviewerAssignmentId: '', standardVersionId: '', templateId: '', title: '', description: '', referenceNote: '', priority: 'NORMAL', dueAt: new Date(Date.now() + 24 * 3600_000).toISOString().slice(0, 16) })
-  const [referenceFiles, setReferenceFiles] = useState<Array<{ id: string; file: File }>>([])
-  const [validatingReferenceFiles, setValidatingReferenceFiles] = useState(false)
-  const [assigneeSearch, setAssigneeSearch] = useState('')
-  const [targetsRevision, setTargetsRevision] = useState(0)
-  const [createdTask, setCreatedTask] = useState<{ id: string; version: number }>()
-  const createIdempotencyKey = useRef(`create:${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`)
-  const dispatchIdempotencyKey = useRef(`dispatch:${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`)
-  const [saving, setSaving] = useState(false)
-  const canReadTemplates = hasGrantedPermission(permissions, 'template.read')
-  const canReadStandards = hasGrantedPermission(permissions, 'standard.read')
-  useEffect(() => {
-    let active = true
-    setLoading(true); setError(undefined)
-    void Promise.all([
-      apiRequest<unknown>('/tasks/targets', identity),
-      loadOptionalTaskContext(permissions, 'standard.read', () => apiRequest<unknown>('/standards', identity).then(asList<Row>)),
-      loadOptionalTaskContext(permissions, 'template.read', () => loadEnterpriseTemplates(identity, 'TASK')),
-    ]).then(([targetRaw, standardRaw, templateRows]) => {
-      if (!active) return
-      const targetRows = asList<Row>(targetRaw).filter((row) => text(row, 'assignment_id', 'assignmentId')).map((row): AssignmentOption => ({
-        id: text(row, 'assignment_id', 'assignmentId'), employeeName: text(row, 'employee_name', 'employeeName'),
-        positionName: text(row, 'position_name', 'positionName'), levelCode: text(row, 'level_code', 'levelCode') || undefined, orgUnitId: text(row, 'org_unit_id', 'orgUnitId'),
-        orgName: text(row, 'org_unit_name', 'orgUnitName'), hotelId: text(row, 'hotel_id', 'hotelId') || undefined,
-        hotelName: text(row, 'hotel_name', 'hotelName') || undefined,
-      }))
-      setAssignments(targetRows)
-      const availableHotelIds = new Set(targetRows.map((row) => row.hotelId ?? row.orgUnitId))
-      const firstHotel = initialHotelId && availableHotelIds.has(initialHotelId)
-        ? initialHotelId
-        : targetRows.find((row) => row.hotelId)?.hotelId ?? targetRows[0]?.orgUnitId ?? ''
-      setForm((current) => ({ ...current, hotelId: availableHotelIds.has(current.hotelId) ? current.hotelId : firstHotel }))
-      setStandards(asList<Row>(standardRaw).map((row) => ({ versionId: text(row, 'latest_version_id', 'latestVersionId'), name: text(row, 'name'), status: text(row, 'lifecycle_status', 'lifecycleStatus') })).filter((row) => row.versionId))
-      setTemplates(templateRows.flatMap((row) => row.lifecycleStatus === 'PUBLISHED' ? [row] : row.publishedVersionId && row.publishedConfiguration ? [{ ...row, latestVersionId: row.publishedVersionId, versionNo: row.publishedVersionNo ?? row.versionNo, lifecycleStatus: 'PUBLISHED', configuration: row.publishedConfiguration }] : []))
-    }).catch((reason) => setError(reason instanceof Error ? reason.message : '任务上下文加载失败。')).finally(() => active && setLoading(false))
-    return () => { active = false }
-  }, [identity.key, initialHotelId, canReadStandards, canReadTemplates, targetsRevision])
-  const hotels = useMemo(() => Array.from(new Map(assignments.map((row) => [
-    row.hotelId ?? row.orgUnitId,
-    { id: row.hotelId ?? row.orgUnitId, name: row.hotelName ?? row.orgName },
-  ])).values()), [assignments])
-  const visibleAssignments = useMemo(() => assignments.filter((row) => (row.hotelId ?? row.orgUnitId) === form.hotelId), [assignments, form.hotelId])
-  const matchingAssignments = visibleAssignments.filter((row) => matchesTaskAssignee(row, assigneeSearch) || row.id === form.assigneeAssignmentId)
-  const applyTemplate = (templateId: string) => {
-    const template = templates.find((item) => item.id === templateId)
-    if (!template) { setForm({ ...form, templateId }); return }
-    const dueHours = Number(template.configuration.dueHours ?? 24)
-    setForm({ ...form, templateId, title: `${String(template.configuration.titlePrefix ?? '')}${form.title}`, description: String(template.configuration.description ?? form.description), priority: String(template.configuration.priority ?? form.priority), dueAt: new Date(Date.now() + dueHours * 3600_000).toISOString().slice(0, 16) })
-  }
-  const selectReferenceFiles = async (files: File[]) => {
-    if (!files.length) return
-    setValidatingReferenceFiles(true)
-    setError(undefined)
-    try {
-      const validated = await validateImageEvidence(files.slice(0, 10).map((file) => ({ file })))
-      const materialized = await materializeSelectedFiles(validated.accepted)
-      const accepted = materialized.accepted.map((entry) => ({
-        id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        file: entry.file,
-      }))
-      setReferenceFiles((current) => {
-        const available = Math.max(0, 10 - current.length)
-        if (accepted.length > available) setError(`下达参考图片最多10张，本次仅加入 ${available} 张。`)
-        return [...current, ...accepted.slice(0, available)]
-      })
-      const rejected = [
-        ...validated.rejected.map((entry) => ({ name: entry.entry.file.name, reason: entry.reason })),
-        ...materialized.rejected.map((entry) => ({ name: entry.entry.file.name, reason: entry.reason })),
-      ]
-      if (rejected.length) {
-        const first = rejected[0]
-        setError(`${first.name}：${first.reason}${rejected.length > 1 ? `；另有 ${rejected.length - 1} 张未加入` : ''}`)
-      }
-    } finally {
-      setValidatingReferenceFiles(false)
-    }
-  }
-  const save = async () => {
-    let taskDraftCreated = Boolean(createdTask)
-    setSaving(true); setError(undefined)
-    try {
-      const selectedAssignee = assignments.find((row) => row.id === form.assigneeAssignmentId)
-      if (!selectedAssignee || (selectedAssignee.hotelId ?? selectedAssignee.orgUnitId) !== form.hotelId || !form.title.trim()) throw new Error('目标门店、负责人和任务标题不能为空。')
-      const selectedTemplate = templates.find((item) => item.id === form.templateId)
-      let task = createdTask
-      if (!task) {
-        const created = await createManagementTask(identity, {
-          orgUnitId: selectedAssignee.hotelId ?? selectedAssignee.orgUnitId,
-          assigneeAssignmentId: form.assigneeAssignmentId,
-          reviewerAssignmentId: form.reviewerAssignmentId || null,
-          creatorAssignmentId: identity.businessActorAssignmentId ?? null,
-          dispatchNow: false,
-          standardVersionId: form.standardVersionId || null,
-          workRecordId: null, title: form.title.trim(), description: form.description || null,
-          priority: form.priority, dueAt: new Date(form.dueAt).toISOString(),
-          sourceSnapshot: {
-            source: creationSource,
-            templateId: form.templateId || null,
-            templateVersionId: selectedTemplate?.latestVersionId ?? null,
-            dispatchReferenceNote: form.referenceNote.trim() || null,
-            taskPolicy: selectedTemplate?.configuration.evidencePolicy ?? {},
-          },
-        }, createIdempotencyKey.current)
-        const createdRow = created as Row
-        const id = text(createdRow, 'id')
-        const version = Number(field(createdRow, 'row_version', 'rowVersion', 'version') ?? 0)
-        if (!id) throw new Error('任务草稿创建成功，但服务端未返回任务编号。')
-        task = { id, version }
-        taskDraftCreated = true
-        setCreatedTask(task)
-      }
-      for (const entry of [...referenceFiles]) {
-        await uploadTaskDispatchAttachment(identity, task.id, identity.businessActorAssignmentId, form.referenceNote, entry.file)
-        setReferenceFiles((current) => current.filter((candidate) => candidate.id !== entry.id))
-      }
-      await dispatchManagementTask(identity, task.id, identity.businessActorAssignmentId, task.version, dispatchIdempotencyKey.current)
-      await onCreated(); onClose()
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : '任务创建失败。'
-      setError(taskDraftCreated ? `任务草稿已保留，可直接重试上传并下达。${message}` : message)
-    }
-    finally { setSaving(false) }
-  }
-  return <Modal title="新建并下达管理任务" onClose={saving ? () => undefined : onClose} footer={<><button className="secondary" disabled={saving} onClick={onClose}>取消</button><button className="primary" disabled={saving || loading || validatingReferenceFiles} onClick={() => void save()}>{saving ? '正在上传并下达…' : createdTask ? '继续上传并下达' : '创建并下达'}</button></>}>
-    {loading ? <div className="state-card"><div className="spinner" /><strong>正在读取可投递岗位和任务上下文</strong></div> : <div className="form-grid">{canReadTemplates && <label>任务模板<select value={form.templateId} disabled={Boolean(createdTask)} onChange={(event) => applyTemplate(event.target.value)}><option value="">不使用模板</option>{templates.map((item) => <option value={item.id} key={item.id}>{item.name} · V{item.versionNo}</option>)}</select></label>}<label>目标门店<select value={form.hotelId} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, hotelId: event.target.value, assigneeAssignmentId: '', reviewerAssignmentId: '' })}><option value="">请选择门店</option>{hotels.map((hotel) => <option value={hotel.id} key={hotel.id}>{hotel.name}</option>)}</select></label><label>搜索执行人员<input type="search" value={assigneeSearch} disabled={Boolean(createdTask)} onChange={(event) => setAssigneeSearch(event.target.value)} placeholder="输入姓名、岗位或部门，如：前厅主管" /><small>当前门店有 {visibleAssignments.length} 个可派单任职，仅展示授权范围内的有效员工。</small></label><div className="button-row"><button type="button" className="secondary" disabled={Boolean(createdTask) || loading} onClick={() => setTargetsRevision((value) => value + 1)}>刷新人员</button></div>{visibleAssignments.length === 0 && <p className="inline-warning">当前门店暂无可派单人员，请核对员工是否启用、任职日期、所属门店和授权范围。</p>}{visibleAssignments.length > 0 && matchingAssignments.length === 0 && <p role="status">没有匹配人员，可清空搜索重新选择。</p>}<label>执行负责人<select value={form.assigneeAssignmentId} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, assigneeAssignmentId: event.target.value })}><option value="">请选择门店岗位人员</option>{matchingAssignments.map((row) => <option value={row.id} key={row.id}>{row.employeeName} · {row.positionName} · {row.orgName}</option>)}</select></label><label>验收负责人（可选）<select value={form.reviewerAssignmentId} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, reviewerAssignmentId: event.target.value })}><option value="">自动：发起人 / 直属上级 / 门店管理岗</option>{visibleAssignments.filter((row) => row.levelCode?.startsWith('M')).map((row) => <option value={row.id} key={row.id}>{row.employeeName} · {row.positionName} · {row.orgName}</option>)}</select></label>{canReadStandards && <label>关联标准<select value={form.standardVersionId} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, standardVersionId: event.target.value })}><option value="">暂不关联</option>{standards.filter((row) => row.status === 'PUBLISHED').map((row) => <option value={row.versionId} key={row.versionId}>{row.name}</option>)}</select></label>}<label>优先级<select value={form.priority} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option value="LOW">低</option><option value="NORMAL">普通</option><option value="HIGH">高</option><option value="URGENT">紧急</option></select></label><label className="full-field">任务标题<input value={form.title} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label><label className="full-field">执行要求<textarea rows={4} value={form.description} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label><label>截止时间<input type="datetime-local" value={form.dueAt} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, dueAt: event.target.value })} /></label><label className="full-field">图片说明（选填）<textarea rows={2} maxLength={500} value={form.referenceNote} disabled={Boolean(createdTask)} onChange={(event) => setForm({ ...form, referenceNote: event.target.value })} placeholder="例如：请按图中标注处处理，完成后回传同角度照片" /></label><div className="full-field evidence-uploader task-dispatch-reference"><strong>下达参考图片（选填）</strong><div><label className="secondary task-file-button"><input type="file" accept="image/jpeg,image/png" multiple disabled={saving || validatingReferenceFiles} onChange={(event) => { void selectReferenceFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = '' }} />选择图片</label><label className="secondary task-file-button"><input type="file" accept="image/jpeg,image/png" capture="environment" multiple disabled={saving || validatingReferenceFiles} onChange={(event) => { void selectReferenceFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = '' }} />直接拍照</label></div><small>{validatingReferenceFiles ? '正在读取图片…' : '支持 JPG、PNG，最多10张；图片和说明会随任务一起下达，执行人可直接查看。'}</small>{referenceFiles.length > 0 && <div className="pending-evidence-list">{referenceFiles.map((entry) => <button type="button" className="secondary" disabled={saving} key={entry.id} onClick={() => setReferenceFiles((current) => current.filter((candidate) => candidate.id !== entry.id))}>{entry.file.name} ×</button>)}</div>}</div></div>}
-    {error && <div className="inline-error">{error}</div>}
-  </Modal>
-}
+export { TaskCreateDialog } from './features/tasks/TaskCreateDialog'

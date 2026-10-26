@@ -405,6 +405,67 @@ class StoreWorkUsageIntegrationTest {
         return revisionId;
     }
 
+    @Test void oneLostEntryRoutesBeforeReportSubmissionAndFinalReportOnlyReferencesIt() throws Exception {
+        var report=activityReport(10);String id=report.path("id").asText(),revision=report.path("currentRevisionId").asText();
+        String photo=activityPhoto("/api/v1/daily-reports/"+id+"/activity-photos",EMP,EA);
+        var entry=lostEntry(photo);
+        var unfinished=new LinkedHashMap<>(entry);unfinished.put("id",UUID.randomUUID().toString());
+        unfinished.put("itemName","");unfinished.put("quantity",null);unfinished.put("photoIds",List.of());
+        var partial=Map.of("schemaVersion",1,"lostPropertyOccurred",true,"lostProperties",List.of(unfinished),
+                "serviceCases",List.of(Map.of("id",UUID.randomUUID().toString(),"roomNumber","","serviceContent","","photoIds",List.of())));
+        var saved=saveActivities(id,revision,report.path("rowVersion").asLong(),partial,false);
+        String endpoint="/api/v1/daily-reports/"+id+"/lost-property-entries/"+entry.get("id")+"/submit";
+        var request=Map.of("expectedVersion",saved.path("rowVersion").asLong(),"entry",entry);
+        var sent=call(post(endpoint).header("Idempotency-Key","immediate-send"),EMP,request,200);
+        assertThat(sent.path("reportStatus").asText()).isEqualTo("DRAFT");
+        assertThat(sent.path("revisions").get(0).path("payloadSnapshot").path("housekeepingActivities").path("lostProperties").size()).isEqualTo(2);
+        assertThat(sent.path("revisions").get(0).path("payloadSnapshot").path("housekeepingActivities").path("serviceCases").size()).isEqualTo(1);
+        String caseId=jdbc.queryForObject("select id::text from lost_property_case where report_id=?::uuid",String.class,id);
+        assertThat(jdbc.queryForObject("select state from lost_property_case where id=?::uuid",String.class,caseId)).isEqualTo("PENDING");
+        assertThat(jdbc.queryForObject("select remaining_quantity from lost_property_case where id=?::uuid",Integer.class,caseId)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from work_record where payload->>'dailyReportId'=?",Integer.class,id)).isZero();
+        call(post(endpoint).header("Idempotency-Key","immediate-send"),EMP,request,200);
+        var changed=new LinkedHashMap<>(entry);changed.put("quantity",4);
+        call(post(endpoint).header("Idempotency-Key","immediate-send"),EMP,Map.of("expectedVersion",saved.path("rowVersion").asLong(),"entry",changed),409);
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_type='LOST_PROPERTY' and source_id=?::uuid",Integer.class,caseId)).isOne();
+        var states=call(get("/api/v1/daily-reports/"+id+"/lost-property-entries"),EMP,null,200);
+        assertThat(states.get(0).path("entryId").asText()).isEqualTo(entry.get("id"));
+        var received=custodyCall(post("/api/v1/lost-properties/"+caseId+"/review").header("Idempotency-Key","early-receive"),
+                Map.of("expectedVersion",0,"outcome","RECEIVED","storageLocation","前台A2"),200);
+        assertThat(received.path("remainingQuantity").asInt()).isEqualTo(3);
+        // Neither a draft save nor a final report may rewrite or remove a routed custody entry.
+        var current=call(get("/api/v1/daily-reports/"+id),EMP,null,200);
+        call(put("/api/v1/daily-reports/"+id+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",current.path("rowVersion").asLong(),"items",List.of(),
+                        "housekeepingActivities",Map.of("schemaVersion",1,"lostPropertyOccurred",false,"lostProperties",List.of(),"serviceCases",List.of())),400);
+        call(put("/api/v1/daily-reports/"+id+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",current.path("rowVersion").asLong(),"items",List.of(),"housekeepingActivities",activities(changed,null)),400);
+        saved=saveActivities(id,revision,current.path("rowVersion").asLong(),activities(entry,null),true);
+        call(post("/api/v1/daily-reports/"+id+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),200);
+        assertThat(jdbc.queryForObject("select count(*) from lost_property_case where report_id=?::uuid",Integer.class,id)).isOne();
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_type='LOST_PROPERTY' and source_id=?::uuid and notification_type='LOST_PROPERTY_REVIEW'",Integer.class,caseId)).isOne();
+        assertThat(jdbc.queryForObject("select state from lost_property_case where id=?::uuid",String.class,caseId)).isEqualTo("IN_CUSTODY");
+        call(post(endpoint).header("Idempotency-Key","immediate-send"),EMP,request,200);
+    }
+
+    @Test void immediateLostEntryRejectsSelfRecipientStaleVersionAndOtherActorsWithoutSaving() throws Exception {
+        var report=activityReport(11);String id=report.path("id").asText();
+        String photo=activityPhoto("/api/v1/daily-reports/"+id+"/activity-photos",EMP,EA);
+        var entry=lostEntry(photo);
+        String endpoint="/api/v1/daily-reports/"+id+"/lost-property-entries/"+entry.get("id")+"/submit";
+        long version=report.path("rowVersion").asLong();
+        entry.put("recipientAssignmentId",EA);
+        call(post(endpoint).header("Idempotency-Key","self"),EMP,Map.of("expectedVersion",version,"entry",entry),400);
+        entry.put("recipientAssignmentId",CUSTODY_ASSIGNMENT);
+        call(post(endpoint).header("Idempotency-Key","stale"),EMP,Map.of("expectedVersion",version+1,"entry",entry),409);
+        call(post(endpoint).header("Idempotency-Key","other"),GM,Map.of("expectedVersion",version,"entry",entry),403);
+        var wrongId=new LinkedHashMap<>(entry);wrongId.put("id",UUID.randomUUID().toString());
+        call(post(endpoint).header("Idempotency-Key","wrong-id"),EMP,Map.of("expectedVersion",version,"entry",wrongId),400);
+        assertThat(jdbc.queryForObject("select count(*) from lost_property_case where report_id=?::uuid",Integer.class,id)).isZero();
+        assertThat(jdbc.queryForObject("select row_version from daily_report where id=?::uuid",Long.class,id)).isEqualTo(version);
+    }
+
     @Test void dailyActivitiesCommitWithReportAndCustodyApprovalReleaseAreIsolatedAndIdempotent() throws Exception {
         var report=activityReport(6);String id=report.path("id").asText();
         String revision=report.path("revisions").get(0).path("id").asText();

@@ -111,7 +111,7 @@ public class WorkBoardService {
         status = status == null ? "ALL" : status;
         queue = queue == null ? "PERIOD" : queue;
         if (!Set.of("ALL", "PENDING", "OVERDUE", "REVIEW", "COMPLETED").contains(status)
-                || !Set.of("PERIOD", "REVIEW", "CARRYOVER").contains(queue)) {
+                || !Set.of("PERIOD", "REVIEW", "CARRYOVER", "SPOT_CHECK", "REPAIR").contains(queue)) {
             throw badRequest("不支持的工作状态或工作队列");
         }
         // All scope/tenant checks, including delegated/shared work, come from the same query.
@@ -144,10 +144,22 @@ public class WorkBoardService {
         String review = "board_status = 'REVIEW' and business_date <= :today";
         String carryover = "business_date < :fromDate and business_date <= :today "
                 + "and period_type <> 'DAY' and not optional_record and board_status in ('PENDING','OVERDUE')";
+        String spotCheck = """
+                business_date <= :today and not optional_record and review_mode='NONE' and board_status='COMPLETED'
+                and not exists (select 1 from work_record_spot_check checked
+                  where checked.tenant_id=:tenantId and checked.work_record_id=record_id and checked.outcome='APPROVED')
+                and record_id is not null and mod(('x'||substr(md5(record_id::text),1,8))::bit(32)::bigint,100) <
+                  case when execution_policy ->> 'spotCheckRate' ~ '^[0-9]{1,3}$'
+                    then case when (execution_policy ->> 'spotCheckRate')::int between 1 and 100
+                      then (execution_policy ->> 'spotCheckRate')::int else 100 end else 100 end
+                """;
+        String repair = "business_date <= :today and (latest_record_status in ('REJECTED','RETURNED') or status='FAILED')";
         String selected = " where ("
                 + "(:boardQueue = 'PERIOD' and " + period + ")"
                 + " or (:boardQueue = 'REVIEW' and " + review + ")"
-                + " or (:boardQueue = 'CARRYOVER' and " + carryover + "))"
+                + " or (:boardQueue = 'CARRYOVER' and " + carryover + ")"
+                + " or (:boardQueue = 'SPOT_CHECK' and " + spotCheck + ")"
+                + " or (:boardQueue = 'REPAIR' and " + repair + "))"
                 + " and (:boardStatus = 'ALL' or board_status = :boardStatus)"
                 + " and (not :lateOnly or is_late)";
         // Aggregation happens over the entire authorized scope before list pagination.
@@ -157,6 +169,8 @@ public class WorkBoardService {
                 + aggregate("month", "business_date between :monthStart and :today") + " union all "
                 + aggregate("reviewQueue", review) + " union all "
                 + aggregate("carryover", carryover) + " union all "
+                + aggregate("spotCheckQueue", spotCheck) + " union all "
+                + aggregate("repairQueue", repair) + " union all "
                 + "select 'filtered' as dimension, null::text as group_id, null::text as group_name, "
                 + COUNTS + " from classified" + selected + " union all "
                 + groupAggregate("hotel", "hotel_org_unit_id", "hotel_name", period) + " union all "

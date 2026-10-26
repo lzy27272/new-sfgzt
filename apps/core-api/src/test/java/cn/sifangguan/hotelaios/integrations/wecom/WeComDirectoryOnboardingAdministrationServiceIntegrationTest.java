@@ -148,6 +148,43 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
     }
 
     @Test
+    void listKeepsOldPendingApplicationsAheadOfTheHistoryLimitAndResolvesTheirHotel() {
+        UUID pendingId = UUID.randomUUID();
+        UUID conflictId = UUID.randomUUID();
+        insertCandidate(pendingId, "list-pending-" + pendingId, "NEW_MEMBER", null, null,
+                "PENDING_APPROVAL", null, FRONT_DEPARTMENT, FRONT_POSITION);
+        insertCandidate(conflictId, "list-conflict-" + conflictId, "NEW_MEMBER", null, null,
+                "CONFLICT", FRONT_ACCOUNT, FRONT_DEPARTMENT, FRONT_POSITION);
+        jdbc.update("update wecom_person_onboarding set updated_at = now() - interval '30 days' where id in (?, ?)",
+                pendingId, conflictId);
+        for (int index = 0; index < 500; index++) {
+            UUID historyId = UUID.randomUUID();
+            insertCandidate(historyId, "list-history-" + historyId, "NEW_MEMBER", null, null,
+                    "PENDING_APPROVAL", null, FRONT_DEPARTMENT, FRONT_POSITION);
+        }
+        jdbc.update("""
+                update wecom_person_onboarding
+                set status = 'REJECTED', reviewed_by = ?, reviewed_at = now(), decision_reason = 'List regression fixture',
+                    user_id_ciphertext = null, requested_password_hash = null
+                where tenant_id = ? and corp_id = ? and id not in (?, ?)
+                """, CEO, TENANT, CORP_ID, pendingId, conflictId);
+
+        var rows = inTransaction(() -> service.list(null)).items();
+
+        assertThat(rows).hasSize(500);
+        assertThat(rows.subList(0, 2)).extracting(WeComDirectoryOnboardingModels.CandidateRow::id)
+                .containsExactlyInAnyOrder(pendingId, conflictId);
+        UUID hotelId = uuidValue("select parent_id from org_unit where id = ?", FRONT_DEPARTMENT);
+        assertThat(rows.subList(0, 2)).allSatisfy(row -> {
+            assertThat(row.requestedOrgUnitId()).isEqualTo(FRONT_DEPARTMENT);
+            assertThat(row.requestedHotelId()).isEqualTo(hotelId);
+            assertThat(row.requestedHotelName()).isNotBlank();
+        });
+        assertThat(inTransaction(() -> service.list("REJECTED")).items()).hasSize(500)
+                .allSatisfy(row -> assertThat(row.status()).isEqualTo("REJECTED"));
+    }
+
+    @Test
     void manualInvitationCreatesAReusableRegistrationLinkWithoutAnApplicant() {
         Counts before = identityCounts();
 
@@ -470,8 +507,10 @@ class WeComDirectoryOnboardingAdministrationServiceIntegrationTest {
         assertThat(inTransaction(() -> service.list(null)).items())
                 .filteredOn(candidate -> candidateId.equals(candidate.id()))
                 .singleElement()
-                .satisfies(candidate -> assertThat(candidate.requestedHotelName())
-                        .isEqualTo("集团总部"));
+                .satisfies(candidate -> {
+                    assertThat(candidate.requestedHotelName()).isEqualTo("集团总部");
+                    assertThat(candidate.requestedHotelId()).isEqualTo(GROUP_HEADQUARTERS);
+                });
 
         var reviewOptions = inTransaction(() -> service.reviewOptions(candidateId));
         assertThat(reviewOptions.hotelId()).isEqualTo(GROUP_HEADQUARTERS);

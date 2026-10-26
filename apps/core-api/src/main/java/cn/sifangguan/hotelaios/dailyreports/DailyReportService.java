@@ -249,6 +249,20 @@ public class DailyReportService {
         UUID revisionId = UUID.randomUUID();
         OffsetDateTime deadline = day.businessDate().plusDays(1).atTime(day.cutoffLocalTime())
                 .atZone(ZoneId.of(day.timezone())).plusMinutes(day.closingGraceMinutes()).toOffsetDateTime();
+        DailyReportTiming.Window configuredWindow = DailyReportTiming.resolve(jdbc, objectMapper,
+                principal.tenantId(), templateVersionId, request.positionAssignmentId(), day.hotelOrgUnitId(),
+                day.businessDate(), day.cutoffLocalTime(), day.timezone());
+        if (configuredWindow != null) {
+            boolean earlyHousekeepingDraft = Boolean.TRUE.equals(jdbc.queryForObject("""
+                    select exists(select 1 from employee_position_assignment a
+                      join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id
+                      where a.tenant_id=:tenantId and a.id=:assignmentId and p.code='HOUSEKEEPING_ATTENDANT')
+                    """, base(principal).addValue("assignmentId", request.positionAssignmentId()), Boolean.class));
+            if (!earlyHousekeepingDraft && OffsetDateTime.now().isBefore(configuredWindow.openAt())) {
+                throw new IllegalArgumentException("尚未到该岗位日报开放时间：" + configuredWindow.openAt());
+            }
+            deadline = configuredWindow.dueAt();
+        }
         jdbc.update("""
                 insert into daily_report
                     (id, tenant_id, hotel_org_unit_id, org_unit_id, employee_id,
@@ -273,6 +287,14 @@ public class DailyReportService {
         JsonNode resolvedTemplate = toJsonNode(resolution.get("resolvedConfiguration"));
         snapshot.set("resolvedTemplate", resolvedTemplate.deepCopy());
         snapshot.set("templateResolution", objectMapper.valueToTree(resolution));
+        if (configuredWindow != null) {
+            ObjectNode delivery = snapshot.putObject("deliveryPolicy");
+            delivery.put("openAt", configuredWindow.openAt().toString());
+            delivery.put("dueAt", configuredWindow.dueAt().toString());
+            delivery.put("deadlineAt", deadline.toString());
+            delivery.putArray("preDueReminderMinutes").add(15);
+            delivery.putArray("overdueReminderMinutes").add(0).add(30);
+        }
         snapshot.putArray("items");
         jdbc.update("""
                 insert into daily_report_revision
@@ -426,6 +448,7 @@ public class DailyReportService {
                 idempotencyKey, request, report.traceId());
         if (reservation.replayed()) return replay(reservation);
         ObjectNode snapshot = parseObject(revision.payloadSnapshot(), "payload_snapshot");
+        DailyReportTiming.validateFinalSubmission(snapshot, OffsetDateTime.now());
         ValidationOutcome validation = validateSubmission(principal, request.revisionId(), itemPolicies(snapshot));
         activities.submit(reportId, request.revisionId(), snapshot.get("housekeepingActivities"));
         workEntry.submit(reportId, snapshot);

@@ -82,5 +82,5 @@ test('one housekeeping form merges manual text, retains hygiene, history and a s
   assert.match(html,/其他工作与补充说明/); assert.match(html,/交接事项/); assert.match(html,/计划卫生/)
   assert.equal((html.match(/>提交日报</g)||[]).length,1)
   assert.doesNotMatch(html,/草稿已暂存/)
-  assert.match(html,/服务案例/);assert.match(html,/遗留物品/);assert.match(html,/与日报同时提醒、同时填报/)
+  assert.match(html,/服务案例/);assert.match(html,/遗留物品/);assert.match(html,/与日报同时提醒、同页填报/)
 })

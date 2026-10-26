@@ -239,6 +239,19 @@ public class DailyReportDispatchTransactionService {
                 day.businessDate(), policy.openLocalTime(), day.cutoffLocalTime(), day.timezone());
         OffsetDateTime dueAt = scheduledAt(
                 day.businessDate(), policy.dueLocalTime(), day.cutoffLocalTime(), day.timezone());
+        DailyReportTiming.Window configuredWindow;
+        try {
+            configuredWindow = DailyReportTiming.resolve(jdbc, objectMapper, principal.tenantId(),
+                    policy.templateVersionId(), policy.positionAssignmentId(), day.hotelOrgUnitId(),
+                    day.businessDate(), day.cutoffLocalTime(), day.timezone());
+        } catch (DailyReportTiming.UnresolvedShiftException exception) {
+            // No concrete shift means no invented deadline, report or overdue notification.
+            return DispatchOutcome.skipped();
+        }
+        if (configuredWindow != null) {
+            openAt = configuredWindow.openAt();
+            dueAt = configuredWindow.dueAt();
+        }
         if (!openAt.isBefore(dueAt)) {
             throw new IllegalStateException(
                     "invalid daily-report delivery window: openAt must be before dueAt"
@@ -258,7 +271,7 @@ public class DailyReportDispatchTransactionService {
         if (!policy.templateVersionId().equals(resolvedVersionId)) {
             return DispatchOutcome.skipped();
         }
-        OffsetDateTime deadlineAt = dueAt.plusMinutes(policy.graceMinutes());
+        OffsetDateTime deadlineAt = configuredWindow == null ? dueAt.plusMinutes(policy.graceMinutes()) : dueAt;
         UUID reportId = UUID.randomUUID();
         List<UUID> inserted = jdbc.query("""
                 insert into daily_report
@@ -293,7 +306,7 @@ public class DailyReportDispatchTransactionService {
         boolean created = !inserted.isEmpty();
         if (created) {
             reportId = inserted.getFirst();
-            createOriginalRevision(principal, reportId, resolution, policy, dueAt, deadlineAt);
+            createOriginalRevision(principal, reportId, resolution, policy, openAt, dueAt, deadlineAt);
             auditWriter.record(
                     "DAILY_REPORT_AUTO_CREATED",
                     "DAILY_REPORT",
@@ -493,6 +506,7 @@ public class DailyReportDispatchTransactionService {
             UUID reportId,
             Map<String, Object> resolution,
             PolicyAssignment policy,
+            OffsetDateTime openAt,
             OffsetDateTime dueAt,
             OffsetDateTime deadlineAt
     ) {
@@ -510,6 +524,7 @@ public class DailyReportDispatchTransactionService {
         policySnapshot.put("preDueReminderMinutes", policy.preDueReminderMinutes());
         policySnapshot.put("overdueReminderMinutes", policy.overdueReminderMinutes());
         policySnapshot.put("dueAt", dueAt);
+        policySnapshot.put("openAt", openAt);
         policySnapshot.put("deadlineAt", deadlineAt);
         snapshot.set("deliveryPolicy", objectMapper.valueToTree(policySnapshot));
         snapshot.putArray("items");

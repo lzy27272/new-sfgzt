@@ -33,6 +33,11 @@ public class WorkPackageController {
         return service.detail(workPackageId);
     }
 
+    @GetMapping("/{workPackageId}/versions/{versionId}")
+    public Map<String, Object> version(@PathVariable UUID workPackageId,@PathVariable UUID versionId) {
+        return service.version(workPackageId,versionId);
+    }
+
     @PostMapping("/{workPackageId}/versions")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> createVersion(

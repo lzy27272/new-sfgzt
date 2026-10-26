@@ -98,6 +98,7 @@ public class WeComDirectoryOnboardingAdministrationService {
                        candidate.onboarding_kind,
                        candidate.invitation_source,
                        candidate.requested_org_unit_id,
+                       hotel.id as requested_hotel_id,
                        hotel.name as requested_hotel_name,
                        case when department.unit_type = 'DEPARTMENT'
                             then department.name end as requested_department_name,
@@ -111,7 +112,7 @@ public class WeComDirectoryOnboardingAdministrationService {
                   on department.tenant_id = candidate.tenant_id
                  and department.id = candidate.requested_org_unit_id
                 left join lateral (
-                    select case when ancestor.unit_type = 'GROUP'
+                    select ancestor.id, case when ancestor.unit_type = 'GROUP'
                                 then '集团总部' else ancestor.name end as name
                     from org_unit_closure closure
                     join org_unit ancestor
@@ -131,7 +132,8 @@ public class WeComDirectoryOnboardingAdministrationService {
                  and position.id = candidate.requested_position_id
                 where candidate.tenant_id = :tenantId and candidate.corp_id = :corpId
                   and (:status is null or candidate.status = :status)
-                order by candidate.updated_at desc, candidate.id
+                order by case when candidate.status in ('PENDING_APPROVAL', 'CONFLICT') then 0 else 1 end,
+                         candidate.updated_at desc, candidate.id
                 limit 500
         """, parameters, (rs, rowNum) -> {
             String candidateStatus = rs.getString("status");
@@ -146,6 +148,7 @@ public class WeComDirectoryOnboardingAdministrationService {
                     rs.getString("onboarding_kind"),
                     rs.getString("invitation_source"),
                     rs.getObject("requested_org_unit_id", UUID.class),
+                    rs.getObject("requested_hotel_id", UUID.class),
                     rs.getString("requested_hotel_name"), rs.getString("requested_department_name"),
                     rs.getObject("requested_position_id", UUID.class),
                     rs.getString("requested_position_name"), candidateStatus,

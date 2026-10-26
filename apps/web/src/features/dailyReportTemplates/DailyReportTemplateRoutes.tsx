@@ -9,6 +9,8 @@ import { useStableCommand } from '../../shared/useStableCommand'
 import { FeatureHeader, StatusBadge, featureStyles as styles, formatLocalDateTime } from '../shared/FeatureUI'
 import { loadDailyReportDeliveryPolicy, loadDailyReportTemplate, loadDailyReportTemplates, saveDailyReportDeliveryPolicy, saveDailyReportTemplateVersion, transitionDailyReportTemplateVersion } from './api'
 import type { DailyReportDeliveryPolicy, DailyReportDeliveryPolicyDraft, DailyReportTemplateVersion, TemplateVersionDraft } from './types'
+import { DeliveryTimingFields } from './DeliveryTimingFields'
+import { publicationStart } from '../workPackages/publicationTiming'
 
 export function DailyReportTemplateRoutes({ view, params, identity, grantedPermissions, go }: {
   view: DailyFeatureRouteId
@@ -158,11 +160,12 @@ function DeliveryPolicyEditor({ policy, identity, templateId, versionId, canMana
 
   return <div className={styles.stack}>
     {!canManage && <div className={styles.locked}>当前账号只有查看权限，不能修改日报投递时间。</div>}
+    {policy.deliveryTiming && <DeliveryTimingFields value={policy.deliveryTiming} disabled onChange={() => {}} />}
     <div className={styles.formGrid}>
       <label><span>自动生成与通知</span><select disabled={!canManage} value={form.enabled ? 'true' : 'false'} onChange={(event) => setForm({ ...form, enabled: event.target.value === 'true' })}><option value="true">启用</option><option value="false">停用</option></select></label>
       <label>门店时区<input disabled value={policy.timeZone || '继承门店时区'} /></label>
-      <label>开放填报时间<input type="time" disabled={!canManage} value={form.openLocalTime} onChange={(event) => setForm({ ...form, openLocalTime: event.target.value })} /></label>
-      <label>截止时间<input type="time" disabled={!canManage} value={form.dueLocalTime} onChange={(event) => setForm({ ...form, dueLocalTime: event.target.value })} /></label>
+      {!policy.deliveryTiming && <><label>开放填报时间<input type="time" disabled={!canManage} value={form.openLocalTime} onChange={(event) => setForm({ ...form, openLocalTime: event.target.value })} /></label>
+      <label>截止时间<input type="time" disabled={!canManage} value={form.dueLocalTime} onChange={(event) => setForm({ ...form, dueLocalTime: event.target.value })} /></label></>}
       <label>宽限分钟<input type="number" min="0" max="1440" disabled={!canManage} value={form.graceMinutes} onChange={(event) => setForm({ ...form, graceMinutes: event.target.value })} /></label>
       <label>补发营业日数<input type="number" min="0" max="7" disabled={!canManage} value={form.backfillDays} onChange={(event) => setForm({ ...form, backfillDays: event.target.value })} /></label>
       <label>截止前提醒（分钟）<input disabled={!canManage} value={form.preDueReminderMinutes} onChange={(event) => setForm({ ...form, preDueReminderMinutes: event.target.value })} placeholder="例如 30,60" /></label>
@@ -175,22 +178,26 @@ function DeliveryPolicyEditor({ policy, identity, templateId, versionId, canMana
 }
 
 function TemplateVersionEditor({ identity, grantedPermissions, templateId, version, onChanged }: { identity: RoleContext; grantedPermissions: string[]; templateId: string; version: DailyReportTemplateVersion; onChanged: () => Promise<void> }) {
-  const [draft, setDraft] = useState<TemplateVersionDraft>({ title: version.title, description: version.description, effectiveFrom: version.effectiveFrom, effectiveTo: version.effectiveTo, sections: version.sections })
+  const [draft, setDraft] = useState<TemplateVersionDraft>({ title: version.title, description: version.description, effectiveFrom: version.effectiveFrom, effectiveTo: version.effectiveTo, sections: version.sections, deliveryTiming: version.deliveryTiming })
   const [message, setMessage] = useState<string>()
   const [conflict, setConflict] = useState(false)
   const command = useStableCommand(`template-version-${version.id}`)
   const canEdit = version.lifecycleStatus === 'DRAFT' && hasPermission(grantedPermissions, permissions.dailyReportTemplate.edit)
+  const canPublish = version.allowedActions.includes('PUBLISH') && hasPermission(grantedPermissions, permissions.dailyReportTemplate.publish)
   const act = async (action: 'save' | 'submit-review' | 'publish' | 'retire') => {
     setMessage(undefined); setConflict(false)
     try {
       await command.run((key) => action === 'save'
         ? saveDailyReportTemplateVersion(identity, templateId, version, draft, key)
-        : transitionDailyReportTemplateVersion(identity, templateId, version, action, key))
+        : transitionDailyReportTemplateVersion(identity, templateId, version, action, key,
+          action === 'publish' ? publicationStart(draft.effectiveFrom?.slice(0, 10) ?? '', version.publicationTimeZone ?? '') : undefined))
       await onChanged()
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) { setConflict(true); setMessage('服务器已有更新。本地输入已保留，请查看最新版本后重新应用。') }
       else setMessage(error instanceof Error ? error.message : '操作失败')
     }
   }
-  return <div className={styles.split}><section className={styles.section}><header><h2>版本内容</h2><StatusBadge value={version.lifecycleStatus} /></header>{!canEdit && <div className={styles.locked}>此版本只读。已发布内容不会被覆盖，修改必须创建新版本。</div>}<div className={styles.formGrid}><label>版本标题<input disabled={!canEdit} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label><label>生效日期<input type="date" disabled={!canEdit} value={draft.effectiveFrom?.slice(0, 10) ?? ''} onChange={(event) => setDraft({ ...draft, effectiveFrom: event.target.value })} /></label><label className={styles.full}>说明<textarea rows={3} disabled={!canEdit} value={draft.description ?? ''} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label></div>{conflict && <div className={styles.conflict}>{message}</div>}{message && !conflict && <div className="inline-error">{message}</div>}<footer className={styles.actions}>{canEdit && <button className="primary" disabled={command.busy} onClick={() => void act('save')}>保存草稿</button>}{version.allowedActions.includes('SUBMIT_REVIEW') && hasPermission(grantedPermissions, permissions.dailyReportTemplate.review) && <button className="secondary" disabled={command.busy} onClick={() => void act('submit-review')}>提交审核</button>}{version.allowedActions.includes('PUBLISH') && hasPermission(grantedPermissions, permissions.dailyReportTemplate.publish) && <button className="primary" disabled={command.busy} onClick={() => void act('publish')}>发布版本</button>}{version.allowedActions.includes('RETIRE') && hasPermission(grantedPermissions, permissions.dailyReportTemplate.retire) && <button className="secondary" disabled={command.busy} onClick={() => void act('retire')}>停用版本</button>}</footer></section><aside className={styles.stack}>{draft.sections.map((section) => <section className={styles.reportGroup} key={section.id}><header><strong>{section.name}</strong><span className={styles.meta}>{section.source === 'HEADQUARTERS' ? '总部锁定' : '门店补充'}{section.conditional ? ' · 条件模块' : ''}</span></header>{section.items.map((item) => <div className={styles.reportItem} key={item.id}><strong>{item.label}</strong><div className={styles.meta}><span>{item.dataSource}</span><span>{item.required ? '必填' : '选填'}</span><span>{item.evidenceRequired ? '需要证据' : '无需证据'}</span></div></div>)}</section>)}</aside></div>
+  return <div className={styles.split}><section className={styles.section}><header><h2>版本内容</h2><StatusBadge value={version.lifecycleStatus} /></header>{draft.deliveryTiming && <DeliveryTimingFields value={draft.deliveryTiming} disabled={!canEdit} onChange={deliveryTiming => setDraft({ ...draft, deliveryTiming })} />}{!canEdit && <div className={styles.locked}>版本内容只读。已发布内容不会被覆盖；审核发布人仍可选择本次发布日期。</div>}<div className={styles.formGrid}><label>版本标题<input disabled={!canEdit} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
+    <label>发布生效日期<input type="date" disabled={!canEdit && !canPublish} value={draft.effectiveFrom?.slice(0, 10) ?? ''} onChange={(event) => setDraft({ ...draft, effectiveFrom: event.target.value })} /><small>发布时按{version.publicationTimeZone || '服务端时区'}午夜生效；日期在发布时提交，不随内容草稿保存。</small></label>
+    <label className={styles.full}>说明<textarea rows={3} disabled={!canEdit} value={draft.description ?? ''} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label></div>{conflict && <div className={styles.conflict}>{message}</div>}{message && !conflict && <div className="inline-error">{message}</div>}<footer className={styles.actions}>{canEdit && <button className="primary" disabled={command.busy} onClick={() => void act('save')}>保存草稿</button>}{version.allowedActions.includes('SUBMIT_REVIEW') && hasPermission(grantedPermissions, permissions.dailyReportTemplate.review) && <button className="secondary" disabled={command.busy} onClick={() => void act('submit-review')}>提交审核</button>}{canPublish && <button className="primary" disabled={command.busy} onClick={() => void act('publish')}>发布版本</button>}{version.allowedActions.includes('RETIRE') && hasPermission(grantedPermissions, permissions.dailyReportTemplate.retire) && <button className="secondary" disabled={command.busy} onClick={() => void act('retire')}>停用版本</button>}</footer></section><aside className={styles.stack}>{draft.sections.map((section) => <section className={styles.reportGroup} key={section.id}><header><strong>{section.name}</strong><span className={styles.meta}>{section.source === 'HEADQUARTERS' ? '总部锁定' : '门店补充'}{section.conditional ? ' · 条件模块' : ''}</span></header>{section.items.map((item) => <div className={styles.reportItem} key={item.id}><strong>{item.label}</strong><div className={styles.meta}><span>{item.dataSource}</span><span>{item.required ? '必填' : '选填'}</span><span>{item.evidenceRequired ? '需要证据' : '无需证据'}</span></div></div>)}</section>)}</aside></div>
 }

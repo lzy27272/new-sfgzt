@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type Dispatch, type DragEvent, type SetStateAction } from 'react'
+import { BreakfastTimingEditor } from './BreakfastTimingEditor'
 import {
   createWorkPackageItemDraft,
+  reviewSettingLocked,
+  reviewSettingValue,
   duplicateWorkPackageItem,
   moveWorkPackageItem,
   type EvidenceRequirementDraft,
@@ -39,6 +42,7 @@ function defaultReminder(sequence: number): ReminderMomentDraft {
 export function WorkPackageItemEditor({ items, setItems, forms, standards, issues }: Props) {
   const [selectedKey, setSelectedKey] = useState(items[0]?.key ?? '')
   const [dragIndex, setDragIndex] = useState<number>()
+  const [reviewSource, setReviewSource] = useState<'routine' | 'assigned'>('routine')
   const selectedIndex = useMemo(() => Math.max(0, items.findIndex((item) => item.key === selectedKey)), [items, selectedKey])
   const selected = items[selectedIndex]
 
@@ -105,6 +109,22 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
       {!selected ? <div className="state-card"><strong>暂无工作项</strong><span>请新增至少一个工作项。</span></div> : <>
         <header className="work-item-detail-header"><div><span className="panel-kicker">STANDARD WORK ITEM</span><h3>{selected.name || '未命名工作项'}</h3></div><div className="work-item-actions"><button type="button" className="secondary" disabled={selectedIndex === 0} onClick={() => move(-1)}>上移</button><button type="button" className="secondary" disabled={selectedIndex === items.length - 1} onClick={() => move(1)}>下移</button><button type="button" className="secondary" onClick={duplicate}>复制</button><button type="button" className="secondary danger-action" disabled={items.length === 1} onClick={remove}>移除</button></div></header>
 
+        <section className="work-rule-section" aria-label="工作审核设置"><header><h4>工作审核设置</h4></header>
+          <div className="button-row" aria-label="工作来源"><button type="button" className={reviewSource === 'routine' ? 'primary' : 'secondary'} aria-pressed={reviewSource === 'routine'} onClick={() => setReviewSource('routine')}>岗位例行工作</button><button type="button" className={reviewSource === 'assigned' ? 'primary' : 'secondary'} aria-pressed={reviewSource === 'assigned'} onClick={() => setReviewSource('assigned')}>工作下达任务</button></div>
+          {reviewSource === 'assigned' ? <p className="inline-warning">工作下达任务始终必须人工审核，员工提交后进入下达人的原工作台“待审核”。本页门店、岗位免审设置不能覆盖，AI不得代审，不允许自审。</p> : <>
+            <label>工作审核方式<select value={reviewSettingValue(selected)} disabled={reviewSettingLocked(selected)} onChange={event => updateSelected({ reviewMode: event.target.value === 'EXCEPTION_ONLY' ? 'NONE' : event.target.value,
+              executionExtras: { ...selected.executionExtras, requiresExceptionReview: event.target.value === 'EXCEPTION_ONLY' } })}>
+              <option value="NONE">免审完成，保留抽查</option><option value="EXCEPTION_ONLY">普通记录免审，异常必须人工审核</option><option value="MANUAL">人工审核</option><option value="STANDARD_EVALUATION">按标准评价验收</option>
+            </select></label>
+            {reviewSettingLocked(selected) ? <p>本项涉及数量、接收或关键安全确认，人工审核保留，不能配置免审。</p> : <>
+              <label>免审工作抽查比例（%，选填）<input type="number" min="1" max="100" step="1" value={String(selected.executionExtras.spotCheckRate ?? '')} disabled={selected.reviewMode !== 'NONE'} onChange={event => {
+                const extras = { ...selected.executionExtras }; if (event.target.value === '') delete extras.spotCheckRate; else extras.spotCheckRate = Number(event.target.value)
+                updateSelected({ executionExtras: extras })
+              }} /></label><p>未配置比例时，待抽查队列展示全部可抽查工作；配置后按提交记录稳定抽样，不改变完成率分母。按需事件独立统计，不从必做完成率硬扣。</p>
+            </>}
+            <p>必填和证据校验仍保留。审核人员按有效任职配置；修改须发布新版本并设置未来生效日，历史提交、抽查和已结算结果不改写。</p>
+          </>}
+        </section>
         <section className="work-rule-section"><header><h4>基础设置</h4><label className="switch-line"><input type="checkbox" checked={selected.enabled} onChange={(event) => updateSelected({ enabled: event.target.checked })} />生成新工作</label></header>
           <div className="form-grid work-rule-grid">
             <label>工作项编码<input value={selected.itemCode} onChange={(event) => updateSelected({ itemCode: event.target.value.toUpperCase() })} /></label>
@@ -112,7 +132,6 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
             <label>工作类型<select value={selected.itemType} onChange={(event) => updateSelected({ itemType: event.target.value })}><option value="SCHEDULED_RECORD">定时记录</option><option value="EVENT_RECORD">事件记录</option><option value="INSPECTION">巡检</option><option value="METRIC_REVIEW">指标复盘</option><option value="REVIEW_APPROVAL">复核审批</option></select></label>
             <label>执行表单<select value={selected.formVersionId} onChange={(event) => updateSelected({ formVersionId: event.target.value })}><option value="">请选择已发布表单</option>{forms.map((form) => <option key={form.id} value={form.id}>{form.name}</option>)}</select></label>
             <label>关联标准<select value={selected.standardVersionId} onChange={(event) => updateSelected({ standardVersionId: event.target.value })}><option value="">暂不关联</option>{standards.map((standard) => <option key={standard.id} value={standard.id}>{standard.name}</option>)}</select></label>
-            <label>验收方式<select value={selected.reviewMode} onChange={(event) => updateSelected({ reviewMode: event.target.value })}><option value="NONE">提交即完成</option><option value="MANUAL">直属上级人工验收</option><option value="STANDARD_EVALUATION">按标准评价验收</option></select></label>
             <label className="full-field">工作说明<textarea rows={2} value={selected.description} onChange={(event) => updateSelected({ description: event.target.value })} /></label>
           </div>
         </section>
@@ -128,7 +147,13 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
                   <label>截止日期（0为月底）<input type="number" min="0" max="31" value={selected.cycleDueDay} onChange={event => updateSelected({ cycleDueDay: event.target.value })} /></label></>)}
               <p className="full-field">截止时间可跨期，但归属周期不变；首次启用前已到期的事项不追溯生成。修改后请发布新版本并按需调整分配。</p>
             </>}
-            {selected.periodType === 'SHIFT' ? <>
+            {selected.periodType === 'DAY' && <label className="checkbox-label"><input type="checkbox" checked={Boolean(selected.executionExtras.shiftTiming)} onChange={event => {
+              const extras = { ...selected.executionExtras }
+              if (event.target.checked) extras.shiftTiming = { availableAnchor: selected.shiftAvailableAnchor, availableOffsetMinutes: Number(selected.shiftAvailableOffsetMinutes), dueAnchor: selected.shiftDueAnchor, dueOffsetMinutes: Number(selected.shiftDueOffsetMinutes) }
+              else delete extras.shiftTiming
+              updateSelected({ executionExtras: extras })
+            }} />按营业日的实际班次计算时段</label>}
+            {selected.periodType === 'SHIFT' || Boolean(selected.executionExtras.shiftTiming) ? <>
               <label>可开始基准<select value={selected.shiftAvailableAnchor} onChange={(event) => updateSelected({ shiftAvailableAnchor: event.target.value as WorkPackageItemDraft['shiftAvailableAnchor'] })}><option value="SHIFT_START">班次开始</option><option value="SHIFT_MIDPOINT">班次中点</option><option value="SHIFT_END">班次结束</option></select></label>
               <label>可开始偏移（分钟）<input type="number" min="-2880" max="2880" value={selected.shiftAvailableOffsetMinutes} onChange={(event) => updateSelected({ shiftAvailableOffsetMinutes: event.target.value })} /></label>
               <label>截止基准<select value={selected.shiftDueAnchor} onChange={(event) => updateSelected({ shiftDueAnchor: event.target.value as WorkPackageItemDraft['shiftDueAnchor'] })}><option value="SHIFT_START">班次开始</option><option value="SHIFT_MIDPOINT">班次中点</option><option value="SHIFT_END">班次结束</option></select></label>
@@ -138,6 +163,9 @@ export function WorkPackageItemEditor({ items, setItems, forms, standards, issue
               <label>结束时间<input type="time" value={selected.workWindowEnd} onChange={(event) => updateSelected({ workWindowEnd: event.target.value })} /></label>
               <label>截止时间<input type="time" value={selected.dueLocalTime} onChange={(event) => updateSelected({ dueLocalTime: event.target.value })} /></label>
             </>}
+            {selected.periodType === 'DAY' && Boolean(selected.executionExtras.shiftTiming) && <p className="full-field">须存在唯一有效的实际班次；未配置时暂停生成，并保留待配置原因。</p>}
+            {selected.periodType === 'DAY' && !selected.executionExtras.shiftTiming && <label>时间所属日期<select value={String(selected.executionExtras.calendarDayOffset ?? 0)} onChange={event => updateSelected({ executionExtras: { ...selected.executionExtras, calendarDayOffset: Number(event.target.value) } })}><option value="0">营业日当天</option><option value="1">营业日次日（夜班）</option></select></label>}
+            <BreakfastTimingEditor item={selected} onChange={updateSelected} />
             <label>逾期宽限（分钟）<input type="number" min="0" max="1440" value={selected.graceMinutes} onChange={(event) => updateSelected({ graceMinutes: event.target.value })} /></label>
             <label>节假日策略<select value={selected.holidayPolicy} onChange={(event) => updateSelected({ holidayPolicy: event.target.value })}><option value="INCLUDE">照常执行</option><option value="SKIP">跳过指定节假日</option><option value="SHIFT_FORWARD" disabled>历史策略：顺延到下一工作日</option><option value="SHIFT_BACKWARD" disabled>历史策略：提前到上一工作日</option></select></label>
             <label className="full-field">节假日日期<input disabled={selected.holidayPolicy === 'INCLUDE'} value={selected.holidayDates} onChange={(event) => updateSelected({ holidayDates: event.target.value })} placeholder="YYYY-MM-DD，多个日期用逗号分隔" /></label>

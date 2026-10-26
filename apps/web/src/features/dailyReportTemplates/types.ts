@@ -1,6 +1,14 @@
 export type TemplateLifecycleStatus = 'DRAFT' | 'IN_REVIEW' | 'PUBLISHED' | 'RETIRED'
 export type TemplateOwnership = 'HEADQUARTERS' | 'STORE_SUPPLEMENT'
 
+export type DailyReportDeliveryTiming = {
+  mode: 'FIXED_LOCAL' | 'SHIFT_END'
+  openLocalTime?: string
+  dueLocalTime?: string
+  openOffsetMinutes?: number
+  dueOffsetMinutes?: number
+}
+
 export type DailyReportTemplateSummary = {
   id: string
   code: string
@@ -35,6 +43,8 @@ export type DailyReportTemplateItem = {
   standardVersionId?: string
   metricId?: string
   config?: {
+    originalDataSourceType?: string
+    originalValueType?: string
     dataSourceConfig?: Record<string, unknown>
     evidencePolicy?: Record<string, unknown>
     validationRules?: Record<string, unknown>
@@ -72,6 +82,8 @@ export type DailyReportTemplateVersion = {
   sections: DailyReportTemplateSection[]
   allowedActions: string[]
   createdAt?: string
+  deliveryTiming?: DailyReportDeliveryTiming
+  publicationTimeZone?: string
 }
 
 export type DailyReportTemplateDetail = DailyReportTemplateSummary & {
@@ -85,6 +97,7 @@ export type TemplateVersionDraft = {
   effectiveFrom?: string
   effectiveTo?: string
   sections: DailyReportTemplateSection[]
+  deliveryTiming?: DailyReportDeliveryTiming
 }
 
 export type DailyReportDeliveryPolicy = {
@@ -101,6 +114,7 @@ export type DailyReportDeliveryPolicy = {
   rowVersion: number
   updatedAt?: string
   configured: boolean
+  deliveryTiming?: DailyReportDeliveryTiming
 }
 
 export type DailyReportDeliveryPolicyDraft = Pick<

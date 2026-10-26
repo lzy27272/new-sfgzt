@@ -71,7 +71,8 @@ public final class DailyReportTemplateModels {
             @NotBlank String title,
             String description,
             @NotEmpty List<@Valid Section> sections,
-            @PositiveOrZero long expectedVersion
+            @PositiveOrZero long expectedVersion,
+            JsonNode deliveryTiming
     ) {
     }
 

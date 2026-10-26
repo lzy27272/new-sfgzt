@@ -5,6 +5,7 @@ import cn.sifangguan.hotelaios.shared.audit.AuditWriter;
 import cn.sifangguan.hotelaios.shared.context.TenantContext;
 import cn.sifangguan.hotelaios.shared.context.TenantPrincipal;
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
+import cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -136,7 +137,10 @@ public class DailyReportRoutineProjectionService {
                        executor_employee.id as executor_employee_id,
                        executor_employee.name as executor_employee_name,
                        executor_position.name as executor_position_name,
-                       record.status, record.series_entry_no, record.attempt_no,
+                       record.status,
+                """ + WorkReviewPolicy.effectiveModeSql("record_package_item", "expectation") + """
+                       as effective_review_mode, record_package_item.required as required_work,
+                       record.repeatable_entry, record.series_entry_no, record.attempt_no,
                        record.payload::text, record.completion_statement,
                        record.exception_statement, record.next_action, record.content_hash,
                        record.occurred_at, record.reviewed_at, matched_item.report_policy,
@@ -223,13 +227,14 @@ public class DailyReportRoutineProjectionService {
                         rs.getObject("executor_employee_id", UUID.class),
                         rs.getString("executor_employee_name"),
                         rs.getString("executor_position_name"),
-                        rs.getString("status"), rs.getInt("series_entry_no"),
+                        rs.getString("status"), rs.getString("effective_review_mode"), rs.getInt("series_entry_no"),
                         rs.getInt("attempt_no"), rs.getString("payload"),
                         rs.getString("completion_statement"), rs.getString("exception_statement"),
                         rs.getString("next_action"), rs.getString("content_hash"),
                         rs.getObject("occurred_at", java.time.OffsetDateTime.class),
                         rs.getObject("reviewed_at", java.time.OffsetDateTime.class),
-                        rs.getString("report_policy"), rs.getBoolean("aggregate_all_records")));
+                        rs.getString("report_policy"), rs.getBoolean("aggregate_all_records"),
+                        rs.getBoolean("required_work"), rs.getBoolean("repeatable_entry")));
         removeStaleRoutineProjections(principal, reportId, revisionId);
         Map<UUID, List<ProjectableRecord>> recordsByTemplateItem = new LinkedHashMap<>();
         for (ProjectableRecord record : records) {
@@ -420,17 +425,18 @@ public class DailyReportRoutineProjectionService {
         ObjectNode reportPolicy = readObject(record.reportPolicy());
         boolean includeEvidence = reportPolicy.path("includeEvidence").asBoolean(true);
         boolean includeExceptions = reportPolicy.path("includeExceptions").asBoolean(true);
-        boolean approved = "APPROVED".equals(record.status());
+        boolean approved = countsAsCompleted(record);
         ObjectNode value = objectMapper.createObjectNode();
         value.put("workRecordId", record.workRecordId().toString());
         value.put("status", record.status());
+        value.put("reviewExempt", "SUBMITTED".equals(record.status()) && approved);
         ObjectNode actualExecutor = value.putObject("actualExecutor");
         actualExecutor.put("assignmentId", record.assignmentId().toString());
         actualExecutor.put("employeeId", record.executorEmployeeId().toString());
         actualExecutor.put("employeeName", record.executorEmployeeName());
         actualExecutor.put("positionName", record.executorPositionName());
         value.put("completion", blankToFallback(record.completionStatement(),
-                approved ? "已完成" : "已提交，待主管审核"));
+                approved ? ("APPROVED".equals(record.status()) ? "已完成" : "免审完成，接受抽查") : "已提交，待主管审核"));
         String factLabel = reportPolicy.path("factLabel").asText("").trim();
         if (!factLabel.isBlank()) value.put("factLabel", factLabel);
         if (includeExceptions && !isBlank(record.exceptionStatement())) value.put("exception", record.exceptionStatement());
@@ -577,7 +583,7 @@ public class DailyReportRoutineProjectionService {
         ObjectNode reportPolicy = readObject(representative.reportPolicy());
         boolean includeEvidence = reportPolicy.path("includeEvidence").asBoolean(true);
         boolean includeExceptions = reportPolicy.path("includeExceptions").asBoolean(true);
-        boolean approved = records.stream().allMatch(record -> "APPROVED".equals(record.status()));
+        boolean approved = records.stream().allMatch(DailyReportRoutineProjectionService::countsAsCompleted);
         List<String> exceptionStatements = records.stream()
                 .map(ProjectableRecord::exceptionStatement)
                 .filter(statement -> !isBlank(statement) && !"无".equals(statement.trim()))
@@ -599,6 +605,7 @@ public class DailyReportRoutineProjectionService {
             entry.put("workRecordId", record.workRecordId().toString());
             entry.put("seriesEntryNo", record.seriesEntryNo());
             entry.put("status", record.status());
+            entry.put("reviewExempt", "SUBMITTED".equals(record.status()) && countsAsCompleted(record));
             entry.put("occurredAt", record.occurredAt().toString());
             ObjectNode executor = entry.putObject("actualExecutor");
             executor.put("assignmentId", record.assignmentId().toString());
@@ -606,7 +613,7 @@ public class DailyReportRoutineProjectionService {
             executor.put("employeeName", record.executorEmployeeName());
             executor.put("positionName", record.executorPositionName());
             entry.put("completion", blankToFallback(record.completionStatement(),
-                    "APPROVED".equals(record.status()) ? "已完成" : "已提交，待主管审核"));
+                    countsAsCompleted(record) ? ("APPROVED".equals(record.status()) ? "已完成" : "免审完成，接受抽查") : "已提交，待主管审核"));
             if (includeExceptions && !isBlank(record.exceptionStatement())) {
                 entry.put("exception", record.exceptionStatement());
             }
@@ -1223,6 +1230,7 @@ public class DailyReportRoutineProjectionService {
                 ObjectNode work = workItems.addObject();
                 work.put("label", String.valueOf(row.get("label")));
                 work.put("status", entry.path("status").asText());
+                work.put("reviewExempt", entry.path("reviewExempt").asBoolean(false));
                 work.put("completion", entry.path("completion").asText());
                 work.put("exception", entry.path("exception").asText());
                 work.put("nextAction", entry.path("nextAction").asText());
@@ -1261,7 +1269,8 @@ public class DailyReportRoutineProjectionService {
     private static String renderWorkSummary(ObjectNode summary) {
         List<String> entries = new ArrayList<>();
         for (JsonNode work : summary.path("workItems")) {
-            String state = "APPROVED".equals(work.path("status").asText()) ? "已审核" : "已提交待审核";
+            String state = work.path("reviewExempt").asBoolean(false) ? "免审完成，接受抽查"
+                    : "APPROVED".equals(work.path("status").asText()) ? "已审核" : "已提交待审核";
             entries.add(work.path("label").asText() + "（" + state + "）：" + work.path("completion").asText());
         }
         return String.join("；", entries);
@@ -1463,6 +1472,12 @@ public class DailyReportRoutineProjectionService {
     ) {
     }
 
+    private static boolean countsAsCompleted(ProjectableRecord record) {
+        return "APPROVED".equals(record.status())
+                || (record.requiredWork() && !record.repeatableEntry()
+                    && "SUBMITTED".equals(record.status()) && "NONE".equals(record.effectiveReviewMode()));
+    }
+
     private record ProjectableRecord(
             UUID templateItemId,
             UUID workRecordId,
@@ -1472,6 +1487,7 @@ public class DailyReportRoutineProjectionService {
             String executorEmployeeName,
             String executorPositionName,
             String status,
+            String effectiveReviewMode,
             int seriesEntryNo,
             int attemptNo,
             String payload,
@@ -1482,7 +1498,9 @@ public class DailyReportRoutineProjectionService {
             java.time.OffsetDateTime occurredAt,
             java.time.OffsetDateTime reviewedAt,
             String reportPolicy,
-            boolean aggregateAllRecords
+            boolean aggregateAllRecords,
+            boolean requiredWork,
+            boolean repeatableEntry
     ) {
     }
 }

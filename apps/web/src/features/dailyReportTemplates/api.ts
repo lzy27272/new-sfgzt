@@ -104,7 +104,9 @@ function normalizeItem(value: unknown, index: number): DailyReportTemplateItem {
     workPackageItemId: text(source.workPackageItemId) || undefined,
     standardVersionId: text(source.standardVersionId) || undefined,
     metricId: text(source.metricId) || undefined,
-    config: { dataSourceConfig, evidencePolicy, validationRules, optionValues },
+    config: { dataSourceConfig, evidencePolicy, validationRules, optionValues,
+      originalDataSourceType: text(source.dataSourceType || source.dataSource, 'MANUAL'),
+      originalValueType: text(source.valueType || source.inputType, 'TEXT') },
   }
 }
 
@@ -145,6 +147,8 @@ function normalizeVersion(value: unknown): DailyReportTemplateVersion {
     effectiveTo: text(source.effectiveTo) || undefined,
     rowVersion: number(source.rowVersion),
     sections: rows(configuration.sections ?? source.sections).map(normalizeSection),
+    deliveryTiming: configuration.deliveryTiming as DailyReportTemplateVersion['deliveryTiming'],
+    publicationTimeZone: text(source.publicationTimeZone) || undefined,
     allowedActions: Array.isArray(source.allowedActions) ? source.allowedActions.map(String) : versionActions(status),
     createdAt: text(source.createdAt) || undefined,
   } as DailyReportTemplateVersion
@@ -176,7 +180,8 @@ function normalizeSummary(value: unknown): DailyReportTemplateSummary {
 
 function normalizeDetail(value: unknown): DailyReportTemplateDetail {
   const source = row(value)
-  const versions = rows(source.versions).map(normalizeVersion)
+  const versions = rows(source.versions).map(version => normalizeVersion({ ...version,
+    publicationTimeZone: version.publicationTimeZone ?? source.publicationTimeZone }))
   const current = versions[0]
   const summary = normalizeSummary({
     ...source,
@@ -192,7 +197,8 @@ function normalizeDetail(value: unknown): DailyReportTemplateDetail {
 }
 
 function uuidOrUndefined(value: string): string | undefined {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : undefined
+  // Seeded PostgreSQL UUIDs include deterministic hashes, not just RFC version 1–5 identifiers.
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : undefined
 }
 
 function numberList(value: unknown, fallback: number[]): number[] {
@@ -226,6 +232,7 @@ function normalizeDeliveryPolicy(value: unknown): DailyReportDeliveryPolicy {
     rowVersion: number(source.rowVersion),
     updatedAt: text(source.updatedAt) || undefined,
     configured: Boolean(source.id || source.templateAssignmentId || source.configured === true),
+    deliveryTiming: source.deliveryTiming as DailyReportDeliveryPolicy['deliveryTiming'],
   }
 }
 
@@ -233,6 +240,7 @@ function versionUpdateBody(draft: TemplateVersionDraft) {
   return {
     title: draft.title,
     description: draft.description,
+    deliveryTiming: draft.deliveryTiming,
     sections: draft.sections.map((section, sectionIndex) => ({
       id: uuidOrUndefined(section.id),
       sectionCode: section.code,
@@ -248,12 +256,12 @@ function versionUpdateBody(draft: TemplateVersionDraft) {
         itemCode: item.code,
         label: item.label,
         description: item.description,
-        valueType: valueType(item.inputType),
+        valueType: item.config?.originalValueType || valueType(item.inputType),
         required: item.required,
         workPackageItemId: item.workPackageItemId,
         standardVersionId: item.standardVersionId,
         metricId: item.metricId,
-        dataSourceType: dataSourceType(item.dataSource),
+        dataSourceType: item.config?.originalDataSourceType || dataSourceType(item.dataSource),
         dataSourceConfig: item.config?.dataSourceConfig || {},
         evidencePolicy: { ...(item.config?.evidencePolicy || {}), ...(item.evidenceRequired ? { required: true } : {}) },
         validationRules: item.config?.validationRules || {},
@@ -305,9 +313,10 @@ export async function transitionDailyReportTemplateVersion(
   version: DailyReportTemplateVersion,
   action: 'submit-review' | 'publish' | 'retire',
   idempotencyKey: string,
+  effectiveFrom?: string,
 ) {
   return normalizeVersion(await featureApiMutation<unknown>(`${base}/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(version.id)}/actions/${action}`, identity, {
-    body: { effectiveFrom: version.effectiveFrom, effectiveTo: version.effectiveTo },
+    body: { effectiveFrom: effectiveFrom ?? version.effectiveFrom, effectiveTo: version.effectiveTo },
     expectedVersion: version.rowVersion,
     idempotencyKey,
   }))

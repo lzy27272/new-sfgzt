@@ -117,7 +117,7 @@ export function WorkBoardList({ data, loading, error, params, onChange, onOpen, 
 }) {
   const query = boardQuery(params, data.businessDate || undefined)
   return <article className="wb-panel wb-list">
-    <header><div><h2>{query.queue === 'REVIEW' ? '待审核队列（含历史）' : query.queue === 'CARRYOVER' ? '非日清跨期待办' : '工作明细'}</h2>
+    <header><div><h2>{query.queue === 'SPOT_CHECK' ? '免审待抽查（含历史）' : query.queue === 'REPAIR' ? '待整改（含历史）' : query.queue === 'REVIEW' ? '待人工审核（含历史）' : query.queue === 'CARRYOVER' ? '非日清跨期待办' : '工作明细'}</h2>
       <p>{query.queue === 'PERIOD' ? query.from + ' 至 ' + query.to + ' · 原工作日期口径' : '跨期队列独立显示，不改变所选期间完成率'}</p></div>
       {query.queue !== 'PERIOD' && <button className="secondary" onClick={() => onChange({ queue: undefined, status: undefined })}>返回所选日期</button>}
     </header>

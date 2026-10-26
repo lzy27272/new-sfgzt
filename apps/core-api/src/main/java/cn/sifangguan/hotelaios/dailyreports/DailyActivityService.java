@@ -59,6 +59,9 @@ public class DailyActivityService {
     }
     /** Called while the report row is locked. Partial drafts are allowed; submission is strict. */
     public ObjectNode normalize(UUID reportId,JsonNode input,boolean submitting) {
+        return normalize(reportId,input,submitting,true);
+    }
+    private ObjectNode normalize(UUID reportId,JsonNode input,boolean submitting,boolean preserveRouted) {
         var p=prepare(); var report=report(p,reportId,false); requireOwner(p,report,true);
         if(input==null || !input.isObject() || input.toString().length()>200000) throw bad("服务案例与遗留物内容格式无效或过长");
         var out=mapper.createObjectNode(); out.put("schemaVersion",1);
@@ -113,7 +116,94 @@ public class DailyActivityService {
         if(submitting && (flag==null||flag.isNull())) throw bad("请确认今日是否发现遗留物品");
         if(submitting && flag.asBoolean() && lost.isEmpty()) throw bad("已选择发现遗留物，请至少填写一条");
         if(flag!=null && flag.isBoolean()&&!flag.asBoolean()&&!lost.isEmpty()) throw bad("存在遗留物记录，请选择“有”或先移除未提交记录");
+        if(preserveRouted)requireRoutedEntries(p,reportId,lost);
         return out;
+    }
+    private void requireRoutedEntries(TenantPrincipal p,UUID reportId,JsonNode entries) {
+        var incoming=new HashMap<UUID,JsonNode>();
+        for(var entry:entries)incoming.put(uuid(entry,"id",true),entry);
+        for(var old:jdbc.queryForList("select entry_id,state,payload from lost_property_case where tenant_id=:tenant and report_id=:report",
+                base(p).addValue("report",reportId))) {
+            var next=incoming.get((UUID)old.get("entry_id"));
+            if(next==null)throw bad("已流转的遗留物不能删除；如需更正请联系接收人退回");
+            if(!"RETURNED".equals(old.get("state"))&&!parse(old.get("payload")).equals(next))
+                throw bad("已送审或入库的遗留物不能直接修改；请联系接收人退回后修订");
+        }
+    }
+    @Transactional(readOnly=true)
+    public List<Map<String,Object>> reportEntries(UUID reportId) {
+        var p=prepare();requireOwner(p,report(p,reportId,false),false);
+        return jdbc.queryForList("""
+            select id,entry_id as "entryId",state,row_version as "rowVersion",payload
+            from lost_property_case where tenant_id=:tenant and report_id=:report order by created_at,id
+            """,base(p).addValue("report",reportId)).stream().map(row -> {
+                row.put("payload",parse(row.get("payload")));return row;
+            }).toList();
+    }
+    /** Saves and routes one complete entry without requiring the rest of the report to be complete. */
+    @Transactional
+    public void submitEntry(UUID reportId,UUID entryId,String key,JsonNode request) {
+        requireActionPayload(request);
+        if(key==null||key.isBlank()||key.length()>150)throw bad("缺少有效的幂等请求编号");
+        var p=prepare();access.requirePermission("daily-report.submit");
+        var report=report(p,reportId,true);requireOwner(p,report,false);
+        var existing=jdbc.queryForList("select * from lost_property_case where tenant_id=:tenant and report_id=:report and entry_id=:entry for update",
+                base(p).addValue("report",reportId).addValue("entry",entryId));
+        String requestKey="immediate:"+key;
+        if(!existing.isEmpty()&&replayed(p,(UUID)existing.getFirst().get("id"),requestKey,request,Set.of("SUBMITTED","RESUBMITTED")))return;
+        requireOwner(p,report,true);
+        expected(report,request);
+        UUID revisionId=(UUID)report.get("current_revision_id");
+        var revisions=jdbc.queryForList("select payload_snapshot from daily_report_revision where tenant_id=:tenant and report_id=:report and id=:revision and revision_status='DRAFT' for update",
+                base(p).addValue("report",reportId).addValue("revision",revisionId));
+        if(revisions.isEmpty())throw conflict("日报草稿已变化，请刷新后重试");
+        JsonNode input=request.path("entry");
+        if(!input.isObject()||!entryId.equals(uuid(input,"id",true)))throw bad("遗留物记录编号不匹配");
+        // Validate only this entry strictly; other server-saved activity drafts may be unfinished.
+        ObjectNode single=mapper.createObjectNode().put("schemaVersion",1).put("lostPropertyOccurred",true);
+        single.putArray("serviceCases");var singleEntries=single.putArray("lostProperties");
+        singleEntries.add(input);
+        var normalized=normalize(reportId,single,true,false);
+        JsonNode entry=null;
+        for(var value:normalized.path("lostProperties"))if(entryId.toString().equals(value.path("id").asText()))entry=value;
+        if(entry==null)throw bad("遗留物内容无效");
+        if(!existing.isEmpty()&&!"RETURNED".equals(existing.getFirst().get("state"))) {
+            if(!parse(existing.getFirst().get("payload")).equals(entry))throw conflict("该遗留物已送审，不可修改");
+            return;
+        }
+        ObjectNode snapshot=(ObjectNode)parse(revisions.getFirst().get("payload_snapshot"));
+        JsonNode saved=snapshot.get("housekeepingActivities");
+        ObjectNode activities=saved!=null&&saved.isObject()?(ObjectNode)saved.deepCopy():mapper.createObjectNode();
+        if(!activities.has("serviceCases"))activities.putArray("serviceCases");
+        var merged=mapper.createArrayNode();
+        for(var value:activities.path("lostProperties"))if(!entryId.toString().equals(value.path("id").asText()))merged.add(value);
+        merged.add(entry);activities.set("lostProperties",merged);activities.put("lostPropertyOccurred",true);
+        snapshot.set("housekeepingActivities",normalize(reportId,activities,false));
+        jdbc.update("update daily_report_revision set payload_snapshot=cast(:snapshot as jsonb),row_version=row_version+1 where tenant_id=:tenant and id=:revision and revision_status='DRAFT'",
+                base(p).addValue("revision",revisionId).addValue("snapshot",snapshot.toString()));
+        UUID caseId=existing.isEmpty()?UUID.randomUUID():(UUID)existing.getFirst().get("id");
+        int attempt=existing.isEmpty()?1:((Number)existing.getFirst().get("submission_no")).intValue()+1;
+        var params=base(p).addValue("id",caseId).addValue("report",reportId).addValue("entry",entryId)
+                .addValue("revision",revisionId).addValue("hotel",report.get("hotel_org_unit_id"))
+                .addValue("reporter",report.get("position_assignment_id")).addValue("recipient",uuid(entry,"recipientAssignmentId",true))
+                .addValue("name",entry.path("itemName").asText()).addValue("quantity",entry.path("quantity").asInt())
+                .addValue("payload",entry.toString()).addValue("attempt",attempt);
+        if(existing.isEmpty())jdbc.update("""
+            insert into lost_property_case(id,tenant_id,hotel_org_unit_id,report_id,entry_id,source_revision_id,
+              reporter_assignment_id,recipient_assignment_id,item_name,quantity,state,payload)
+            values(:id,:tenant,:hotel,:report,:entry,:revision,:reporter,:recipient,:name,:quantity,'PENDING',cast(:payload as jsonb))
+            """,params);
+        else jdbc.update("""
+            update lost_property_case set source_revision_id=:revision,recipient_assignment_id=:recipient,item_name=:name,
+              quantity=:quantity,payload=cast(:payload as jsonb),state='PENDING',review_note=null,
+              submission_no=:attempt,row_version=row_version+1,updated_at=now() where tenant_id=:tenant and id=:id and state='RETURNED'
+            """,params);
+        jdbc.update("update daily_report set row_version=row_version+1 where tenant_id=:tenant and id=:report",
+                base(p).addValue("report",reportId));
+        event(p,caseId,existing.isEmpty()?"SUBMITTED":"RESUBMITTED",requestKey,request);
+        notifications.createForAssignment(uuid(entry,"recipientAssignmentId",true),"LOST_PROPERTY_REVIEW",
+                "遗留物品待接收审核","员工已即时上报遗留物品，请核对实物、照片与数量后确认入库；不必等待日报提交。",
+                "LOST_PROPERTY",caseId,"lost-review:"+caseId+":"+attempt);
     }
     private boolean validRecipient(TenantPrincipal p,Map<String,Object> report,UUID recipient) {
         if(recipient==null)return false;

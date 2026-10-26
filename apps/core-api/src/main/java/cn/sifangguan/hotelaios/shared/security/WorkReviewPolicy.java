@@ -9,6 +9,34 @@ import java.util.UUID;
 /** Ordinary work/report management only. Operation permissions and special
  * inventory/cycle reviewers must be checked by the caller before this policy. */
 public final class WorkReviewPolicy {
+    /** Rejected exempt work remains manual until a manager approves a correction. */
+    public static String effectiveModeSql(String item, String expectation) {
+        return """
+            case when %1$s.review_mode = 'NONE' and (
+              %1$s.item_type in ('REVIEW_APPROVAL','METRIC_REVIEW')
+              or coalesce(%1$s.execution_policy ->> 'handoverConfirmationRequired','false') = 'true'
+              or coalesce(%1$s.execution_policy ->> 'highRiskImmediateEscalation','false') = 'true'
+              or coalesce(%1$s.execution_policy ->> 'inventoryUsage','false') = 'true'
+              or coalesce(%1$s.submission_policy ->> 'inventoryUsage','false') = 'true'
+              or nullif(btrim(%1$s.execution_policy ->> 'inventoryMovement'),'') is not null
+              or %1$s.item_code in ('HKA_ITEM_ISSUE','HKA_USAGE_RETURN','HKA_DAILY_REPORT','HKA_LOST_PROPERTY','HKA_COMPLAINT_EVENT',
+                                    'NSA_ITEM_ISSUE','NSA_DAILY_HANDOVER','NSA_LOST_PROPERTY')
+              or (coalesce(%1$s.execution_policy ->> 'requiresExceptionReview','false')='true'
+                and exists (select 1 from work_record exception_record
+                  where exception_record.tenant_id=%2$s.tenant_id and exception_record.work_expectation_id=%2$s.id
+                    and exception_record.id=(select latest.id from work_record latest
+                      where latest.tenant_id=%2$s.tenant_id and latest.work_expectation_id=%2$s.id
+                      order by latest.series_entry_no desc,latest.attempt_no desc,latest.id desc limit 1)
+                    and (btrim(coalesce(exception_record.exception_statement,'')) not in ('','无','无异常','正常','未发现问题')
+                      or exception_record.payload ->> 'issueFound' = 'true'
+                      or btrim(coalesce(exception_record.payload ->> 'issueSummary','')) not in ('','无','无异常','正常','未发现问题'))))
+              or (%2$s.status <> 'SATISFIED' and exists (select 1 from work_record failed_review
+                where failed_review.tenant_id = %2$s.tenant_id
+                  and failed_review.work_expectation_id = %2$s.id and failed_review.status = 'REJECTED'))
+            ) then 'MANUAL' else %1$s.review_mode end
+            """.formatted(item, expectation);
+    }
+
     private final NamedParameterJdbcTemplate jdbc;
     public WorkReviewPolicy(NamedParameterJdbcTemplate jdbc) { this.jdbc = jdbc; }
 

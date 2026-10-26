@@ -959,12 +959,32 @@ export type TaskListQuery = {
   orgUnitId?: string
 }
 
-export async function loadTasks(identity: ApiIdentity, options: TaskListQuery = {}) {
+export async function loadTasks(identity: ApiIdentity, options: TaskListQuery = {}, signal?: AbortSignal) {
+  if (options.view === 'review') {
+    const tasks: ManagementTask[] = []
+    const ids = new Set<string>()
+    for (let page = 0; page < 400; page += 1) {
+      signal?.throwIfAborted()
+      const query = new URLSearchParams({ view: 'review', page: String(page), size: '100' })
+      if (options.status) query.set('status', options.status)
+      if (options.orgUnitId) query.set('orgUnitId', options.orgUnitId)
+      const payload = await apiRequest<unknown>(`/tasks?${query.toString()}`, identity, { signal })
+      signal?.throwIfAborted()
+      const rows = asList<JsonObject>(payload).map(normalizeTask)
+      for (const task of rows) {
+        if (!task.id || task.id === '—' || ids.has(task.id)) throw new Error('待审核任务清单在读取时发生变化，请刷新重试。')
+        ids.add(task.id)
+        tasks.push(task)
+      }
+      if (rows.length < 100) return { data: tasks, source: 'api' as const }
+    }
+    throw new Error('待审核任务过多，请按门店筛选后重试。')
+  }
   return withFallback(async () => {
     const query = new URLSearchParams({ view: options.view ?? 'mine', page: '0', size: '100' })
     if (options.status) query.set('status', options.status)
     if (options.orgUnitId) query.set('orgUnitId', options.orgUnitId)
-    const payload = await apiRequest<unknown>(`/tasks?${query.toString()}`, identity)
+    const payload = await apiRequest<unknown>(`/tasks?${query.toString()}`, identity, { signal })
     return asList<JsonObject>(payload).map(normalizeTask)
   }, () => demoValue<ManagementTask[]>('demoTasks'))
 }

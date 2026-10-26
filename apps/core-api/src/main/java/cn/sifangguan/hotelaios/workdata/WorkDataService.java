@@ -280,7 +280,7 @@ public class WorkDataService {
             validateConditionalFields(workContext.itemCode(), request.payload());
             weeklyAssessments.validateSubmission(workContext.itemCode(), workContext.expectationId(), request.payload());
             applicable = validateSubmissionPolicy(principal, workContext.itemId(), null,
-                    request.payload(), targetOrgUnitId,
+                    request.payload(), targetOrgUnitId, request.businessDate(),
                     request.completionStatement(), request.exceptionStatement(), request.nextAction());
         }
         OffsetDateTime occurredAt = request.occurredAt() == null ? OffsetDateTime.now() : request.occurredAt();
@@ -393,7 +393,7 @@ public class WorkDataService {
         if (!record.repeatableEntry()) {
             requireFirstSharedSubmission(principal, record.expectationId(), recordId);
         }
-        boolean applicable = validateSubmissionPolicyForRecord(principal, recordId);
+        boolean applicable = validateSubmissionPolicyForRecord(principal, recordId, record.businessDate());
         int changed = jdbc.update("""
                 update work_record
                 set status = 'SUBMITTED', submitted_at = now(), submitted_by_account_id = :actorId,
@@ -430,14 +430,21 @@ public class WorkDataService {
         if (usageService.isReviewRetry(recordId, request.outcome().trim().toUpperCase(Locale.ROOT), request.expectedVersion())) {
             return response("id", recordId, "status", record.status(), "rowVersion", request.expectedVersion() + 1);
         }
-        if (!"SUBMITTED".equals(record.status())) {
-            throw new IllegalArgumentException("只有已提交工作记录可以复核");
+        boolean spotCheck = isExemptRecord(principal, record, recordId) && !usageService.hasUsage(recordId);
+        if (!"SUBMITTED".equals(record.status()) && !(spotCheck && "APPROVED".equals(record.status()))) {
+            throw new IllegalArgumentException("只有待复核记录或可抽查的免审工作可以复核");
         }
         if (principal.actorId().equals(record.submittedByAccountId())) {
             throw new AccessDeniedException("提交人不能复核自己的工作记录");
         }
         if (usageService.hasUsage(recordId)) usageService.requireReviewer(recordId);
-        else requireConfiguredReviewer(principal, record);
+        else {
+            requireConfiguredReviewer(principal, record);
+            if (hasExemptReviewConfiguration(principal, record)
+                    && !new WorkReviewPolicy(jdbc).canManage(principal, record.assignmentId(), record.targetOrgUnitId())) {
+                throw new AccessDeniedException("只有有效主管或授权门店管理者可以抽查免审工作，不能自审");
+            }
+        }
         String outcome = request.outcome().trim().toUpperCase(Locale.ROOT);
         if (!Set.of("APPROVED", "REJECTED").contains(outcome)) {
             throw new IllegalArgumentException("复核结果只能是APPROVED或REJECTED");
@@ -445,14 +452,38 @@ public class WorkDataService {
         if ("REJECTED".equals(outcome) && (request.reason() == null || request.reason().isBlank())) {
             throw new IllegalArgumentException("退回工作记录必须填写原因");
         }
+        if (spotCheck) {
+            Long currentVersion = jdbc.queryForObject("select row_version from work_record where tenant_id=:tenantId and id=:recordId",
+                    base(principal).addValue("recordId", recordId), Long.class);
+            if (currentVersion == null || request.expectedVersion() != currentVersion) throw new IllegalArgumentException("工作记录版本已变化，请刷新后抽查");
+            UUID reviewerAssignment = principal.businessActorAssignmentId();
+            if (reviewerAssignment == null && principal.assignmentIds().size() == 1)
+                reviewerAssignment = principal.assignmentIds().iterator().next();
+            int auditAdded = jdbc.update("""
+                    insert into work_record_spot_check
+                      (tenant_id,work_record_id,reviewer_account_id,reviewer_assignment_id,outcome,reason,before_row_version,before_review)
+                    select tenant_id,id,:actorId,:reviewer,:outcome,:reason,row_version,
+                      jsonb_build_object('status',status,'reviewedBy',reviewed_by_account_id,'reviewedAt',reviewed_at,'reason',review_reason)
+                    from work_record where tenant_id=:tenantId and id=:recordId and row_version=:expectedVersion
+                    on conflict (tenant_id,work_record_id,outcome) do nothing
+                    """, base(principal).addValue("recordId", recordId).addValue("reviewer", reviewerAssignment)
+                    .addValue("actorId", principal.actorId()).addValue("outcome", outcome)
+                    .addValue("reason", request.reason() == null || request.reason().isBlank() ? "抽查合格" : request.reason().trim())
+                    .addValue("expectedVersion", request.expectedVersion()));
+            if ("APPROVED".equals(outcome)) {
+                if (auditAdded == 1) auditWriter.record("WORK_RECORD_SPOT_CHECK_PASSED", "WORK_RECORD", recordId, "{}");
+                return response("id", recordId, "status", record.status(), "rowVersion", currentVersion);
+            }
+        }
         int changed = jdbc.update("""
                 update work_record
                 set status = :outcome, reviewed_by_account_id = :actorId, reviewed_at = now(),
                     review_reason = :reason, row_version = row_version + 1
-                where tenant_id = :tenantId and id = :recordId and status = 'SUBMITTED'
+                where tenant_id = :tenantId and id = :recordId and status = :previousStatus
                   and row_version = :expectedVersion
                 """, base(principal)
                 .addValue("recordId", recordId)
+                .addValue("previousStatus", record.status())
                 .addValue("outcome", outcome)
                 .addValue("actorId", principal.actorId())
                 .addValue("reason", trimToNull(request.reason()))
@@ -473,7 +504,7 @@ public class WorkDataService {
                     .addValue("expectationStatus", "APPROVED".equals(outcome) ? "SATISFIED" : "FAILED"));
         }
         usageService.onReview(recordId, outcome);
-        auditWriter.record("WORK_RECORD_" + outcome, "WORK_RECORD", recordId,
+        auditWriter.record(spotCheck && "REJECTED".equals(outcome) ? "WORK_RECORD_SPOT_CHECK_FAILED" : "WORK_RECORD_" + outcome, "WORK_RECORD", recordId,
                 "{\"reason\":\"" + jsonEscape(request.reason() == null ? "" : request.reason().trim()) + "\"}");
         auditWriter.emit("WORK_RECORD", recordId,
                 "APPROVED".equals(outcome) ? "WorkRecordApproved" : "WorkRecordRejected",
@@ -603,7 +634,7 @@ public class WorkDataService {
         }
     }
 
-    private boolean validateSubmissionPolicyForRecord(TenantPrincipal principal, UUID recordId) {
+    private boolean validateSubmissionPolicyForRecord(TenantPrincipal principal, UUID recordId, java.time.LocalDate businessDate) {
         Map<String, Object> record = jdbc.queryForMap("""
                 select record.work_package_item_id, record.target_org_unit_id, record.completion_statement,
                        record.exception_statement, record.next_action, record.payload::text,
@@ -617,7 +648,7 @@ public class WorkDataService {
         weeklyAssessments.validateSubmission((String) record.get("item_code"), (UUID) record.get("work_expectation_id"),
                 readJson((String) record.get("payload")));
         return validateSubmissionPolicy(principal, (UUID) record.get("work_package_item_id"), recordId,
-                readJson((String) record.get("payload")), (UUID) record.get("target_org_unit_id"),
+                readJson((String) record.get("payload")), (UUID) record.get("target_org_unit_id"), businessDate,
                 (String) record.get("completion_statement"), (String) record.get("exception_statement"),
                 (String) record.get("next_action"));
     }
@@ -628,6 +659,7 @@ public class WorkDataService {
             UUID workRecordId,
             JsonNode payload,
             UUID targetOrgUnitId,
+            java.time.LocalDate businessDate,
             String completionStatement,
             String exceptionStatement,
             String nextAction
@@ -645,6 +677,14 @@ public class WorkDataService {
         JsonNode submissionPolicy = readJson(String.valueOf(policyRow.get("submission_policy")));
         JsonNode applicabilityPolicy = readJson(String.valueOf(policyRow.get("applicability_policy")));
         JsonNode executionPolicy = readJson(String.valueOf(policyRow.get("execution_policy")));
+        if (executionPolicy.has("breakfastStages")) {
+            String timezone = jdbc.queryForObject("""
+                    select coalesce(case when i.timezone_mode='FIXED' then nullif(i.fixed_timezone,'') end,t.timezone)
+                    from work_package_item i join tenant t on t.id=i.tenant_id
+                    where i.tenant_id=:tenantId and i.id=:itemId
+                    """, base(principal).addValue("itemId", workPackageItemId), String.class);
+            BreakfastSubmissionPolicy.validate(executionPolicy, businessDate, java.time.ZoneId.of(timezone), OffsetDateTime.now());
+        }
         if ("HKA_LOST_PROPERTY".equals(policyRow.get("item_code"))) {
             UUID recipient;
             try { recipient = UUID.fromString(payload.path("handoverRecipientAssignmentId").asText()); }
@@ -1686,21 +1726,52 @@ public class WorkDataService {
         }
     }
 
+    private boolean isExemptRecord(TenantPrincipal principal, RecordAccess record, UUID recordId) {
+        if (record.workPackageItemId() == null || record.expectationId() == null || record.repeatableEntry()) return false;
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists (select 1
+                from work_package_item i join work_expectation x
+                  on x.tenant_id=i.tenant_id and x.work_package_item_id=i.id
+                where i.tenant_id=:tenantId and i.id=:itemId and x.id=:expectationId and i.required and (
+                """ + WorkReviewPolicy.effectiveModeSql("i", "x") + """
+                ) = 'NONE'
+                  and :recordId=(select latest.id from work_record latest
+                    where latest.tenant_id=x.tenant_id and latest.work_expectation_id=x.id
+                    order by latest.series_entry_no desc,latest.attempt_no desc,latest.id desc limit 1))
+                """, base(principal).addValue("itemId", record.workPackageItemId())
+                .addValue("expectationId", record.expectationId()).addValue("recordId", recordId), Boolean.class));
+    }
+
+    private boolean hasExemptReviewConfiguration(TenantPrincipal principal, RecordAccess record) {
+        if (record.workPackageItemId() == null || record.repeatableEntry()) return false;
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select required and review_mode='NONE' from work_package_item
+                where tenant_id=:tenantId and id=:itemId
+                """, base(principal).addValue("itemId", record.workPackageItemId()), Boolean.class));
+    }
+
     @Transactional(readOnly = true)
     public Map<String, Object> reviewEligibility(UUID recordId) {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission("work-record.read", "work-record.review", "work-record.team-read", "manager-cycle.review");
         workVisibility.requireRecord(principal, recordId);
         RecordAccess record = recordAccess(principal, recordId);
-        if (!"SUBMITTED".equals(record.status())) return Map.of("canReview", false, "reason", "仅已提交、待复核的记录可以审核");
+        boolean spotCheck = isExemptRecord(principal, record, recordId) && !usageService.hasUsage(recordId);
+        if (!"SUBMITTED".equals(record.status()) && !(spotCheck && "APPROVED".equals(record.status())))
+            return Map.of("canReview", false, "reason", "仅待复核记录或可抽查的免审工作可以审核");
         if (principal.actorId().equals(record.submittedByAccountId())) return Map.of("canReview", false, "reason", "不能审核自己提交的工作");
         try {
             accessPolicy.requireOrgScope(record.targetOrgUnitId());
             accessPolicy.requireAnyPermission("work-record.review", "manager-cycle.review");
             if (!isManagerCycle(principal, record.workPackageItemId())) accessPolicy.requirePermission("work-record.review");
             if (usageService.hasUsage(recordId)) usageService.requireReviewer(recordId);
-            else requireConfiguredReviewer(principal, record);
-            return Map.of("canReview", true, "reason", "");
+            else {
+                requireConfiguredReviewer(principal, record);
+                if (hasExemptReviewConfiguration(principal, record)
+                        && !new WorkReviewPolicy(jdbc).canManage(principal, record.assignmentId(), record.targetOrgUnitId()))
+                    throw new AccessDeniedException("只有有效主管或授权门店管理者可以抽查免审工作，不能自审");
+            }
+            return Map.of("canReview", true, "spotCheck", spotCheck, "reason", "");
         } catch (AccessDeniedException denied) {
             return Map.of("canReview", false, "reason", denied.getMessage());
         }
@@ -1708,6 +1779,7 @@ public class WorkDataService {
 
     private void notifySubmittedForReview(TenantPrincipal principal, UUID recordId) {
         var record = recordAccessForUpdate(principal, recordId);
+        if (isExemptRecord(principal, record, recordId)) return;
         if (record.workPackageItemId()!=null && isManagerCycle(principal, record.workPackageItemId())) {
             for (var supervisor : supervisors.load(principal, "manager-cycle.review").forWork(record.assignmentId(), record.targetOrgUnitId())) {
                 jdbc.update("""

@@ -41,6 +41,7 @@ export type DirectoryCandidate = {
   requestedLoginName?: string
   onboardingKind?: string
   requestedOrgUnitId?: string
+  requestedHotelId?: string
   requestedHotelName?: string
   requestedDepartmentName?: string
   requestedPositionId?: string

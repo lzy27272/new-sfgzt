@@ -1,6 +1,6 @@
 import './features/academy/academy.css'
 import { AiEvidenceAdmin } from './features/aiEvidence/AiEvidenceAdmin'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { apiRequest, asList } from './api/client'
 import type { RoleContext, RouteParams } from './domain'
 import { PositionAdministration } from './features/organization/PositionAdministration'
@@ -8,6 +8,8 @@ import { PersonnelDirectory, initialPersonnelDirectory } from './features/organi
 import { isEmployeePermanentDeleteConfirmation } from './features/organization/employeeDeleteConfirmation'
 import { WorkPackageItemEditor } from './features/workPackages/WorkPackageItemEditor'
 import { mapWorkPackageItem, serializeWorkPackageItems, validateWorkPackageItems, type WorkPackageItemDraft } from './features/workPackages/configuration'
+import { allocationDateIssue, conflictingAllocations, versionLocalDate, versionPublicationStart } from './features/workPackages/versionRelease'
+import { WorkDutyPeriodEditor } from './features/workPackages/WorkDutyPeriodEditor'
 
 type Row = Record<string, unknown>
 type OrgUnit = { id: string; parentId?: string; code: string; name: string; unitType: string; status: string; sortOrder: number; propertyCode?: string; city?: string; roomCount?: number; openingDate?: string; breakfastServiceEnabled?: boolean; guestRoomFloorCount?: number; assistantWorkTemplateMode?: string; kitchenEnabled?: boolean; afternoonTeaEnabled?: boolean; barEnabled?: boolean; projectionEnabled?: boolean; gymEnabled?: boolean; terraceEnabled?: boolean; trendyPlayAreaEnabled?: boolean; facilityEvidenceInstances: Record<string, string[]>; assetEvidenceInstances: Record<string, string[]> }
@@ -15,7 +17,7 @@ type Position = { id: string; name: string; status: string; authorizationScopeTy
 type Employee = { id: string; accountId?: string; loginName?: string; employeeNo: string; name: string; mobile?: string; hiredOn?: string; employmentStatus: string; employeeType?: string; academyActiveCount?: number; academyCompletedCount?: number; accountStatus?: string; assignmentId?: string; orgUnitId?: string; orgUnitName?: string; positionId?: string; positionName?: string; managerAssignmentId?: string; primary?: boolean; assignmentType?: string; assignmentStatus?: string; validFrom?: string; validTo?: string; authorizationScopeType?: string; responsibleHotelIds: string[]; responsibleHotelNames?: string; deletedAt?: string; deletedByName?: string }
 type PackageRow = { id: string; code: string; name: string; positionName: string; lifecycleStatus: string; versionNo: number; latestVersionId?: string; ownerOrgName?: string }
 type SelectRow = { id: string; code: string; name: string; status?: string; versionId?: string; positionId?: string }
-type AllocationRow = { id: string; assignmentId: string; targetOrgName: string; assigneeName: string; status: string; validFrom: string }
+type AllocationRow = { id: string; assignmentId: string; targetOrgUnitId: string; targetOrgName: string; assigneeName: string; status: string; validFrom: string; validTo?: string; versionId?: string }
 
 const field = (row: Row, ...keys: string[]) => keys.map((key) => row[key]).find((value) => value !== undefined && value !== null)
 const text = (row: Row, ...keys: string[]) => String(field(row, ...keys) ?? '')
@@ -355,8 +357,15 @@ export function WorkPackageCenter({ identity, permissions }: { identity: RoleCon
   const [modal, setModal] = useState(false)
   const [saving, setSaving] = useState(false)
   const [detail, setDetail] = useState<Row>()
+  const [notice, setNotice] = useState('')
+  const [selectedVersionId, setSelectedVersionId] = useState('')
+  const [versionConfiguration, setVersionConfiguration] = useState<Row>()
+  const [versionLoading, setVersionLoading] = useState(false)
+  const [versionDirty, setVersionDirty] = useState(false)
+  const [effectiveDate, setEffectiveDate] = useState('')
+  const versionRequest = useRef(0)
   const [detailAllocations, setDetailAllocations] = useState<AllocationRow[]>([])
-  const [allocation, setAllocation] = useState({ assignmentId: '', targetOrgUnitId: '' })
+  const [allocation, setAllocation] = useState({ assignmentId: '', targetOrgUnitId: '', validFrom: '', validTo: '' })
   const [itemDrafts, setItemDrafts] = useState<WorkPackageItemDraft[]>([])
   const [versionTitle, setVersionTitle] = useState('')
   const [versionDescription, setVersionDescription] = useState('')
@@ -397,88 +406,107 @@ export function WorkPackageCenter({ identity, permissions }: { identity: RoleCon
     } catch (reason) { setError(reason instanceof Error ? reason.message : '工作包创建失败') }
     finally { setSaving(false) }
   }
-  const openDetail = async (item: PackageRow) => {
-    setError(undefined)
-    setAllocation({ assignmentId: '', targetOrgUnitId: '' })
+  const mapAllocations = (payload: unknown): AllocationRow[] => asList<Row>(payload).map(row => ({
+    id: text(row, 'id'), assignmentId: text(row, 'position_assignment_id', 'positionAssignmentId'),
+    targetOrgUnitId: text(row, 'target_org_unit_id', 'targetOrgUnitId'),
+    targetOrgName: text(row, 'target_org_unit_name', 'targetOrgUnitName', 'targetOrgName'),
+    assigneeName: text(row, 'employee_name', 'employeeName', 'assigneeName'),
+    status: text(row, 'status'), validFrom: text(row, 'valid_from', 'validFrom'),
+    validTo: text(row, 'valid_to', 'validTo') || undefined, versionId: text(row, 'work_package_version_id', 'workPackageVersionId'),
+  }))
+  const readVersion = async (packageDetail: Row, versionId: string) => {
+    const request = ++versionRequest.current
+    setVersionLoading(true); setError(undefined); setSelectedVersionId(versionId)
+    setVersionConfiguration(undefined); setItemDrafts([]); setVersionDirty(false); setEffectiveDate('')
+    setAllocation({ assignmentId: '', targetOrgUnitId: '', validFrom: '', validTo: '' })
     try {
-      const [packageDetail, allocationRaw] = await Promise.all([
-        apiRequest<Row>(`/work-packages/${item.id}`, identity),
-        apiRequest<unknown>(`/work-packages/${item.id}/allocations`, identity),
-      ])
-      const configuration = packageDetail.latestVersion && typeof packageDetail.latestVersion === 'object' ? packageDetail.latestVersion as Row : {}
-      const latestVersion = asList<Row>(packageDetail.versions)[0] ?? {}
-      setDetail(packageDetail)
+      const version = asList<Row>(packageDetail.versions).find(row => text(row, 'id') === versionId)
+      if (!version) throw new Error('所选版本不存在，请刷新后重新选择。')
+      const configuration = await apiRequest<Row>(`/work-packages/${text(packageDetail, 'id')}/versions/${versionId}`, identity)
+      if (request !== versionRequest.current) return
+      setVersionConfiguration(configuration)
       setItemDrafts(asList<Row>(configuration.items).map(mapWorkPackageItem))
-      setVersionTitle(text(latestVersion, 'title') || text(packageDetail, 'name'))
-      setVersionDescription(text(latestVersion, 'description') || text(packageDetail, 'description'))
-      setDetailAllocations(asList<Row>(allocationRaw).map((row) => ({
-        id: text(row, 'id'), assignmentId: text(row, 'position_assignment_id', 'positionAssignmentId'),
-        targetOrgName: text(row, 'target_org_unit_name', 'targetOrgUnitName', 'targetOrgName'),
-        assigneeName: text(row, 'employee_name', 'employeeName', 'assigneeName'),
-        status: text(row, 'status'), validFrom: text(row, 'valid_from', 'validFrom'),
-      })))
-    } catch (reason) { setError(reason instanceof Error ? reason.message : '详情加载失败') }
+      setVersionTitle(text(version, 'title') || text(packageDetail, 'name'))
+      setVersionDescription(text(version, 'description') || text(packageDetail, 'description'))
+    } catch (reason) { if (request === versionRequest.current) setError(reason instanceof Error ? reason.message : '所选版本加载失败') }
+    finally { if (request === versionRequest.current) setVersionLoading(false) }
+  }
+  const refreshDetail = async (id: string, preferredVersionId?: string) => {
+    const [packageDetail, allocationRaw] = await Promise.all([
+      apiRequest<Row>(`/work-packages/${id}`, identity), apiRequest<unknown>(`/work-packages/${id}/allocations`, identity),
+    ])
+    setDetail(packageDetail); setDetailAllocations(mapAllocations(allocationRaw))
+    const versionId = preferredVersionId || text(asList<Row>(packageDetail.versions)[0] ?? {}, 'id')
+    await readVersion(packageDetail, versionId)
+  }
+  const openDetail = async (item: PackageRow) => {
+    setError(undefined); setNotice('')
+    try { await refreshDetail(item.id) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : '详情加载失败') }
+  }
+  const chooseVersion = async (versionId: string) => {
+    if (!detail || versionId === selectedVersionId) return
+    if (versionDirty && !window.confirm('当前版本有未保存的修改。切换版本将放弃这些修改，是否继续？')) return
+    await readVersion(detail, versionId)
   }
   const versionPayload = (source: Row, title = versionTitle) => {
-    const configuration = source.latestVersion && typeof source.latestVersion === 'object' ? source.latestVersion as Row : {}
+    const configuration = versionConfiguration ?? {}
     const scopes = asList<Row>(configuration.scopes).map((scope) => ({ scopeType: text(scope, 'scope_type', 'scopeType'), brandId: text(scope, 'brand_id', 'brandId') || null, orgUnitId: text(scope, 'org_unit_id', 'orgUnitId') || null, positionId: text(scope, 'position_id', 'positionId') || null }))
     return { title: title.trim() || text(source, 'name'), description: versionDescription.trim() || null, scopes, items: serializeWorkPackageItems(itemDrafts) }
   }
-  const refreshDetail = async (id: string) => {
-    const packageDetail = await apiRequest<Row>(`/work-packages/${id}`, identity)
-    const configuration = packageDetail.latestVersion && typeof packageDetail.latestVersion === 'object' ? packageDetail.latestVersion as Row : {}
-    const latestVersion = asList<Row>(packageDetail.versions)[0] ?? {}
-    setDetail(packageDetail)
-    setItemDrafts(asList<Row>(configuration.items).map(mapWorkPackageItem))
-    setVersionTitle(text(latestVersion, 'title') || text(packageDetail, 'name'))
-    setVersionDescription(text(latestVersion, 'description') || text(packageDetail, 'description'))
-  }
   const createEditableVersion = async () => {
-    if (!detail) return
+    if (!detail || versionLoading || !versionConfiguration) return
     setSaving(true); setError(undefined)
     try {
       const packageId = text(detail, 'id')
       const newTitle = `${text(detail, 'name')}（新版本）`
       const created = await apiRequest<Row>(`/work-packages/${packageId}/versions`, identity, { method: 'POST', body: JSON.stringify({ title: newTitle, description: versionDescription || text(detail, 'description') || null }) })
       await apiRequest(`/work-packages/${packageId}/versions/${text(created, 'id')}`, identity, { method: 'PUT', body: JSON.stringify(versionPayload(detail, newTitle)) })
-      await refreshDetail(packageId); await reload()
+      await refreshDetail(packageId, text(created, 'id')); await reload()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '创建工作包新版本失败') }
     finally { setSaving(false) }
   }
   const saveDraftConfiguration = async () => {
-    if (!detail) return
-    const latest = asList<Row>(detail.versions)[0]
+    if (!detail || versionLoading || !versionConfiguration) return
+    const latest = asList<Row>(detail.versions).find(version => text(version, 'id') === selectedVersionId)
     if (!latest || text(latest, 'lifecycle_status', 'lifecycleStatus') !== 'DRAFT') return
     const issues = validateWorkPackageItems(itemDrafts)
     if (issues.length) { setError(issues[0]); return }
     setSaving(true); setError(undefined)
-    try { const packageId = text(detail, 'id'); await apiRequest(`/work-packages/${packageId}/versions/${text(latest, 'id')}`, identity, { method: 'PUT', body: JSON.stringify(versionPayload(detail)) }); await refreshDetail(packageId); await reload() }
+    try { const packageId = text(detail, 'id'); await apiRequest(`/work-packages/${packageId}/versions/${text(latest, 'id')}`, identity, { method: 'PUT', body: JSON.stringify(versionPayload(detail)) }); await refreshDetail(packageId, selectedVersionId); await reload() }
     catch (reason) { setError(reason instanceof Error ? reason.message : '保存工作包草稿失败') }
     finally { setSaving(false) }
   }
   const detailAction = async () => {
-    if (!detail) return
-    const id = text(detail, 'id'); const versions = asList<Row>(detail.versions); const latest = versions[0]
+    if (!detail || versionLoading || !versionConfiguration) return
+    const id = text(detail, 'id'); const latest = asList<Row>(detail.versions).find(version => text(version, 'id') === selectedVersionId)
     if (!latest) return
     const lifecycle = text(latest, 'lifecycle_status', 'lifecycleStatus')
-    if (lifecycle !== 'DRAFT' && !canAllocate) { setDetail(undefined); return }
+    if (lifecycle !== 'DRAFT' && (lifecycle !== 'PUBLISHED' || !canAllocate)) { setDetail(undefined); return }
     if (lifecycle === 'DRAFT' && !canPublish) { setDetail(undefined); return }
     setSaving(true); setError(undefined)
     try {
       if (lifecycle === 'DRAFT') {
         const issues = validateWorkPackageItems(itemDrafts)
         if (issues.length) throw new Error(issues[0])
+        const prospective = itemDrafts.some(item => item.executionExtras.workflowRevision === 'THREE_ROLE_V88')
+        const effectiveFrom = versionPublicationStart(effectiveDate, text(detail, 'publicationTimeZone'), prospective)
         await apiRequest(`/work-packages/${id}/versions/${text(latest, 'id')}`, identity, { method: 'PUT', body: JSON.stringify(versionPayload(detail)) })
         await apiRequest(`/work-packages/${id}/versions/${text(latest, 'id')}/validate`, identity, { method: 'POST' })
-        await apiRequest(`/work-packages/${id}/versions/${text(latest, 'id')}/publish`, identity, { method: 'POST', body: JSON.stringify({ effectiveFrom: new Date().toISOString(), effectiveTo: null }) })
+        await apiRequest(`/work-packages/${id}/versions/${text(latest, 'id')}/publish`, identity, { method: 'POST', body: JSON.stringify({ effectiveFrom, effectiveTo: null }) })
+        setNotice(`所选版本已发布，从 ${effectiveDate} 00:00（${text(detail, 'publicationTimeZone')}）生效；未回写历史工作。`)
       } else {
         const selected = assignments.find((item) => item.assignmentId === allocation.assignmentId)
         if (!selected?.assignmentId || !allocation.targetOrgUnitId) throw new Error('请选择负责人任职与目标门店。')
-        await apiRequest(`/work-packages/${id}/allocations`, identity, { method: 'POST', body: JSON.stringify({ workPackageVersionId: text(latest, 'id'), positionAssignmentId: selected.assignmentId, targetOrgUnitId: allocation.targetOrgUnitId, validFrom: new Date().toISOString().slice(0, 10), validTo: null, allocationSource: 'MANUAL' }) })
-        const latestConfiguration = detail.latestVersion && typeof detail.latestVersion === 'object' ? detail.latestVersion as Row : {}
-        const firstItem = asList<Row>(latestConfiguration.items)[0]
-        const periodType = text(firstItem ?? {}, 'period_type', 'periodType') || 'DAY'
-        await apiRequest('/work-expectations/actions/generate', identity, { method: 'POST', body: JSON.stringify({ positionAssignmentId: selected.assignmentId, targetOrgUnitId: allocation.targetOrgUnitId, businessDate: new Date().toISOString().slice(0, 10), periodType, dutyPeriodId: null }) })
+        const dateIssue = allocationDateIssue(allocation.validFrom, allocation.validTo, text(latest, 'effective_from', 'effectiveFrom'), text(detail, 'publicationTimeZone'))
+        if (dateIssue) throw new Error(dateIssue)
+        const currentAllocations = mapAllocations(await apiRequest<unknown>(`/work-packages/${id}/allocations`, identity))
+        setDetailAllocations(currentAllocations)
+        if (conflictingAllocations(currentAllocations, selected.assignmentId, allocation.targetOrgUnitId, allocation.validFrom, allocation.validTo).length) {
+          throw new Error('该任职和目标组织已有时间重叠的有效下发。原分配保持不变；请先核对其结束日期，不能直接覆盖。')
+        }
+        await apiRequest(`/work-packages/${id}/allocations`, identity, { method: 'POST', body: JSON.stringify({ workPackageVersionId: text(latest, 'id'), positionAssignmentId: selected.assignmentId, targetOrgUnitId: allocation.targetOrgUnitId, validFrom: allocation.validFrom, validTo: allocation.validTo || null, allocationSource: 'MANUAL' }) })
+        setNotice(`已保存所选版本的下发，从 ${allocation.validFrom} 生效。工作按实际营业日及排班生成，不代表今日已经生成；原有效分配未被覆盖。`)
       }
       setDetail(undefined); await reload()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '工作包操作失败') }
@@ -487,18 +515,36 @@ export function WorkPackageCenter({ identity, permissions }: { identity: RoleCon
   if (aiRulesOpen) return <AiEvidenceAdmin key={identity.key} identity={identity} onClose={() => setAiRulesOpen(false)} />
   return <section className="page-section configuration-page"><header className="page-title"><div><span className="eyebrow">WORK PACKAGE CENTER</span><h1>工作包中心</h1><p>创建岗位工作包草稿，绑定表单、标准和门店范围，校验后发布。</p></div><div className="page-actions"><span className="source-flag api">实时 API</span><button className="secondary" onClick={() => setAiRulesOpen(true)}>AI 检查规则</button>{canManage && <button className="primary" onClick={() => setModal(true)}>＋ 新建工作包</button>}</div></header>
     {error && <div className="inline-error page-error">{error}</div>}
-    {loading ? <div className="state-card"><div className="spinner" /><strong>正在读取工作包</strong></div> : !packages.length ? <div className="state-card"><b>◇</b><strong>当前范围暂无工作包</strong><span>{canManage ? '点击右上角创建第一个工作包。' : '请联系集团管理员发布并分配工作包。'}</span></div> : <div className="card-grid">{packages.map((item) => <article className="package-card" key={item.id}><div className="card-top"><span>{item.code}</span><span className={`status-pill ${item.lifecycleStatus.toLowerCase()}`}>{item.lifecycleStatus === 'PUBLISHED' ? '已发布' : item.lifecycleStatus === 'DRAFT' ? '草稿' : item.lifecycleStatus}</span></div><h2>{item.name}</h2><p>{item.positionName} · {item.ownerOrgName || '集团范围'}</p><div className="package-stats"><span><strong>V{item.versionNo || '—'}</strong>当前版本</span><span><strong>{item.lifecycleStatus === 'PUBLISHED' ? '生效' : '待发布'}</strong>版本状态</span></div><button className="secondary" onClick={() => openDetail(item)}>{canAllocate ? '查看版本与下发' : canPublish ? '查看版本与发布' : '查看工作包详情'}</button></article>)}</div>}
+    {notice && <p className="inline-success" role="status">{notice}</p>}
+    {canAllocate && !detail && <WorkDutyPeriodEditor identity={identity} assignments={assignments} orgs={orgs} />}
+    {loading ? <div className="state-card"><div className="spinner" /><strong>正在读取工作包</strong></div> : !packages.length ? <div className="state-card"><b>◇</b><strong>当前范围暂无工作包</strong><span>{canManage ? '点击右上角创建第一个工作包。' : '请联系集团管理员发布并分配工作包。'}</span></div> : <div className="card-grid">{packages.map((item) => <article className="package-card" key={item.id}><div className="card-top"><span>{item.code}</span><span className={`status-pill ${item.lifecycleStatus.toLowerCase()}`}>{item.lifecycleStatus === 'PUBLISHED' ? '已发布' : item.lifecycleStatus === 'DRAFT' ? '草稿' : item.lifecycleStatus}</span></div><h2>{item.name}</h2><p>{item.positionName} · {item.ownerOrgName || '集团范围'}</p><div className="package-stats"><span><strong>V{item.versionNo || '—'}</strong>当前版本</span><span><strong>{item.lifecycleStatus === 'PUBLISHED' ? '已发布' : '待发布'}</strong>版本状态</span></div><button className="secondary" onClick={() => openDetail(item)}>{canAllocate ? '查看版本与下发' : canPublish ? '查看版本与发布' : '查看工作包详情'}</button></article>)}</div>}
     {modal && <Modal title="创建工作包与首个工作项" onClose={() => setModal(false)} onSave={create} saving={saving} saveLabel="创建草稿"><div className="form-grid"><label>工作包编码<input value={draft.code} onChange={(event) => setDraft({ ...draft, code: event.target.value })} placeholder="WP-FRONT-DAILY" /></label><label>工作包名称<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label><label>目标岗位<select value={draft.positionId} onChange={(event) => setDraft({ ...draft, positionId: event.target.value })}><option value="">请选择</option>{positions.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>归属组织<select value={draft.ownerOrgUnitId} onChange={(event) => setDraft({ ...draft, ownerOrgUnitId: event.target.value })}><option value="">集团统一</option>{orgs.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>下发范围<select value={draft.scopeOrgUnitId} onChange={(event) => setDraft({ ...draft, scopeOrgUnitId: event.target.value })}><option value="">请选择门店/组织树</option>{orgs.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>工作表单<select value={draft.formVersionId} onChange={(event) => setDraft({ ...draft, formVersionId: event.target.value })}><option value="">请选择已发布表单</option>{forms.filter((item) => item.status === 'PUBLISHED' && item.versionId).map((item) => <option value={item.versionId} key={item.versionId}>{item.name}</option>)}</select></label><label>工作项编码<input value={draft.itemCode} onChange={(event) => setDraft({ ...draft, itemCode: event.target.value })} /></label><label>工作项名称<input value={draft.itemName} onChange={(event) => setDraft({ ...draft, itemName: event.target.value })} placeholder="例如 完成前台交接记录" /></label><label>工作类型<select value={draft.itemType} onChange={(event) => setDraft({ ...draft, itemType: event.target.value })}><option value="SCHEDULED_RECORD">定时记录</option><option value="INSPECTION">巡检</option><option value="METRIC_REVIEW">指标复盘</option></select></label><label>执行周期<select value={draft.periodType} onChange={(event) => setDraft({ ...draft, periodType: event.target.value })}><option value="DAY">每日</option><option value="WEEK">每周</option><option value="SHIFT">每班次</option></select></label><label>截止时间<input type="time" value={draft.dueLocalTime} onChange={(event) => setDraft({ ...draft, dueLocalTime: event.target.value })} /></label><label>验收方式<select value={draft.reviewMode} onChange={(event) => setDraft({ ...draft, reviewMode: event.target.value })}><option value="NONE">提交即完成</option><option value="MANUAL">直属上级人工验收</option><option value="STANDARD_EVALUATION">按标准评价验收</option></select></label><label>关联标准<select value={draft.standardVersionId} onChange={(event) => setDraft({ ...draft, standardVersionId: event.target.value })}><option value="">暂不关联</option>{standards.filter((item) => item.status === 'PUBLISHED' && item.versionId).map((item) => <option value={item.versionId} key={item.versionId}>{item.name}</option>)}</select></label><label>最多附件数<input type="number" min="0" max="200" value={draft.maxAttachments} onChange={(event) => setDraft({ ...draft, maxAttachments: event.target.value })} /></label><label className="full-field">允许附件类型<input value={draft.allowedExtensions} onChange={(event) => setDraft({ ...draft, allowedExtensions: event.target.value })} /></label><p className="muted">工作结果统一从业务字段和证据汇总，不再要求重复填写。</p><label className="checkbox-label"><input type="checkbox" checked={draft.attachmentRequired} onChange={(event) => setDraft({ ...draft, attachmentRequired: event.target.checked })} />必须上传附件证据</label><label className="checkbox-label"><input type="checkbox" checked={draft.exceptionStatementRequired} onChange={(event) => setDraft({ ...draft, exceptionStatementRequired: event.target.checked })} />必须填写异常事项</label><label className="checkbox-label"><input type="checkbox" checked={draft.nextActionRequired} onChange={(event) => setDraft({ ...draft, nextActionRequired: event.target.checked })} />必须填写下一步行动</label><label className="full-field">说明<textarea rows={3} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label></div></Modal>}
     {detail && (() => {
-      const latest = asList<Row>(detail.versions)[0] ?? {}
+      const latest = asList<Row>(detail.versions).find(version => text(version, 'id') === selectedVersionId) ?? {}
       const lifecycle = text(latest, 'lifecycle_status', 'lifecycleStatus')
       const matchingAssignments = assignments.filter((item) => item.positionId === text(detail, 'position_id', 'positionId'))
-      return <Modal wide title={`${text(detail, 'name')} · 版本与下发`} onClose={() => setDetail(undefined)} onSave={detailAction} saving={saving} saveDisabled={lifecycle === 'DRAFT' && canPublish && itemIssues.length > 0} saveLabel={lifecycle === 'DRAFT' && canPublish ? '保存、校验并发布' : lifecycle === 'PUBLISHED' && canAllocate ? '下发并生成今日工作' : '关闭'}>
+      const conflicts = conflictingAllocations(detailAllocations, allocation.assignmentId, allocation.targetOrgUnitId, allocation.validFrom, allocation.validTo)
+      const prospective = itemDrafts.some(item => item.executionExtras.workflowRevision === 'THREE_ROLE_V88')
+      const versionStart = versionLocalDate(text(latest, 'effective_from', 'effectiveFrom'), text(detail, 'publicationTimeZone'))
+      return <Modal wide title={`${text(detail, 'name')} · 版本与下发`} onClose={() => { versionRequest.current += 1; setDetail(undefined) }} onSave={detailAction} saving={saving}
+        saveDisabled={versionLoading || !versionConfiguration || (lifecycle === 'DRAFT' && canPublish && (itemIssues.length > 0 || !effectiveDate)) || (lifecycle === 'PUBLISHED' && canAllocate && (!allocation.assignmentId || !allocation.targetOrgUnitId || !allocation.validFrom || conflicts.length > 0))}
+        saveLabel={lifecycle === 'DRAFT' && canPublish ? '保存、校验并发布所选版本' : lifecycle === 'PUBLISHED' && canAllocate ? '保存所选版本下发' : '关闭'}>
+        <label>选择具体工作包版本<select aria-label="选择具体工作包版本" value={selectedVersionId} disabled={saving || versionLoading} onChange={event => void chooseVersion(event.target.value)}>
+          {asList<Row>(detail.versions).map(version => <option key={text(version, 'id')} value={text(version, 'id')}>V{text(version, 'version_no', 'versionNo')} · {text(version, 'title')} · {text(version, 'lifecycle_status', 'lifecycleStatus')}</option>)}
+        </select></label>
+        {versionLoading && <p role="status">正在读取所选版本的独立配置…</p>}
+        {error && <p className="inline-error" role="alert">{error}</p>}
         <div className="version-summary"><strong>{text(detail, 'code')}</strong><p>{text(detail, 'description') || '暂无说明'}</p>{asList<Row>(detail.versions).map((version) => <div key={text(version, 'id')}><span>V{text(version, 'version_no', 'versionNo')}</span><b>{text(version, 'lifecycle_status', 'lifecycleStatus')}</b><small>{text(version, 'title')}</small></div>)}</div>
-        {lifecycle === 'PUBLISHED' && canManage && <div className="allocation-box"><h3>CEO 标准工作模板维护</h3><p>创建新草稿版本后修改，不覆盖已发布版本和历史工作记录。</p><button className="secondary" disabled={saving} onClick={() => void createEditableVersion()}>{saving ? '创建中…' : '创建可编辑新版本'}</button></div>}
-        {lifecycle === 'DRAFT' && canManage && <div className="allocation-box work-template-configuration"><header><div><h3>所有岗位通用工作模板配置</h3><p>可增删、复制、启停和排序工作项，并配置时间、提醒、证据链与日报规则。</p></div><button className="secondary" disabled={saving || itemIssues.length > 0} onClick={() => void saveDraftConfiguration()}>{saving ? '保存中…' : '保存全部草稿'}</button></header><div className="form-grid version-metadata-grid"><label>版本标题<input value={versionTitle} onChange={(event) => setVersionTitle(event.target.value)} /></label><label>版本说明<input value={versionDescription} onChange={(event) => setVersionDescription(event.target.value)} /></label></div><WorkPackageItemEditor items={itemDrafts} setItems={setItemDrafts} forms={publishedForms} standards={publishedStandards} issues={itemIssues} /></div>}
-        {detailAllocations.length > 0 && <div className="allocation-box"><h3>当前有效下发</h3><div className="version-summary">{detailAllocations.filter((item) => item.status === 'ACTIVE').map((item) => <div key={item.id}><span>{item.assigneeName || '已分配员工'}</span><b>{item.status === 'ACTIVE' ? '生效' : item.status}</b><small>{item.targetOrgName || '任职组织'} · {item.validFrom}</small></div>)}</div></div>}
-        {lifecycle === 'PUBLISHED' && canAllocate && <div className="allocation-box"><h3>下发到岗位任职</h3>{matchingAssignments.length === 0 && <div className="inline-warning">当前权限范围内没有该岗位的有效任职。请先到“组织与权限”创建员工并分配对应岗位。</div>}<div className="form-grid"><label>负责人任职<select value={allocation.assignmentId} onChange={(event) => { const assignmentId = event.target.value; const selected = matchingAssignments.find((item) => item.assignmentId === assignmentId); setAllocation({ assignmentId, targetOrgUnitId: selected?.orgUnitId ?? '' }) }}><option value="">请选择同岗位员工</option>{matchingAssignments.map((item) => <option value={item.assignmentId} key={item.assignmentId}>{item.name} · {item.positionName} · {item.orgUnitName}</option>)}</select></label><label>目标门店/部门<select value={allocation.targetOrgUnitId} onChange={(event) => setAllocation({ ...allocation, targetOrgUnitId: event.target.value })}><option value="">请选择</option>{orgs.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label></div><small>选择员工后默认使用其任职组织；下发成功会立即生成今天的真实工作。</small></div>}
+        {lifecycle === 'PUBLISHED' && canManage && <div className="allocation-box"><h3>基于所选版本创建新草稿</h3><p>复制所选版本后修改，不覆盖已发布版本和历史工作记录。</p><button className="secondary" disabled={saving || versionLoading || !versionConfiguration} onClick={() => void createEditableVersion()}>{saving ? '创建中…' : '创建可编辑新版本'}</button></div>}
+        {lifecycle === 'DRAFT' && canManage && !versionLoading && versionConfiguration && <div className="allocation-box work-template-configuration"><header><div><h3>所有岗位通用工作模板配置</h3><p>仅编辑所选版本；其他版本和历史工作不会被覆盖。</p></div><button className="secondary" disabled={saving || itemIssues.length > 0} onClick={() => void saveDraftConfiguration()}>{saving ? '保存中…' : '保存所选版本草稿'}</button></header><div className="form-grid version-metadata-grid"><label>版本标题<input value={versionTitle} onChange={(event) => { setVersionDirty(true); setVersionTitle(event.target.value) }} /></label><label>版本说明<input value={versionDescription} onChange={(event) => { setVersionDirty(true); setVersionDescription(event.target.value) }} /></label></div><WorkPackageItemEditor items={itemDrafts} setItems={next => { setVersionDirty(true); setItemDrafts(next) }} forms={publishedForms} standards={publishedStandards} issues={itemIssues} /></div>}
+        {lifecycle === 'DRAFT' && canPublish && <div className="allocation-box"><h3>所选版本生效日期</h3><label>生效日期<input type="date" aria-label="工作包版本生效日期" value={effectiveDate} disabled={saving || versionLoading} onChange={event => setEffectiveDate(event.target.value)} /></label>
+          <p>按服务端时区 {text(detail, 'publicationTimeZone') || '尚未读取'} 的本地00:00生效。{prospective ? '三岗位优化只能选择未来日期，不追溯改写已有工作。' : '请确认该日期符合实际执行安排。'}</p></div>}
+        {detailAllocations.length > 0 && <div className="allocation-box"><h3>已有有效或计划下发</h3><div className="version-summary">{detailAllocations.filter((item) => item.status === 'ACTIVE').map((item) => <div key={item.id}><span>{item.assigneeName || '已分配员工'}</span><b>{item.status === 'ACTIVE' ? '已保存' : item.status}</b><small>{item.targetOrgName || '任职组织'} · {item.validFrom}</small></div>)}</div></div>}
+        {lifecycle === 'PUBLISHED' && canAllocate && !versionLoading && versionConfiguration && <div className="allocation-box"><h3>下发所选版本到岗位任职</h3>{matchingAssignments.length === 0 && <div className="inline-warning">当前权限范围内没有该岗位的有效任职。请先到“组织与权限”创建员工并分配对应岗位。</div>}<div className="form-grid"><label>负责人任职<select value={allocation.assignmentId} onChange={(event) => { const assignmentId = event.target.value; const selected = matchingAssignments.find((item) => item.assignmentId === assignmentId); setAllocation({ ...allocation, assignmentId, targetOrgUnitId: selected?.orgUnitId ?? '' }) }}><option value="">请选择同岗位员工</option>{matchingAssignments.map((item) => <option value={item.assignmentId} key={item.assignmentId}>{item.name} · {item.positionName} · {item.orgUnitName}</option>)}</select></label><label>目标门店/部门<select value={allocation.targetOrgUnitId} onChange={(event) => setAllocation({ ...allocation, targetOrgUnitId: event.target.value })}><option value="">请选择</option>{orgs.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+          <label>下发生效日期<input type="date" aria-label="下发生效日期" min={versionStart || undefined} value={allocation.validFrom} onChange={event => setAllocation({ ...allocation, validFrom: event.target.value })} /></label>
+          <label>下发结束日期（选填）<input type="date" min={allocation.validFrom || versionStart || undefined} value={allocation.validTo} onChange={event => setAllocation({ ...allocation, validTo: event.target.value })} /></label></div>
+          {conflicts.length > 0 && <p className="inline-warning" role="alert">已有 {conflicts.length} 条有效下发与所选任职、组织及时间重叠，不能重复下发。原分配保持不变，请先核对原下发结束日期。</p>}
+          <p>版本从 {versionStart || '待核对日期'} 生效；必须明确选择下发日期。保存下发不强制生成今日工作，实际工作依营业日、有效模板与真实排班生成。</p></div>}
         {lifecycle === 'DRAFT' && !canPublish && <div className="inline-warning">当前账号可查看草稿，但没有发布权限。</div>}
       </Modal>
     })()}

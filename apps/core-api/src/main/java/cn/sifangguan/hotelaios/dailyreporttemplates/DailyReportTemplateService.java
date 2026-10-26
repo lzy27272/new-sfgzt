@@ -169,6 +169,8 @@ public class DailyReportTemplateService {
         accessPolicy.requirePermission("daily-report-template.read");
         TenantPrincipal principal = prepare();
         Map<String, Object> result = new LinkedHashMap<>(requireVisible(principal, templateId));
+        String publicationTimeZone = jdbc.queryForObject("select timezone from tenant where id=:tenantId", base(principal), String.class);
+        result.put("publicationTimeZone", publicationTimeZone);
         result.put("versions", jdbc.queryForList("""
                 select id, version_no as "versionNo", lifecycle_status as "lifecycleStatus",
                        work_package_version_id as "workPackageVersionId", configuration,
@@ -180,8 +182,16 @@ public class DailyReportTemplateService {
                 where tenant_id = :tenantId and template_id = :templateId
                 order by version_no desc
                 """, base(principal).addValue("templateId", templateId)).stream()
-                .map(this::jsonColumns).toList());
+                .map(this::editableVersionConfiguration).toList());
         return result;
+    }
+
+    private Map<String, Object> editableVersionConfiguration(Map<String, Object> row) {
+        Map<String, Object> version = new LinkedHashMap<>(jsonColumns(row));
+        if (Set.of("DRAFT", "IN_REVIEW").contains(String.valueOf(version.get("lifecycleStatus")))) {
+            version.put("configuration", snapshotReader.complete((UUID) version.get("id"), (JsonNode) version.get("configuration")));
+        }
+        return version;
     }
 
     @Transactional
@@ -248,6 +258,18 @@ public class DailyReportTemplateService {
             conflict("模板草稿版本已变化或不再可编辑");
         }
         ObjectNode configuration = persistDraftSections(principal, template, versionId, request);
+        JsonNode previousConfiguration = parseJson(String.valueOf(before.get("configuration")));
+        if (previousConfiguration.has("workflowRevision")) {
+            configuration.set("workflowRevision", previousConfiguration.get("workflowRevision"));
+        }
+        JsonNode deliveryTiming = request.deliveryTiming();
+        if (deliveryTiming == null || deliveryTiming.isNull()) {
+            deliveryTiming = parseJson(String.valueOf(before.get("configuration"))).get("deliveryTiming");
+        }
+        if (deliveryTiming != null && !deliveryTiming.isNull()) {
+            cn.sifangguan.hotelaios.dailyreports.DailyReportTiming.validate(deliveryTiming);
+            configuration.set("deliveryTiming", deliveryTiming.deepCopy());
+        }
         String contentHash = hash(configuration.toString());
         int changed = jdbc.update("""
                 update daily_report_template_version
@@ -348,20 +370,45 @@ public class DailyReportTemplateService {
             throw new AccessDeniedException("模板编辑或送审人员不能审核发布同一版本");
         }
         OffsetDateTime effectiveFrom = request.effectiveFrom() == null ? OffsetDateTime.now() : request.effectiveFrom();
+        boolean prospectiveWorkflow = "THREE_ROLE_V88".equals(parseJson(String.valueOf(before.get("configuration"))).path("workflowRevision").asText());
+        if (prospectiveWorkflow) {
+            ZoneId tenantZone = ZoneId.of(jdbc.queryForObject("select timezone from tenant where id=:tenantId",base(principal),String.class));
+            var local = effectiveFrom.atZoneSameInstant(tenantZone);
+            if (!local.toLocalDate().isAfter(LocalDate.now(tenantZone)) || !local.toLocalTime().equals(LocalTime.MIDNIGHT)) {
+                throw new IllegalArgumentException("三岗位日报须选择未来本地日期00:00生效，不得追溯替换已有日报");
+            }
+            Boolean workPackageReady = jdbc.queryForObject("""
+                    select exists(select 1 from daily_report_template_version report_version
+                      join work_package_version work_version on work_version.tenant_id=report_version.tenant_id
+                        and work_version.id=report_version.work_package_version_id
+                      where report_version.tenant_id=:tenantId and report_version.id=:versionId
+                        and work_version.lifecycle_status='PUBLISHED' and work_version.effective_from<=:effectiveFrom
+                        and (work_version.effective_to is null or work_version.effective_to>:effectiveFrom))
+                    """, base(principal).addValue("versionId", versionId).addValue("effectiveFrom", effectiveFrom), Boolean.class);
+            if (!Boolean.TRUE.equals(workPackageReady)) {
+                throw new IllegalArgumentException("请先发布该日报绑定的工作包，并确保其生效时间不晚于日报且届时仍有效");
+            }
+        }
         jdbc.update("""
                 update daily_report_template_version
-                set lifecycle_status = 'RETIRED', effective_to = :effectiveFrom,
+                set lifecycle_status = case when :prospectiveWorkflow then 'PUBLISHED' else 'RETIRED' end,
+                    effective_to = :effectiveFrom,
                     row_version = row_version + 1
                 where tenant_id = :tenantId and template_id = :templateId and id <> :versionId
                   and lifecycle_status = 'PUBLISHED'
+                  and (not :prospectiveWorkflow or (effective_from<:effectiveFrom and (effective_to is null or effective_to>:effectiveFrom)))
                 """, base(principal).addValue("templateId", templateId)
-                .addValue("versionId", versionId).addValue("effectiveFrom", effectiveFrom));
+                .addValue("versionId", versionId).addValue("effectiveFrom", effectiveFrom)
+                .addValue("prospectiveWorkflow", prospectiveWorkflow));
         jdbc.update("""
                 update daily_report_section_version section_version
-                set lifecycle_status = 'RETIRED', effective_to = :effectiveFrom,
+                set lifecycle_status = case when :prospectiveWorkflow then 'PUBLISHED' else 'RETIRED' end,
+                    effective_to = :effectiveFrom,
                     row_version = row_version + 1
                 where section_version.tenant_id = :tenantId
                   and section_version.lifecycle_status = 'PUBLISHED'
+                  and (not :prospectiveWorkflow or (section_version.effective_from<:effectiveFrom
+                    and (section_version.effective_to is null or section_version.effective_to>:effectiveFrom)))
                   and exists (
                     select 1 from daily_report_template_section relation
                     join daily_report_template_version template_version
@@ -371,10 +418,19 @@ public class DailyReportTemplateService {
                       and relation.section_version_id = section_version.id
                       and template_version.template_id = :templateId
                       and template_version.id <> :versionId
-                      and template_version.lifecycle_status = 'RETIRED'
+                      and (template_version.lifecycle_status = 'RETIRED'
+                        or (:prospectiveWorkflow and template_version.effective_to=:effectiveFrom))
                   )
+                  and (not :prospectiveWorkflow or not exists (
+                    select 1 from daily_report_template_section other_link
+                    join daily_report_template_version other_template
+                      on other_template.tenant_id=other_link.tenant_id and other_template.id=other_link.template_version_id
+                    where other_link.tenant_id=section_version.tenant_id and other_link.section_version_id=section_version.id
+                      and other_template.template_id<>:templateId and other_template.lifecycle_status='PUBLISHED'
+                      and (other_template.effective_to is null or other_template.effective_to>:effectiveFrom)))
                 """, base(principal).addValue("templateId", templateId)
-                .addValue("versionId", versionId).addValue("effectiveFrom", effectiveFrom));
+                .addValue("versionId", versionId).addValue("effectiveFrom", effectiveFrom)
+                .addValue("prospectiveWorkflow", prospectiveWorkflow));
         int changed = jdbc.update("""
                 update daily_report_template_version
                 set lifecycle_status = 'PUBLISHED', effective_from = :effectiveFrom,
@@ -567,6 +623,8 @@ public class DailyReportTemplateService {
         }
         ObjectNode resolvedConfiguration = objectMapper.createObjectNode();
         resolvedConfiguration.put("title", String.valueOf(baseTemplate.get("name")));
+        JsonNode baseTiming = ((JsonNode) baseTemplate.get("configuration")).get("deliveryTiming");
+        if (baseTiming != null) resolvedConfiguration.set("deliveryTiming", baseTiming.deepCopy());
         resolvedConfiguration.set("sections", resolvedSections);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("hotelOrgUnitId", day.hotelOrgUnitId());
@@ -937,6 +995,20 @@ public class DailyReportTemplateService {
                     ? value
                     : ((java.sql.Time) dueLocalTimeValue).toLocalTime();
             int graceMinutes = ((Number) schedule.get("grace_minutes")).intValue();
+            LocalTime openLocalTime = dueLocalTime.minusHours(1);
+            JsonNode timing = parseJson(jdbc.queryForObject("""
+                    select configuration::text from daily_report_template_version
+                    where tenant_id=:tenantId and id=:versionId
+                    """, base(principal).addValue("versionId", versionId), String.class)).get("deliveryTiming");
+            if (timing != null && !timing.isNull()) {
+                cn.sifangguan.hotelaios.dailyreports.DailyReportTiming.validate(timing);
+                graceMinutes = 0;
+                if ("FIXED_LOCAL".equals(timing.path("mode").asText())) {
+                    openLocalTime = LocalTime.parse(timing.path("openLocalTime").asText());
+                    dueLocalTime = LocalTime.parse(timing.path("dueLocalTime").asText());
+                }
+                // SHIFT_END compatibility columns are not used to materialize a deadline.
+            }
             jdbc.update("""
                     insert into daily_report_delivery_policy
                         (tenant_id, template_assignment_id, enabled, open_local_time,
@@ -949,7 +1021,7 @@ public class DailyReportTemplateService {
                     on conflict (tenant_id, template_assignment_id) do nothing
                     """, base(principal)
                     .addValue("assignmentId", assignmentId)
-                    .addValue("openLocalTime", dueLocalTime.minusHours(1))
+                    .addValue("openLocalTime", openLocalTime)
                     .addValue("dueLocalTime", dueLocalTime)
                     .addValue("graceMinutes", graceMinutes)
                     .addValue("actorId", principal.actorId()));
@@ -1051,7 +1123,7 @@ public class DailyReportTemplateService {
 
     private Map<String, Object> versionForUpdate(TenantPrincipal principal, UUID templateId, UUID versionId) {
         return jdbc.queryForMap("""
-                select id, lifecycle_status, created_by, review_requested_by, row_version
+                select id, lifecycle_status, created_by, review_requested_by, row_version, configuration
                 from daily_report_template_version
                 where tenant_id = :tenantId and template_id = :templateId and id = :versionId
                 for update

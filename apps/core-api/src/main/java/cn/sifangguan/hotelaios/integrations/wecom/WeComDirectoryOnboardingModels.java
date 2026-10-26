@@ -102,6 +102,7 @@ public final class WeComDirectoryOnboardingModels {
             String onboardingKind,
             String invitationSource,
             UUID requestedOrgUnitId,
+            UUID requestedHotelId,
             String requestedHotelName,
             String requestedDepartmentName,
             UUID requestedPositionId,

@@ -1,0 +1,51 @@
+.modal.task-batch-modal { width: min(920px, calc(100vw - 32px)); display: flex; flex-direction: column; max-height: 90dvh; overflow: hidden; }
+.task-batch-modal > header, .task-batch-modal > footer { flex: 0 0 auto; }
+.task-batch-modal .task-batch-body { display: flex; flex: 1; flex-direction: column; gap: 18px; min-width: 0; min-height: 0; overflow-y: auto; }
+.task-batch-modal .task-batch-body > * { flex-shrink: 0; }
+.task-batch-modal > header h2 { font-size: 20px; }
+.task-batch-modal > header .close { flex-shrink: 0; }
+.task-batch-modal header h2 { margin-bottom: 4px; }
+.task-batch-modal header p { margin: 0; font-size: 13px; color: var(--text-muted, #728b9a); }
+.task-batch-modal .task-batch-store { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+.task-batch-modal .task-batch-store small { grid-column: 1 / -1; color: var(--text-muted, #728b9a); }
+.task-batch-modal .task-batch-settings { padding: 14px 16px; border: 1px solid #dbe6ee; border-radius: 12px; background: #f6f9fc; }
+.task-batch-modal .task-batch-settings summary { cursor: pointer; color: #416174; font-size: 13px; line-height: 1.6; }
+.task-batch-modal .task-batch-settings .form-grid { margin-top: 14px; }
+.task-batch-modal .task-batch-search { display: flex; flex-direction: column; gap: 6px; }
+.task-batch-modal .task-batch-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.task-batch-modal .task-batch-heading h3 { margin: 0; font-size: 17px; }
+.task-batch-modal .task-batch-list { display: flex; flex-direction: column; gap: 14px; }
+.task-batch-modal .task-batch-item { margin: 0; padding: 18px; border: 1px solid #dbe6ee; border-radius: 14px; min-width: 0; background: #fff; }
+.task-batch-modal .task-batch-item.is-delivered { border-color: #b2dacd; background: #f5fcf9; }
+.task-batch-modal .task-batch-item.is-error { border-color: #e8a7a7; }
+.task-batch-modal .task-batch-item-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.task-batch-modal .task-batch-item-top strong { color: #153c50; }
+.task-batch-modal .task-batch-item-fields { display: grid; grid-template-columns: minmax(175px, .7fr) minmax(0, 1.3fr); gap: 16px; }
+.task-batch-modal label { min-width: 0; }
+.task-batch-modal .configuration-form label { font-size: 13px; }
+.task-batch-modal .configuration-form input, .task-batch-modal .configuration-form select, .task-batch-modal .configuration-form textarea { font-size: 14px; min-height: 44px; }
+.task-batch-modal .task-batch-heading > span { color: #728b9a; font-size: 12px; }
+.task-batch-modal select, .task-batch-modal input, .task-batch-modal textarea { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+.task-batch-modal textarea { resize: vertical; }
+.task-batch-modal .task-batch-item .task-batch-references { margin-top: 12px; }
+.task-batch-modal .task-batch-references summary { cursor: pointer; font-size: 13px; color: #54809a; }
+.task-batch-modal .task-batch-references[open] > div { display: grid; gap: 12px; margin-top: 14px; }
+.task-batch-modal .task-batch-row-error { color: #b83a3a; margin: 10px 0 0; font-size: 13px; }
+.task-batch-modal .task-batch-row-status { margin: 10px 0 0; font-size: 13px; color: #33735f; }
+.task-batch-modal .task-batch-add { align-self: flex-start; }
+.task-batch-modal .task-batch-empty { margin: 0; }
+.task-batch-modal footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.task-batch-modal footer > button { min-height: 44px; font-size: 14px; }
+.task-batch-modal .task-batch-total { margin-right: auto; font-size: 13px; color: #627f90; }
+.task-batch-modal .task-batch-total strong { color: #163d51; }
+@media (max-width: 640px) {
+  .modal-backdrop.task-batch-backdrop { padding: 8px; }
+  .modal.task-batch-modal { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .task-batch-modal > header, .task-batch-modal > footer { padding: 16px; }
+  .task-batch-modal .task-batch-body { padding: 16px; gap: 14px; }
+  .task-batch-modal .task-batch-item { padding: 14px; }
+  .task-batch-modal .task-batch-item-fields { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .task-batch-modal .task-batch-total { flex-basis: 100%; }
+  .task-batch-modal footer > button { flex: 1; min-width: 0; }
+  .task-batch-modal footer > button.primary { flex: 2; }
+}

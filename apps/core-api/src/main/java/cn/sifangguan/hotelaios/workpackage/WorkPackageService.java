@@ -157,6 +157,7 @@ public class WorkPackageService {
                 order by version_no desc
                 """, params);
         definition.put("versions", versions);
+        definition.put("publicationTimeZone", jdbc.queryForObject("select timezone from tenant where id=:tenantId", params, String.class));
         if (!versions.isEmpty()) {
             UUID versionId = (UUID) versions.getFirst().get("id");
             definition.put("latestVersion", versionConfiguration(principal, versionId));
@@ -190,6 +191,15 @@ public class WorkPackageService {
         auditWriter.record("WORK_PACKAGE_VERSION_CREATED", "WORK_PACKAGE_VERSION", versionId,
                 "{\"workPackageId\":\"" + workPackageId + "\",\"versionNo\":" + nextVersion + "}");
         return response("id", versionId, "workPackageId", workPackageId, "versionNo", nextVersion, "status", "DRAFT");
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> version(UUID workPackageId,UUID versionId) {
+        TenantPrincipal principal=prepare();
+        accessPolicy.requirePermission("work-package.read");
+        requireVisible(principal,workPackageId);
+        requireVersion(principal,workPackageId,versionId);
+        return versionConfiguration(principal,versionId);
     }
 
     @Transactional
@@ -282,18 +292,40 @@ public class WorkPackageService {
             throw new IllegalArgumentException("工作包版本未通过发布校验: " + String.join("；", issues));
         }
         String contentHash = sha256(contentSnapshot(principal, versionId));
+        boolean prospectiveWorkflow = Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from work_package_item where tenant_id=:tenantId
+                  and work_package_version_id=:versionId and execution_policy->>'workflowRevision'='THREE_ROLE_V88')
+                """, base(principal).addValue("versionId", versionId), Boolean.class));
+        if (prospectiveWorkflow) {
+            ZoneId tenantZone = ZoneId.of(jdbc.queryForObject("select timezone from tenant where id=:tenantId",base(principal),String.class));
+            var local = request.effectiveFrom().atZoneSameInstant(tenantZone);
+            if (!local.toLocalDate().isAfter(LocalDate.now(tenantZone)) || !local.toLocalTime().equals(LocalTime.MIDNIGHT)) {
+                throw new IllegalArgumentException("三岗位优化须选择未来本地日期00:00生效，不得追溯替换已有工作");
+            }
+        }
         MapSqlParameterSource params = base(principal)
                 .addValue("workPackageId", workPackageId)
                 .addValue("versionId", versionId)
                 .addValue("effectiveFrom", request.effectiveFrom())
                 .addValue("effectiveTo", request.effectiveTo())
                 .addValue("contentHash", contentHash)
+                .addValue("prospectiveWorkflow", prospectiveWorkflow)
+                .addValue("previousEnds", request.effectiveFrom().minusNanos(1000))
                 .addValue("actorId", principal.actorId());
         jdbc.update("""
                 update work_package_version
-                set lifecycle_status = 'RETIRED', effective_to = :effectiveFrom
+                set lifecycle_status = case when :prospectiveWorkflow then 'PUBLISHED' else 'RETIRED' end,
+                    effective_to = case when :prospectiveWorkflow then :previousEnds else :effectiveFrom end
                 where tenant_id = :tenantId and work_package_definition_id = :workPackageId
                   and id <> :versionId and lifecycle_status = 'PUBLISHED'
+                  and (not :prospectiveWorkflow or (
+                    effective_from < :effectiveFrom and (effective_to is null or effective_to > :previousEnds)
+                    and coalesce((select max(i.applicability_policy->>'assistantWorkTemplateMode')
+                      from work_package_item i where i.tenant_id=work_package_version.tenant_id
+                        and i.work_package_version_id=work_package_version.id),'')
+                      = coalesce((select max(i.applicability_policy->>'assistantWorkTemplateMode')
+                      from work_package_item i where i.tenant_id=:tenantId and i.work_package_version_id=:versionId),'')
+                  ))
                 """, params);
         int changed = jdbc.update("""
                 update work_package_version
@@ -851,6 +883,8 @@ public class WorkPackageService {
                      or x.status = 'SUBMITTED'
                      or (i.review_mode <> 'NONE' and first_record.pending_review_count > 0)
                      or latest_record.submitted_at >= :boardRecentSince
+                     or x.status = 'FAILED' or latest_record.status in ('REJECTED','RETURNED')
+                     or (i.required and i.review_mode = 'NONE' and latest_record.status in ('SUBMITTED','APPROVED'))
                      or (i.period_type <> 'DAY' and x.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')))
                     """);
         }
@@ -932,7 +966,9 @@ public class WorkPackageService {
                        p.name as position_name, p.job_family as position_job_family,
                        x.target_org_unit_id, o.name as target_org_unit_name,
                        i.id as work_package_item_id, i.item_code, i.name as item_name, i.item_type,
-                       i.period_type, i.review_mode, i.required as item_required,
+                       i.period_type,
+                """ + cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy.effectiveModeSql("i", "x") + """
+                       as review_mode, i.required as item_required,
                        latest_record.status as latest_record_status,
                        first_record.pending_review_count, first_record.submitted_record_count,
                        first_record.valid_submitted_at,
@@ -1048,7 +1084,9 @@ public class WorkPackageService {
                 select x.*, i.item_code, i.name as item_name, i.item_type, i.period_type,
                        i.form_version_id,
                        i.work_window_start, i.work_window_end, i.due_local_time,
-                       i.grace_minutes, i.review_mode, i.submission_policy,
+                       i.grace_minutes,
+                """ + cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy.effectiveModeSql("i", "x") + """
+                       as review_mode, i.submission_policy,
                        i.reminder_policy, i.report_policy, i.applicability_policy,
                         i.execution_policy, coalesce(h.guest_room_floor_count, 1) as guest_room_floor_count,
                         coalesce(h.operational_feature_flags, '{}'::jsonb) as operational_feature_flags,
@@ -1583,6 +1621,11 @@ public class WorkPackageService {
         List<Map<String, Object>> exclusions = new ArrayList<>();
         for (GenerationCandidate candidate : candidates) {
             JsonNode executionPolicy = readObjectPolicy(candidate.executionPolicy(), "执行规则");
+            if (executionPolicy.hasNonNull("breakfastStages")
+                    && !executionPolicy.path("breakfastStages").path("scheduleConfirmed").asBoolean(false)) {
+                exclusions.add(response("itemId", candidate.itemId(), "reason", "BREAKFAST_HOURS_UNCONFIRMED"));
+                continue;
+            }
             ApplicabilityPolicyEvaluator.Result applicability = ApplicabilityPolicyEvaluator.evaluate(
                     readObjectPolicy(candidate.applicabilityPolicy(), "适用规则"),
                     readNullableObject(candidate.hotelProfile(), "酒店档案"));
@@ -1596,13 +1639,37 @@ public class WorkPackageService {
             String periodKey;
             LocalDate periodStart = request.businessDate();
             LocalDate periodEnd = request.businessDate();
-            if (dutyWindow != null) {
+            DutyWindow itemDuty = dutyWindow;
+            UUID itemDutyId = request.dutyPeriodId();
+            if (itemDuty == null && executionPolicy.hasNonNull("shiftTiming")) {
+                var shifts = jdbc.query("""
+                        select id, planned_start_at, planned_end_at from work_duty_period
+                        where tenant_id=:tenantId and position_assignment_id=:assignmentId
+                          and target_org_unit_id=:targetOrgUnitId and business_date=:businessDate
+                          and period_type='SHIFT' and status<>'CANCELLED'
+                        order by planned_start_at limit 2
+                        """, base(principal).addValue("assignmentId", request.positionAssignmentId())
+                        .addValue("targetOrgUnitId", request.targetOrgUnitId())
+                        .addValue("businessDate", request.businessDate()),
+                        (rs, row) -> new Object[]{rs.getObject("id", UUID.class),
+                                rs.getObject("planned_start_at", OffsetDateTime.class),
+                                rs.getObject("planned_end_at", OffsetDateTime.class)});
+                if (shifts.size() != 1) {
+                    exclusions.add(response("itemId", candidate.itemId(), "reason", "ACTUAL_SHIFT_UNRESOLVED"));
+                    continue;
+                }
+                Object[] shift = shifts.getFirst();
+                itemDutyId = (UUID) shift[0];
+                itemDuty = new DutyWindow((OffsetDateTime) shift[1], (OffsetDateTime) shift[2],
+                        "SHIFT", request.positionAssignmentId(), request.targetOrgUnitId(), request.businessDate(), "PLANNED");
+            }
+            if (itemDuty != null) {
                 ShiftTimingResolver.Window window = ShiftTimingResolver.resolve(
-                        dutyWindow.start(), dutyWindow.end(), candidate.dueLocalTime(), zone,
+                        itemDuty.start(), itemDuty.end(), candidate.dueLocalTime(), zone,
                         executionPolicy);
                 availableAt = window.availableAt();
                 dueAt = window.dueAt();
-                periodKey = "SHIFT:" + request.dutyPeriodId();
+                periodKey = dutyWindow == null ? "DAY:" + request.businessDate() : "SHIFT:" + request.dutyPeriodId();
             } else if (CycleSchedule.configured(periodType, executionPolicy)) {
                 CycleSchedule.Window window = CycleSchedule.resolve(periodType, request.businessDate(),
                         candidate.dueLocalTime(), zone, executionPolicy);
@@ -1617,13 +1684,10 @@ public class WorkPackageService {
             } else {
                 if (Set.of("MONTH", "QUARTER").contains(periodType))
                     throw new IllegalArgumentException("月清、季清必须配置周期截止规则");
-                LocalTime availableTime = candidate.windowStart() == null ? LocalTime.MIN : candidate.windowStart();
-                LocalTime dueTime = candidate.dueLocalTime() == null ? LocalTime.of(23, 59, 59) : candidate.dueLocalTime();
-                availableAt = request.businessDate().atTime(availableTime).atZone(zone).toOffsetDateTime();
-                dueAt = request.businessDate().atTime(dueTime).atZone(zone).toOffsetDateTime();
-                if (dueAt.isBefore(availableAt)) {
-                    dueAt = dueAt.plusDays(1);
-                }
+                DayTimingResolver.Window window = DayTimingResolver.resolve(request.businessDate(),
+                        candidate.windowStart(), candidate.dueLocalTime(), zone, executionPolicy);
+                availableAt = window.availableAt();
+                dueAt = window.dueAt();
                 periodKey = "DAY".equals(periodType)
                         ? "DAY:" + request.businessDate()
                         : weekKey(request.businessDate());
@@ -1698,7 +1762,7 @@ public class WorkPackageService {
                     .addValue("itemId", candidate.itemId())
                     .addValue("allocationId", candidate.allocationId())
                     .addValue("assignmentId", request.positionAssignmentId())
-                    .addValue("dutyPeriodId", request.dutyPeriodId())
+                    .addValue("dutyPeriodId", itemDutyId)
                     .addValue("targetOrgUnitId", request.targetOrgUnitId())
                     .addValue("businessDate", request.businessDate())
                     .addValue("periodKey", periodKey)
@@ -1932,7 +1996,8 @@ public class WorkPackageService {
                   and not exists (
                       select 1 from work_package_item_responsibility r
                       where r.tenant_id = i.tenant_id and r.work_package_item_id = i.id
-                        and r.participant_type = 'ACCEPTOR'
+                        and (r.participant_type = 'ACCEPTOR' or (
+                          i.execution_policy->>'workflowRevision'='THREE_ROLE_V88' and r.participant_type='REVIEWER'))
                   )
                 order by i.item_code
                 """, params, String.class);
@@ -2072,7 +2137,13 @@ public class WorkPackageService {
     private String normalizeExecutionPolicy(JsonNode configured) {
         String normalized = normalizeObjectPolicy(configured, "执行规则");
         JsonNode policy = readObjectPolicy(normalized, "执行规则");
+        if (policy.has("requiresExceptionReview") && !policy.path("requiresExceptionReview").isBoolean())
+            throw new IllegalArgumentException("异常必审开关必须是布尔值");
+        if (policy.has("spotCheckRate") && (!policy.path("spotCheckRate").isIntegralNumber()
+                || policy.path("spotCheckRate").asInt() < 1 || policy.path("spotCheckRate").asInt() > 100))
+            throw new IllegalArgumentException("抽查比例须为1至100的整数");
         ShiftTimingResolver.validatePolicy(policy);
+        DayTimingResolver.validatePolicy(policy);
         sharedKey(policy);
         return normalized;
     }
@@ -2183,6 +2254,14 @@ public class WorkPackageService {
         if (count == null || count == 0) {
             throw new IllegalArgumentException("工作包不存在或不属于当前租户");
         }
+    }
+
+    private void requireVersion(TenantPrincipal principal,UUID workPackageId,UUID versionId) {
+        Integer count=jdbc.queryForObject("""
+                select count(*) from work_package_version where tenant_id=:tenantId and id=:versionId
+                  and work_package_definition_id=:workPackageId
+                """,base(principal).addValue("versionId",versionId).addValue("workPackageId",workPackageId),Integer.class);
+        if(count==null||count!=1)throw new IllegalArgumentException("工作包版本不存在或不属于该工作包");
     }
 
     private void requireDraftVersion(TenantPrincipal principal, UUID workPackageId, UUID versionId) {

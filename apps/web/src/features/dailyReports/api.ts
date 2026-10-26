@@ -412,7 +412,7 @@ export function normalizeDetail(value: unknown, identity: ApiIdentity): DailyRep
     autoSummary: Object.keys(autoSummary).length ? {
       mode: text(autoSummary.mode),
       workItems: rows(autoSummary.workItems).map((item) => ({
-        label: text(item.label), status: text(item.status), completion: text(item.completion),
+        label: text(item.label), status: text(item.status), reviewExempt: item.reviewExempt === true, completion: text(item.completion),
         details: displayWorkForm(item.formData), exception: text(item.exception), nextAction: text(item.nextAction),
       })),
       usageItems: rows(autoSummary.usageItems).map((item) => ({

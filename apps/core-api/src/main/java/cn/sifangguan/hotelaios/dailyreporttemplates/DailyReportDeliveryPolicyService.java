@@ -61,6 +61,10 @@ public class DailyReportDeliveryPolicyService {
             throw new AccessDeniedException("总部日报投递策略只能由总部模板管理员维护");
         }
         DailyReportDeliveryPolicyModels.Policy current = requirePolicy(principal, templateId, versionId);
+        if (current.deliveryTiming() != null && (!current.openLocalTime().equals(request.openLocalTime())
+                || !current.dueLocalTime().equals(request.dueLocalTime()) || request.graceMinutes() != 0)) {
+            throw new IllegalArgumentException("该版本按模板deliveryTiming执行，须修改并发布新模板版本调整时间；不得用旧固定时钟覆盖实际班次");
+        }
         List<Integer> preDue = normalizeOffsets(request.preDueReminderMinutes());
         List<Integer> overdue = normalizeOffsets(request.overdueReminderMinutes());
         int updated = jdbc.update("""
@@ -112,7 +116,8 @@ public class DailyReportDeliveryPolicyService {
                        policy.enabled, policy.open_local_time, policy.due_local_time,
                        policy.grace_minutes, policy.pre_due_reminder_minutes,
                        policy.overdue_reminder_minutes, policy.backfill_days,
-                       policy.row_version, policy.created_at, policy.updated_at
+                       policy.row_version, policy.created_at, policy.updated_at,
+                       (version.configuration -> 'deliveryTiming')::text as delivery_timing
                 from daily_report_delivery_policy policy
                 join daily_report_template_assignment assignment
                   on assignment.tenant_id = policy.tenant_id
@@ -145,7 +150,8 @@ public class DailyReportDeliveryPolicyService {
                         rs.getInt("backfill_days"),
                         rs.getLong("row_version"),
                         rs.getObject("created_at", OffsetDateTime.class),
-                        rs.getObject("updated_at", OffsetDateTime.class)
+                        rs.getObject("updated_at", OffsetDateTime.class),
+                        parseTiming(rs.getString("delivery_timing"))
                 ));
         if (rows.isEmpty()) {
             throw new ResponseStatusException(
@@ -164,6 +170,14 @@ public class DailyReportDeliveryPolicyService {
         TenantPrincipal principal = accessPolicy.principal();
         databaseContext.apply(principal.tenantId());
         return principal;
+    }
+
+    private static com.fasterxml.jackson.databind.JsonNode parseTiming(String raw) {
+        if (raw == null) return null;
+        try { return new com.fasterxml.jackson.databind.ObjectMapper().readTree(raw); }
+        catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalArgumentException("日报时间配置无效", exception);
+        }
     }
 
     private static List<Integer> normalizeOffsets(List<Integer> values) {

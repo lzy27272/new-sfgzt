@@ -80,7 +80,7 @@ export type DailyReportAiRecommendation = {
 
 export type DailyReportAutoSummary = {
   mode: string
-  workItems: Array<{ label: string; status: string; completion: string; details: string; exception?: string; nextAction?: string }>
+  workItems: Array<{ label: string; status: string; reviewExempt?: boolean; completion: string; details: string; exception?: string; nextAction?: string }>
   usageItems: Array<{ itemName: string; category: string; unit: string; approvedQuantity: string; pendingQuantity: string }>
   usageRecordCount: number
   excludedUsageRecordCount: number

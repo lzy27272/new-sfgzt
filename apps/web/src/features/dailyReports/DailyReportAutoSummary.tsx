@@ -25,7 +25,7 @@ export function DailyReportAutoSummary({ report, section = 'all' }: { report: Da
     {(section === 'all' || section === 'work') && <section className={styles.section} aria-label="当日工作自动汇总">
       <header><h2>当日工作自动汇总</h2><span className={styles.badge}>事实来源：工作提交记录</span></header>
       {summary?.workItems.length ? <div className={styles.timeline}>{summary.workItems.map((work, index) => <article key={`${work.label}-${index}`}>
-        <strong>{work.label} · {work.status === 'APPROVED' ? '已审核完成' : '已提交待审核'}</strong>
+        <strong>{work.label} · {work.reviewExempt ? '免审完成，接受抽查' : work.status === 'APPROVED' ? '已审核完成' : '已提交待审核'}</strong>
         <p className={summaryStyles.text}>{work.completion}</p>
         {work.details && <p className={summaryStyles.text}>{work.details}</p>}
         {work.exception && work.exception !== '无' && <p className={summaryStyles.text}>异常：{work.exception}</p>}

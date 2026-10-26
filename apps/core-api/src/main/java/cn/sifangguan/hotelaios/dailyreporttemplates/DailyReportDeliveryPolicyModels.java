@@ -43,7 +43,8 @@ public final class DailyReportDeliveryPolicyModels {
             int backfillDays,
             long rowVersion,
             OffsetDateTime createdAt,
-            OffsetDateTime updatedAt
+            OffsetDateTime updatedAt,
+            com.fasterxml.jackson.databind.JsonNode deliveryTiming
     ) {
     }
 }

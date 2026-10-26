@@ -19,7 +19,7 @@ export function selectTeamRecordId(expectation: WorkExpectation, selectedId?: st
 }
 
 export type BoardStatus = 'ALL' | 'PENDING' | 'OVERDUE' | 'REVIEW' | 'COMPLETED'
-export type BoardQueue = 'PERIOD' | 'REVIEW' | 'CARRYOVER'
+export type BoardQueue = 'PERIOD' | 'REVIEW' | 'CARRYOVER' | 'SPOT_CHECK' | 'REPAIR'
 export type DateMode = 'day' | 'week' | 'custom' | 'month'
 export type BoardMetric = {
   expected: number; pending: number; overdue: number; review: number; completed: number
@@ -69,7 +69,7 @@ export function boardQuery(params: RouteParams, today = localBusinessDate()) {
   const range = dateRange(mode, mode === 'month' && validDate(params.to) ? params.to : anchor, params.to)
   const status = (['ALL', 'PENDING', 'OVERDUE', 'REVIEW', 'COMPLETED'].includes(params.status)
     ? params.status : params.status === 'SUBMITTED' ? 'REVIEW' : params.status === 'LATE_SUBMITTED' ? 'ALL' : 'ALL') as BoardStatus
-  const queue = (['PERIOD', 'REVIEW', 'CARRYOVER'].includes(params.queue) ? params.queue : 'PERIOD') as BoardQueue
+  const queue = (['PERIOD', 'REVIEW', 'CARRYOVER', 'SPOT_CHECK', 'REPAIR'].includes(params.queue) ? params.queue : 'PERIOD') as BoardQueue
   return { ...range, mode, status, queue, orgUnitId: params.hotelId || params.orgUnitId || undefined,
     departmentId: params.departmentId || undefined, assignmentId: params.assignmentId || undefined,
     lateOnly: params.lateOnly === 'true' || params.status === 'LATE_SUBMITTED',

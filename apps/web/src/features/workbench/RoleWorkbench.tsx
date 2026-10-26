@@ -17,6 +17,8 @@ import { AiRuleReference } from '../aiEvidence/AiRuleReference'
 import { ManagerCycles, cycleType } from './ManagerCycles'
 import { WorkBoardPanel, WorkDateToolbar, WorkQueueAlerts, useWorkBoard } from './WorkBoard'
 import { boardLabels, emptyMetric, personalWorkLabel, rate, withBoardParams, type BoardStatus, type BoardGroup } from './workBoardModel'
+import { RoleDailyWorkflow } from './RoleDailyWorkflowPanel'
+import { dailyWorkflowRole } from './roleDailyWorkflow'
 export { isLateSubmitted } from './workBoardModel'
 
 function allows(granted: string[], permission: string) { return granted.includes('*') || granted.includes(permission) }
@@ -43,6 +45,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   const canReadTeam = allows(permissions, permissionCodes.workRecord.readTeam) || allows(permissions, 'work-record.review')
   const canReadOwn = Boolean(identity.businessActorAssignmentId) && (allows(permissions, 'work-record.read') || allows(permissions, 'work-record.submit') || allows(permissions, 'work.submit'))
   const canReadTasks = ['task.read', 'task.act', 'task.review', permissionCodes.executiveTask.read].some(code => allows(permissions, code))
+  const canReviewTasks = Boolean(identity.businessActorAssignmentId) && allows(permissions, 'task.review')
   const canReadNotices = allows(permissions, 'notification.read')
   const canReadOperations = allows(permissions, 'dashboard.operations')
   const canReadHotels = allows(permissions, 'dashboard.hotel')
@@ -75,6 +78,12 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   const tasks = useResource(identity.key + ':workbench-tasks:' + canReadTasks,
     () => canReadTasks ? loadTasks(identity, { view: identity.businessActorAssignmentId ? 'mine' : 'team' })
       : Promise.resolve({ data: [], source: 'api' as const }), [])
+  const reviewTasks = useResource(identity.key + ':workbench-review-tasks:' + canReviewTasks, async () => {
+    if (!canReviewTasks) return { data: [], source: 'api' as const }
+    const result = await loadTasks(identity, { view: 'review' })
+    if (result.source !== 'api') throw new Error('未读取到实际待审核任务，请刷新重试。')
+    return result
+  }, [], 60_000, true)
   const notices = useResource(identity.key + ':workbench-notices:' + canReadNotices,
     () => canReadNotices ? loadNotifications(identity) : Promise.resolve({ data: [], source: 'api' as const }), [])
   const change = (patch: NavigationParams) => go('workbench', withBoardParams(routeParams, patch))
@@ -83,9 +92,12 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   const openHotel = (hotelId?: string) => change({ hotelId, departmentId: undefined, assignmentId: undefined, status: undefined })
   const headline = canReadTeam ? team : own
   const activeTasks = tasks.data.filter(task => !['COMPLETED', 'CANCELLED'].includes(task.status))
+  const pendingTaskReviews = reviewTasks.data.filter(task => ['RESULT_SUBMITTED', 'AWAITING_REVIEW'].includes(task.status))
+  const visibleTaskReviews = pendingTaskReviews.slice(0, 6)
   const unreadNotices = notices.data.filter(notice => !notice.readAt)
   const managerCycles = presentationKey === 'HOTEL_MANAGER' && canReadOwn
   const cycleOnly = managerCycles && cycleType(routeParams.cycle) !== 'DAY' && routeParams.cycleTeam !== 'true'
+  const workflowRole = canReadOwn ? dailyWorkflowRole(identity.roleCode) : undefined
 
   return <section className="wb-page">
     <header className="wb-page-heading"><div><span className="eyebrow">当前岗位工作</span><h1>{identity.label}工作台</h1><p>{identity.orgName} · 所选日期的工作进展与待办</p></div>
@@ -103,16 +115,36 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
     {!cycleOnly && <>
     {dailyReportsAvailable && Boolean(identity.businessActorAssignmentId) && allows(permissions, 'daily-report.read') && <DailyReportTodo key={identity.key} identity={identity} go={go} />}
     <WorkDateToolbar params={routeParams} businessDate={headline.data.businessDate} onChange={change} />
+    {workflowRole && own.data.businessDate && !own.error && <RoleDailyWorkflow key={identity.key + ':' + own.query.from + ':' + own.query.to}
+      identity={identity} role={workflowRole} params={{ dateMode: 'custom', from: own.query.from, to: own.query.to }}
+      permissions={permissions} dailyReportsAvailable={dailyReportsAvailable} go={go} onSaved={own.reload} />}
     <nav className="wb-mobile-anchors" aria-label="工作台快捷定位">{canReadTeam && <a href="#team-board" onClick={event => { event.preventDefault(); document.getElementById('team-board')?.scrollIntoView({ behavior: 'smooth' }) }}>团队看板</a>}
       {canReadOwn && <a href="#personal-board" onClick={event => { event.preventDefault(); document.getElementById('personal-board')?.scrollIntoView({ behavior: 'smooth' }) }}>个人看板</a>}</nav>
     {!headline.error && !headline.loading && (canReadTeam || canReadOwn) && <WorkQueueAlerts data={headline.data}
       onOpen={patch => canReadTeam ? openTeam(patch) : go('my-work', { ...dateParams, ...patch })} />}
+    {canReadTeam && <nav className="wb-filter-tabs rw-review-filters" aria-label="工作审核快捷入口">
+      <button type="button" onClick={() => openTeam({ queue: 'SPOT_CHECK', status: 'ALL', lateOnly: undefined })}>免审待抽查</button>
+      <button type="button" onClick={() => openTeam({ queue: 'REVIEW', status: 'ALL', lateOnly: undefined })}>待人工审核</button>
+      <button type="button" onClick={() => openTeam({ queue: 'REPAIR', status: 'ALL', lateOnly: undefined })}>待整改</button>
+    </nav>}
+    {canReviewTasks && <article className="wb-panel" aria-label="待审核任务">
+      <header><div><h2>待审核 · 下达任务</h2><p>下达任务必须人工验收，与日清完成率分开；仅展示服务端授权本人验收的任务。</p></div>
+        <button type="button" className="text-action" onClick={() => go('tasks', { view: 'review' })}>查看待审核 ›</button></header>
+      {reviewTasks.loading ? <p className="wb-empty" role="status">正在读取待审核任务…</p>
+        : reviewTasks.error ? <p className="inline-error" role="alert">待审核任务读取失败：{reviewTasks.error}<button type="button" onClick={reviewTasks.reload}>重试</button></p>
+        : pendingTaskReviews.length ? <div className="rw-task-review-list" role="region" aria-label="全部待审核任务" tabIndex={0}>
+          {visibleTaskReviews.map(task => <button type="button" className="wb-compact-row" key={task.id}
+            onClick={() => go('tasks', { view: 'review', taskId: task.id })}><span><strong>{task.title}</strong><small>{task.targetOrgName}</small></span><b>人工验收 ›</b></button>)}
+          <p className="wb-metric-note">显示前 {visibleTaskReviews.length} 项，共 {pendingTaskReviews.length} 项待审核。
+            <button type="button" className="text-action" onClick={() => go('tasks', { view: 'review' })}>查看全部待审核任务 ›</button></p></div>
+          : <p className="wb-empty">暂无需要本人验收的下达任务。</p>}
+    </article>}
     <div className={'wb-dual-boards' + (!canReadTeam || !canReadOwn ? ' single' : '')}>
       {canReadTeam && <WorkBoardPanel id="team-board" title="团队工作看板" subtitle={selectedHotel ? selectedHotel.name + ' · 含本人与授权下属工作' : '当前任职授权范围 · 含本人，不与个人看板相加'}
         data={team.data} loading={team.loading} error={team.error} onSelect={status => openTeam({ status })} onAll={() => openTeam()} onRetry={team.reload} />}
       {canReadOwn && <WorkBoardPanel id="personal-board" title="个人工作看板" subtitle="只统计当前任职，不混入其他兼职"
         data={own.data} loading={own.loading} error={own.error} onSelect={openOwn} onAll={() => openOwn()} onRetry={own.reload}>
-        {own.data.upcomingItems.length > 0 && <div className="wb-upcoming"><h3>最近到期的个人工作</h3>{own.data.upcomingItems.map(item =>
+        {!workflowRole && own.data.upcomingItems.length > 0 && <div className="wb-upcoming"><h3>最近到期的个人工作</h3>{own.data.upcomingItems.map(item =>
           <button className="wb-compact-row" key={item.id} onClick={() => go('my-work', { ...dateParams, expectationId: item.id })}>
             <span>{item.title}<small>{personalWorkLabel(item, identity.businessActorAssignmentId)}</small><small>截止 {item.dueAt ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(item.dueAt)) : '—'}</small></span><b>去完成 ›</b>
           </button>)}</div>}

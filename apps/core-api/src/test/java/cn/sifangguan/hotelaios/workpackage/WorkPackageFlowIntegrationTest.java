@@ -83,6 +83,34 @@ class WorkPackageFlowIntegrationTest {
     }
 
     @Test
+    void selectedVersionReadReturnsThatVersionNotLatestAndRejectsWrongPackageOrScope() throws Exception {
+        String suffix=UUID.randomUUID().toString().substring(0,8);
+        JsonNode definition=response(identity(post("/api/v1/work-packages"),PLATFORM_ADMIN).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"code\":\"WP-VERSION-READ-"+suffix+"\",\"name\":\"精确版本读取\",\"positionId\":\""+FRONT_POSITION+"\"}"),201);
+        String workPackage=definition.path("id").asText();
+        JsonNode first=response(identity(post("/api/v1/work-packages/"+workPackage+"/versions"),PLATFORM_ADMIN).contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"所选旧版\"}"),201);
+        JsonNode latest=response(identity(post("/api/v1/work-packages/"+workPackage+"/versions"),PLATFORM_ADMIN).contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"最新草稿\"}"),201);
+        for(JsonNode version:new JsonNode[]{first,latest}) {
+            jdbc.update("""
+                insert into work_package_item select (jsonb_populate_record(null::work_package_item,to_jsonb(i)||
+                  jsonb_build_object('id',cast(? as text),'work_package_version_id',cast(? as text),'item_code',cast(? as text),'name',cast(? as text)))).*
+                from work_package_item i where id='47050000-0000-0000-0000-000000000002'::uuid
+                """,UUID.randomUUID().toString(),version.path("id").asText(),version==first?"READ_EXACT_V1":"READ_LATEST_V2",version==first?"旧版原内容":"新版不同内容");
+        }
+        JsonNode selected=response(identity(get("/api/v1/work-packages/"+workPackage+"/versions/"+first.path("id").asText()),PLATFORM_ADMIN),200);
+        assertThat(selected.path("items").size()).isOne();
+        assertThat(selected.path("items").get(0).path("item_code").asText()).isEqualTo("READ_EXACT_V1");
+        assertThat(selected.path("items").get(0).path("work_package_version_id").asText()).isEqualTo(first.path("id").asText());
+        assertThat(selected.path("items").get(0).path("weekdays").isArray()).isTrue();
+        JsonNode newest=response(identity(get("/api/v1/work-packages/"+workPackage+"/versions/"+latest.path("id").asText()),PLATFORM_ADMIN),200);
+        assertThat(newest.path("items").get(0).path("item_code").asText()).isEqualTo("READ_LATEST_V2");
+        String unrelated=jdbc.queryForObject("select id::text from work_package_definition where id<>?::uuid limit 1",String.class,workPackage);
+        response(identity(get("/api/v1/work-packages/"+unrelated+"/versions/"+first.path("id").asText()),PLATFORM_ADMIN),400);
+        response(identity(get("/api/v1/work-packages/"+workPackage+"/versions/"+UUID.randomUUID()),PLATFORM_ADMIN),400);
+        response(identity(get("/api/v1/work-packages/"+workPackage+"/versions/"+first.path("id").asText()),FRONT_ACCOUNT),403);
+    }
+
+    @Test
     void publishedPackageGeneratesExpectationAndAcceptsSchemaValidatedRecord() throws Exception {
         LocalDate date = LocalDate.now();
         OffsetDateTime now = OffsetDateTime.now().withNano(0);

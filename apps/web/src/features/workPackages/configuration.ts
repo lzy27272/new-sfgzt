@@ -85,6 +85,20 @@ export type WorkPackageItemDraft = {
   executionExtras: JsonRecord
 }
 
+const protectedReviewCodes = new Set(['HKA_ITEM_ISSUE', 'HKA_USAGE_RETURN', 'HKA_DAILY_REPORT', 'HKA_LOST_PROPERTY',
+  'HKA_COMPLAINT_EVENT', 'NSA_ITEM_ISSUE', 'NSA_DAILY_HANDOVER', 'NSA_LOST_PROPERTY'])
+
+export function reviewSettingLocked(item: WorkPackageItemDraft) {
+  return protectedReviewCodes.has(item.itemCode) || ['REVIEW_APPROVAL', 'METRIC_REVIEW'].includes(item.itemType)
+    || item.executionExtras.handoverConfirmationRequired === true || item.executionExtras.highRiskImmediateEscalation === true
+    || item.executionExtras.inventoryUsage === true || item.submissionExtras.inventoryUsage === true || Boolean(item.executionExtras.inventoryMovement)
+}
+
+export function reviewSettingValue(item: WorkPackageItemDraft) {
+  if (reviewSettingLocked(item)) return 'MANUAL'
+  return item.reviewMode === 'NONE' && item.executionExtras.requiresExceptionReview === true ? 'EXCEPTION_ONLY' : item.reviewMode
+}
+
 const record = (value: unknown): JsonRecord => {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value as JsonRecord
   if (typeof value === 'string') {
@@ -262,7 +276,7 @@ export function mapWorkPackageItem(source: JsonRecord, _index: number): WorkPack
     responsibilities: list<JsonRecord>(source.responsibilities),
     submissionExtras: policyWithout(submission, ['completionStatementRequired', 'exceptionStatementRequired', 'nextActionRequired', 'attachmentRequired', 'attachmentCountUnlimited', 'maxAttachments', 'maxFileSizeBytes', 'allowedExtensions', 'evidenceRequirements']),
     reminderExtras: policyWithout(reminder, ['moments']), reportExtras: policyWithout(report, ['dailyReport', 'factLabel', 'includeEvidence', 'includeExceptions']),
-    applicabilityPolicy: policyWithout(applicability, ['holidayDates', 'workdayOverrides']), executionExtras: policyWithout(execution, ['enabled', 'shiftTiming', 'cycleSchedule']),
+    applicabilityPolicy: policyWithout(applicability, ['holidayDates', 'workdayOverrides']), executionExtras: policyWithout(execution, text(source, 'period_type', 'periodType') === 'SHIFT' ? ['enabled', 'shiftTiming', 'cycleSchedule'] : ['enabled', 'cycleSchedule']),
   }
 }
 
@@ -287,11 +301,12 @@ const serializeReminder = (draft: ReminderMomentDraft): JsonRecord => ({
 })
 
 function normalizedResponsibilities(draft: WorkPackageItemDraft): JsonRecord[] {
-  const existing = draft.responsibilities.filter((entry) => text(entry, 'participant_type', 'participantType') !== 'ACCEPTOR' || draft.reviewMode !== 'NONE')
+  const needsReviewer = draft.reviewMode !== 'NONE' || reviewSettingLocked(draft) || draft.executionExtras.requiresExceptionReview === true
+  const existing = draft.responsibilities.filter((entry) => text(entry, 'participant_type', 'participantType') !== 'ACCEPTOR' || needsReviewer)
   if (!existing.some((entry) => text(entry, 'participant_type', 'participantType') === 'EXECUTOR')) {
     existing.push({ participantType: 'EXECUTOR', resolverType: 'CURRENT_ASSIGNMENT', scopeStrategy: 'TARGET_ORG', escalationLevel: 0 })
   }
-  if (draft.reviewMode !== 'NONE' && !existing.some((entry) => text(entry, 'participant_type', 'participantType') === 'ACCEPTOR')) {
+  if (needsReviewer && !existing.some((entry) => text(entry, 'participant_type', 'participantType') === 'ACCEPTOR')) {
     existing.push({ participantType: 'ACCEPTOR', resolverType: 'DIRECT_MANAGER_ASSIGNMENT', scopeStrategy: 'TARGET_ORG', escalationLevel: 0 })
   }
   return existing.map((entry) => ({
@@ -315,7 +330,7 @@ export function serializeWorkPackageItems(drafts: WorkPackageItemDraft[]): JsonR
       periodType: draft.periodType, timezoneMode: draft.timezoneMode, fixedTimezone: draft.fixedTimezone.trim() || null,
       workWindowStart: draft.workWindowStart || null, workWindowEnd: draft.workWindowEnd || null, dueLocalTime: draft.dueLocalTime || null,
       graceMinutes: Number(draft.graceMinutes || 0), weekdays: draft.weekdays, dayOfMonth: optionalInteger(draft.dayOfMonth) ?? null,
-      holidayPolicy: draft.holidayPolicy, waiverAllowed: draft.waiverAllowed, targetGranularity: draft.targetGranularity, reviewMode: draft.reviewMode,
+      holidayPolicy: draft.holidayPolicy, waiverAllowed: draft.waiverAllowed, targetGranularity: draft.targetGranularity, reviewMode: reviewSettingLocked(draft) ? 'MANUAL' : draft.reviewMode,
       submissionPolicy: {
         ...draft.submissionExtras, completionStatementRequired: false,
         exceptionStatementRequired: draft.exceptionStatementRequired, nextActionRequired: draft.nextActionRequired,
@@ -337,7 +352,7 @@ export function serializeWorkPackageItems(drafts: WorkPackageItemDraft[]): JsonR
         ...(draft.cycleEnabled && ['WEEK','MONTH','QUARTER'].includes(draft.periodType) ? { cycleSchedule: draft.periodType === 'WEEK'
           ? { dueDayOffset: Number(draft.cycleDueDayOffset) }
           : { dueMonthOffset: Number(draft.cycleDueMonthOffset), dueDay: Number(draft.cycleDueDay) } } : {}),
-        ...(draft.periodType === 'SHIFT' ? { shiftTiming: {
+        ...(draft.periodType === 'SHIFT' || (draft.periodType === 'DAY' && draft.executionExtras.shiftTiming) ? { shiftTiming: {
           availableAnchor: draft.shiftAvailableAnchor,
           availableOffsetMinutes: Number(draft.shiftAvailableOffsetMinutes || 0),
           dueAnchor: draft.shiftDueAnchor,
@@ -363,6 +378,8 @@ export function validateWorkPackageItems(drafts: WorkPackageItemDraft[]): string
     else codes.add(code)
     if (!item.name.trim()) issues.push(`${label}缺少工作项名称。`)
     if (!item.formVersionId) issues.push(`${label}未选择已发布表单。`)
+    if (item.executionExtras.spotCheckRate !== undefined && (!Number.isInteger(item.executionExtras.spotCheckRate)
+      || Number(item.executionExtras.spotCheckRate) < 1 || Number(item.executionExtras.spotCheckRate) > 100)) issues.push(`${label}抽查比例须为1至100的整数。`)
     if (['MONTH','QUARTER'].includes(item.periodType) && !item.cycleEnabled) issues.push(`${label}月清、季清必须配置周期截止规则。`)
     if (item.cycleEnabled && ['WEEK','MONTH','QUARTER'].includes(item.periodType)) {
       const day = Number(item.cycleDueDayOffset), month = Number(item.cycleDueMonthOffset), calendarDay = Number(item.cycleDueDay)
@@ -374,7 +391,7 @@ export function validateWorkPackageItems(drafts: WorkPackageItemDraft[]): string
     if (!Number.isInteger(maxAttachments) || maxAttachments < 0 || maxAttachments > 200) issues.push(`${label}附件上限必须为 0 到 200。`)
     const maxFileSizeMb = Number(item.maxFileSizeMb)
     if (!Number.isInteger(maxFileSizeMb) || maxFileSizeMb < 1 || maxFileSizeMb > 20) issues.push(`${label}单文件上限必须为 1 到 20MB。`)
-    if (item.periodType === 'SHIFT') {
+    if (item.periodType === 'SHIFT' || (item.periodType === 'DAY' && item.executionExtras.shiftTiming)) {
       for (const [name, candidate] of [['可开始偏移', item.shiftAvailableOffsetMinutes], ['截止偏移', item.shiftDueOffsetMinutes]] as const) {
         const minutes = Number(candidate)
         if (!Number.isInteger(minutes) || Math.abs(minutes) > 2880) issues.push(`${label}${name}必须是 -2880 到 2880 的整数分钟。`)

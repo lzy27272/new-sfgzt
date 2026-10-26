@@ -11,7 +11,7 @@ import { emptyActivities, type HousekeepingActivities } from './housekeepingActi
 
 export function HousekeepingReportForm({ report, values, editable, busy, catalogue, inventoryValue, notice, message, conflict,
   missingRequiredCount, setValue, onRefreshCatalogue, onLegacyDraft, onSave, onSubmit, children,
-  identity, activities, activitiesError, onActivitiesChange, onPhotosPending, photosPending }: {
+  identity, activities, activitiesError, onActivitiesChange, onPhotosPending, photosPending, onImmediateSubmitted }: {
   report: DailyReportDetail; values: Record<string,string>; editable: boolean; busy: boolean; catalogue?: UsageCatalogue;
   inventoryValue: unknown; notice?: string; message?: string; conflict: boolean; missingRequiredCount: number;
   setValue: (key: string, value: string) => void; onRefreshCatalogue: () => void; onLegacyDraft: () => void;
@@ -19,6 +19,7 @@ export function HousekeepingReportForm({ report, values, editable, busy, catalog
   identity: ApiIdentity; activities?: HousekeepingActivities; activitiesError?: string; photosPending: boolean;
   onActivitiesChange: (update: (current: HousekeepingActivities) => HousekeepingActivities) => void;
   onPhotosPending: (id: string, pending: boolean) => void
+  onImmediateSubmitted: (detail: DailyReportDetail) => void
 }) {
   const manualItems = report.currentRevision.sections.filter(section => section.applicable).flatMap(section => section.items.filter(item => item.dataSource !== 'SYSTEM'))
   return <div className={styles.layout}><main className={styles.main}>
@@ -34,7 +35,7 @@ export function HousekeepingReportForm({ report, values, editable, busy, catalog
       setValue('_plannedHygieneContent', value.content ?? ''); setValue('_plannedHygieneRoomNumbers', value.roomNumbers ?? '')
     } : undefined} /></div>}
     {activitiesError ? <p className="inline-error" role="alert">{activitiesError}</p>
-      : <HousekeepingActivitiesFields identity={identity} reportId={report.id} value={activities ?? emptyActivities()} editable={editable}
+      : <HousekeepingActivitiesFields identity={identity} reportId={report.id} reportVersion={report.rowVersion} onImmediateSubmitted={onImmediateSubmitted} value={activities ?? emptyActivities()} editable={editable}
         disabled={busy} onChange={onActivitiesChange} onPendingChange={onPhotosPending} />}
     {photosPending && <p role="status" className="inline-warning">仍有照片等待上传；请完成或移除待上传照片后保存、提交。其他填写内容已在本机暂存。</p>}
     <section className={styles.card} aria-label="其他工作与补充说明"><header><h2>其他工作与补充说明</h2>{!manualItems.some(item => item.required) && <span>选填</span>}</header>

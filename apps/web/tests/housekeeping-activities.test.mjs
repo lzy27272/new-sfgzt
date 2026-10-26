@@ -54,6 +54,21 @@ test('mobile review puts the selected case first and isolates editor drafts by a
   assert.match(source,/key=\{identity.key \+ ':' \+ detail.data.id \+ ':' \+ detail.data.rowVersion\}/)
 })
 
+test('one complete lost entry can be sent immediately without final-report validation or clearing other drafts',async()=>{
+  const [source,api]=await Promise.all([
+    readFile(new URL('../src/features/dailyReports/HousekeepingActivitiesFields.tsx',import.meta.url),'utf8'),
+    readFile(new URL('../src/features/dailyReports/dailyActivityApi.ts',import.meta.url),'utf8'),
+  ])
+  assert.match(source,/立即通知接收人/)
+  assert.match(source,/不必等15:30或整份日报完成/)
+  assert.match(source,/lostProperties: current\.lostProperties\.map\(entry => entry.id === item.id \? saved : entry\)/)
+  assert.match(source,/state && state !== 'RETURNED'/)
+  assert.match(source,/!state && <button/)
+  assert.match(source,/requests\.current\.get\(item.id\)/)
+  assert.match(api,/body: \{ expectedVersion, entry \}, idempotencyKey: key/)
+  assert.doesNotMatch(api,/actions\/submit|inventoryQuantities|serviceCases/)
+})
+
 test('acknowledged draft save feedback survives editor reload and stays scoped to the report',async()=>{
   const source=await readFile(new URL('../src/features/dailyReports/DailyReportRoutes.tsx',import.meta.url),'utf8')
   const page=source.slice(source.indexOf('function ReportDetailPage('),source.indexOf('type DailyReportLocalDraft'))

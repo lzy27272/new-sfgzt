@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RoleContext } from '../../domain'
+import { directoryCandidateStores, selectDirectoryCandidates, type DirectoryCandidateStatusFilter } from './directoryCandidateList'
 import {
   approveDirectoryCandidate,
   loadDirectoryCandidateReviewOptions,
@@ -46,7 +47,8 @@ export function WecomDirectoryOnboardingAdministration({
   const [error, setError] = useState<string>()
   const [directoryEventError, setDirectoryEventError] = useState<string>()
   const [notice, setNotice] = useState<string>()
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useState<DirectoryCandidateStatusFilter>('PENDING')
+  const [storeKey, setStoreKey] = useState('')
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<DirectoryCandidate>()
   const [busy, setBusy] = useState(false)
@@ -55,14 +57,20 @@ export function WecomDirectoryOnboardingAdministration({
   const [employeeType,setEmployeeType] = useState('')
   const [reviewOptionsLoading, setReviewOptionsLoading] = useState(false)
   const [reviewOptionsError, setReviewOptionsError] = useState<string>()
+  const reloadVersion = useRef(0)
 
   const reload = async () => {
+    const requestVersion = ++reloadVersion.current
     setLoading(true); setError(undefined); setDirectoryEventError(undefined)
     try {
       const [candidates, events] = await Promise.allSettled([
-        loadDirectoryCandidates(identity, status || undefined),
+        Promise.all([
+          loadDirectoryCandidates(identity),
+          status && status !== 'PENDING' ? loadDirectoryCandidates(identity, status) : Promise.resolve([]),
+        ]).then(groups => Array.from(new Map(groups.flat().map(item => [item.id, item])).values())),
         canManage ? loadDirectoryEvents(identity) : Promise.resolve([]),
       ])
+      if (requestVersion !== reloadVersion.current) return
       if (candidates.status === 'rejected') throw candidates.reason
       setItems(candidates.value)
       if (events.status === 'fulfilled') setDirectoryEvents(events.value)
@@ -71,10 +79,10 @@ export function WecomDirectoryOnboardingAdministration({
         setDirectoryEventError(events.reason instanceof Error ? events.reason.message : '人员同步异常列表加载失败')
       }
     }
-    catch (reason) { setError(reason instanceof Error ? reason.message : '企微入职申请加载失败') }
-    finally { setLoading(false) }
+    catch (reason) { if (requestVersion === reloadVersion.current) setError(reason instanceof Error ? reason.message : '企微入职申请加载失败') }
+    finally { if (requestVersion === reloadVersion.current) setLoading(false) }
   }
-  useEffect(() => { void reload() }, [identity.key, status])
+  useEffect(() => { void reload(); return () => { reloadVersion.current += 1 } }, [identity.key, status])
   useEffect(() => {
     if (candidateId && !loading) {
       const target = items.find((item) => item.id === candidateId)
@@ -103,10 +111,11 @@ export function WecomDirectoryOnboardingAdministration({
     return () => { active = false }
   }, [selected?.id, selected?.requestedPositionId, selected?.status, canApprove, identity.key])
 
-  const visible = useMemo(() => {
-    const normalized = query.trim().toLowerCase()
-    return items.filter((item) => !normalized || `${item.displayName} ${item.requestedLoginName ?? ''} ${item.requestedHotelName ?? ''} ${item.requestedPositionName ?? ''}`.toLowerCase().includes(normalized))
-  }, [items, query])
+  const stores = useMemo(() => directoryCandidateStores(items), [items])
+  const visible = useMemo(() => selectDirectoryCandidates(items, status, storeKey, query), [items, status, storeKey, query])
+  const resetFilters = (nextStatus: DirectoryCandidateStatusFilter = 'PENDING') => {
+    setStatus(nextStatus); setStoreKey(''); setQuery('')
+  }
   const count = (value: DirectoryOnboardingStatus) => items.filter((item) => item.status === value).length
   const reviewAssignment = reviewOptions?.positions.find(
     (position) => `${position.orgUnitId}:${position.positionId}` === reviewAssignmentKey,
@@ -196,8 +205,14 @@ export function WecomDirectoryOnboardingAdministration({
       ['已启用', count('APPROVED'), 'approved'], ['异常', count('CONFLICT'), 'conflict'],
     ].map(([label, value, tone]) => <article key={String(label)}><span>{label}</span><strong className={String(tone)}>{value}</strong></article>)}</div>
     <article className="panel table-panel"><header><div><span className="panel-kicker">NEW EMPLOYEE REVIEW</span><h2>入职申请</h2></div></header>
-      <div className="directory-onboarding-filters"><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">全部状态</option>{Object.entries(labels).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="员工、申请组织或岗位" /></div>
-      {loading ? <div className="state-card"><div className="spinner"/><strong>正在读取入职申请</strong></div> : !visible.length ? <div className="state-card"><b>◇</b><strong>当前没有入职申请</strong><span>企业微信新增成员或员工打开一键邀请后会出现在这里。</span></div> : <div className="directory-onboarding-table">
+      <div className="directory-onboarding-filters">
+        <label>申请状态<select value={status} onChange={(event) => setStatus(event.target.value as DirectoryCandidateStatusFilter)}><option value="PENDING">待处理（待审核、异常绑定）</option><option value="">全部状态</option>{Object.entries(labels).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
+        <label>门店 / 申请组织<select value={storeKey} onChange={(event) => setStoreKey(event.target.value)}><option value="">全部门店及集团总部</option>{stores.map(store => <option key={store.key} value={store.key}>{store.name}</option>)}</select></label>
+        <label>搜索申请<input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="员工、账号、部门或岗位" /></label>
+        <button className="secondary" onClick={() => resetFilters()}>重置筛选</button>
+        {!loading && !error && <span className="directory-onboarding-results" role="status">当前显示 {visible.length} 条申请{status === 'PENDING' ? ' · 仅展示待中台审核、异常绑定；其他记录可切换状态查看。' : status === '' ? ' · 全部状态下，待处理申请仍排在前面。' : ' · 状态、门店和关键词可组合筛选。'}</span>}
+      </div>
+      {loading ? <div className="state-card"><div className="spinner"/><strong>正在读取入职申请</strong></div> : error && !items.length ? <div className="state-card"><strong>入职申请加载失败</strong><span>请重试，不能据此判断是否有待处理申请。</span><button className="secondary" onClick={() => void reload()}>重新读取</button></div> : !visible.length ? <div className="state-card"><strong>{status === 'PENDING' && !storeKey && !query.trim() ? '暂无待处理的入职申请' : '没有符合筛选条件的入职申请'}</strong><span>可切换申请状态、门店或清除关键词查看其他记录。</span><button className="secondary" onClick={() => resetFilters('')}>查看全部申请</button></div> : <div className="directory-onboarding-table">
         <div className="directory-onboarding-head"><span>员工</span><span>申请组织</span><span>申请岗位</span><span>提交时间</span><span>状态</span><span>操作</span></div>
         {visible.map((item) => <div key={item.id}><span><strong>{item.displayName}</strong><small>{item.requestedLoginName ? `账号：${item.requestedLoginName}` : item.invitationSource === 'MANUAL_LINK' ? '管理员一键邀请' : item.maskedFingerprint}</small></span><span>{item.requestedHotelName ?? '待员工选择'}</span><span>{[item.requestedDepartmentName,item.requestedPositionName].filter(Boolean).join(' · ') || (item.requestedOrgUnitId ? '岗位待分配' : '待员工选择')}</span><span>{displayTime(item.updatedAt)}{item.invitationExpiresAt && ['WAITING_PROFILE', 'EXPIRED'].includes(item.status) && <small>{item.status === 'EXPIRED' ? '邀请已失效' : `有效期至 ${displayTime(item.invitationExpiresAt)}`}</small>}</span><span><b className={`status-pill ${item.status.toLowerCase().replaceAll('_','-')}`}>{item.expiringSoon ? '即将过期' : labels[item.status]}</b>{item.suggestedAction && <small>{item.suggestedAction}</small>}</span><span><button className="link-button" onClick={() => setSelected(item)}>{['PENDING_APPROVAL', 'CONFLICT'].includes(item.status) ? '审核' : item.retryable ? '处理故障' : item.canRegenerate ? '重新生成' : '查看'}</button></span></div>)}
       </div>}

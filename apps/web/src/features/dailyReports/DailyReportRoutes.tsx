@@ -137,9 +137,15 @@ function wasDraftSaved(draft: DailyReportLocalDraft, saved?: DailyReportLocalDra
     && !hasDailyReportDraftChanges(draft, saved.values, new Set(saved.exceptions)))
 }
 
-function ReportEditor({ report, identity, grantedPermissions, correctionRevisionId, onChanged, go }: { report: DailyReportDetail; identity: RoleContext; grantedPermissions: string[]; correctionRevisionId?: string; onChanged: (notice?: string) => Promise<void>; go: AppNavigate }) {
-  const initialValues = useMemo(() => ({ ...Object.fromEntries(report.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), _inventory: JSON.stringify(report.inventoryQuantities ?? null), _checkoutRooms: String(report.roomCounts?.checkoutRooms ?? ''), _stayoverRooms: String(report.roomCounts?.stayoverRooms ?? ''), _plannedHygieneContent: report.plannedHygiene?.content ?? '', _plannedHygieneRoomNumbers: report.plannedHygiene?.roomNumbers ?? '', _activities: JSON.stringify(report.housekeepingActivities ?? emptyActivities()) }), [report])
-  const initialExceptions = useMemo(() => new Set(report.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.exception).map((item) => item.id))), [report])
+function ReportEditor({ report: baseReport, identity, grantedPermissions, correctionRevisionId, onChanged, go }: { report: DailyReportDetail; identity: RoleContext; grantedPermissions: string[]; correctionRevisionId?: string; onChanged: (notice?: string) => Promise<void>; go: AppNavigate }) {
+  const [activityVersion, setActivityVersion] = useState<{ report: number; revision: number }>()
+  // A single immediate event advances server versions, not the other unsaved form fields.
+  const report = activityVersion && activityVersion.report > baseReport.rowVersion ? {
+    ...baseReport, rowVersion: activityVersion.report,
+    currentRevision: { ...baseReport.currentRevision, rowVersion: activityVersion.revision },
+  } : baseReport
+  const initialValues = useMemo(() => ({ ...Object.fromEntries(baseReport.currentRevision.sections.flatMap((section) => section.items.map((item) => [item.id, item.employeeValue ?? '']))), _inventory: JSON.stringify(baseReport.inventoryQuantities ?? null), _checkoutRooms: String(baseReport.roomCounts?.checkoutRooms ?? ''), _stayoverRooms: String(baseReport.roomCounts?.stayoverRooms ?? ''), _plannedHygieneContent: baseReport.plannedHygiene?.content ?? '', _plannedHygieneRoomNumbers: baseReport.plannedHygiene?.roomNumbers ?? '', _activities: JSON.stringify(baseReport.housekeepingActivities ?? emptyActivities()) }), [baseReport])
+  const initialExceptions = useMemo(() => new Set(baseReport.currentRevision.sections.flatMap((section) => section.items.filter((item) => item.exception).map((item) => item.id))), [baseReport])
   const [values, setValues] = useState<Record<string, string>>(initialValues)
   const [pendingPhotoEntries, setPendingPhotoEntries] = useState<Set<string>>(new Set())
   const onPhotosPending = useCallback((id: string, pending: boolean) => setPendingPhotoEntries(current => {
@@ -204,7 +210,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
       if (active) setMessage(`设备草稿暂时无法读取。为避免覆盖已保存内容，本页不会自动改写设备草稿。${error instanceof Error ? `（${error.message}）` : ''}`)
     }).finally(() => { if (active) setDraftHydrationSettled(true) })
     return () => { active = false }
-  }, [editable, initialExceptions, initialValues, localDraftKey, report.currentRevision.id, report.rowVersion])
+  }, [editable, initialExceptions, initialValues, localDraftKey, baseReport.currentRevision.id, baseReport.rowVersion])
   const chooseServerDraft = () => {
     const snapshot: DailyReportLocalDraft = {
       schemaVersion: 1,
@@ -287,6 +293,15 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
   const updateActivities = (update: (current: HousekeepingActivities) => HousekeepingActivities) => setValues(current => ({
     ...current, _activities: JSON.stringify(update(readActivities(current._activities))),
   }))
+  const onImmediateSubmitted = (detail: DailyReportDetail) => {
+    if (detail.id !== report.id || detail.currentRevision.id !== report.currentRevision.id) {
+      setMessage('日报修订已变化，已填写内容仍保留；请核对最新记录后继续。')
+      return
+    }
+    setActivityVersion({ report: detail.rowVersion, revision: detail.currentRevision.rowVersion })
+    localDraftRef.current = { ...localDraftRef.current, baseRowVersion: detail.rowVersion }
+    setDraftNotice('遗留物已通知接收人，尚未入库；其他未提交内容仍保留。')
+  }
   const usageCatalogue = refreshedCatalogue?.reportVersion === report.rowVersion ? refreshedCatalogue.catalogue : report.inventoryContext?.catalogue
   const refreshCatalogue = async () => {
     if (!usageCatalogue) return
@@ -357,7 +372,7 @@ function ReportEditor({ report, identity, grantedPermissions, correctionRevision
     return <section className={styles.section}><div className="inline-warning"><strong>发现两个版本的未提交日报</strong><p>服务器日报已在其他页面或设备更新，本机仍保留一份未提交内容。请选择一个版本后再继续，系统不会自动覆盖。</p><div className={styles.actions}><button className="secondary" onClick={chooseServerDraft}>使用服务器最新草稿</button><button className="secondary" onClick={chooseLocalDraft}>恢复本机未提交内容</button></div></div></section>
   }
   if (housekeeping) return <HousekeepingReportForm report={report} values={values} editable={editable} busy={command.busy}
-    identity={identity} activities={activities} activitiesError={activitiesError} onActivitiesChange={updateActivities} onPhotosPending={onPhotosPending} photosPending={pendingPhotoEntries.size > 0}
+    identity={identity} activities={activities} activitiesError={activitiesError} onActivitiesChange={updateActivities} onPhotosPending={onPhotosPending} photosPending={pendingPhotoEntries.size > 0} onImmediateSubmitted={onImmediateSubmitted}
     catalogue={usageCatalogue} inventoryValue={inventoryValue} notice={draftNotice} message={message} conflict={conflict}
     missingRequiredCount={currentMissingRequiredCount} setValue={(key,value) => setValues(current => ({ ...current, [key]: value }))}
     onRefreshCatalogue={() => void refreshCatalogue()} onLegacyDraft={() => go('my-work', { expectationId: report.inventoryContext!.expectationId, entry: 'legacy' })}
