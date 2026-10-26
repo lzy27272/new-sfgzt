@@ -629,10 +629,16 @@ def capacity_measurements(state_lengths, core_lengths, raw_lengths, completed_le
         raise ValueError("Invalid completed raw archive count")
     state = numeric_lengths(state_lengths) + numeric_lengths(core_lengths)
     raw, completed, pending = (numeric_lengths(path) for path in (raw_lengths, completed_lengths, pending_lengths))
-    if not state or sum(state) < 1 or sum(completed) > sum(raw):
+    if not state or sum(state) < 1:
         raise ValueError("Invalid fresh source capacity measurement")
     if completed and not completed_archives:
         raise ValueError("Completed raw data has no date archive")
+    # Writers remain online during the first gate. Completed-date scans can
+    # see new files/directory metadata that the preceding whole-tree scan did
+    # not see. Budget the larger view and charge that full late delta again to
+    # staging; never treat a shrinking later view or deletion as free space.
+    source_raw_bytes, completed_raw_bytes = sum(raw), sum(completed)
+    late_raw_bytes = max(0, completed_raw_bytes - source_raw_bytes)
     # Treat every selected entry as new content. rsync can include directories
     # in %l; counting them as files only increases this bound. No dedup credit.
     # Generated original-reference manifest/runtime config get a full 128MiB
@@ -657,9 +663,10 @@ def capacity_measurements(state_lengths, core_lengths, raw_lengths, completed_le
     raw_archive = gzip_upper_bound(raw_payload) + 128 * completed_archives if completed_archives else 0
     return {"kind": "SFG_BACKUP_CAPACITY_MEASUREMENT_V1", "stateBytes": sum(state), "stateEntries": len(state),
             "stateMaxFileBytes": max(state), "newStatePackBytes": state_packs, "largestStatePackBytes": largest_pack,
-            "rawBytes": sum(raw), "rawCompletedBytes": sum(completed), "rawArchiveBytes": raw_archive,
+            "rawBytes": max(source_raw_bytes, completed_raw_bytes), "rawCompletedBytes": completed_raw_bytes, "rawArchiveBytes": raw_archive,
+            "sourceRawBytes": source_raw_bytes, "lateRawBytes": late_raw_bytes,
             "rawCompletedEntries": len(completed), "rawCompletedArchives": completed_archives,
-            "stagePendingBytes": sum(pending), "stagePendingEntries": len(pending)}
+            "stagePendingBytes": sum(pending) + late_raw_bytes, "stagePendingEntries": len(pending)}
 
 
 def check_capacity(state_root, database_root, stage_root, export_root, state_bytes, database_bytes, raw_root=None, raw_bytes=0, measurements=None):

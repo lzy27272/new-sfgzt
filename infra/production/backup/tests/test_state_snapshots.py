@@ -573,6 +573,35 @@ class CapacityMeasurementTest(unittest.TestCase):
         all_days = self.measure([1000], raw=[100, 200, 300], completed=[100, 200, 300], pending=[600], days=3)
         self.assertGreater(self.check(all_days)["filesystems"][0]["requiredBytes"], self.check(m)["filesystems"][0]["requiredBytes"])
 
+    def test_online_completed_view_growth_is_fully_budgeted_and_charged_to_staging(self):
+        growth = self.measure([1000], raw=[100], completed=[100, 200], pending=[50], days=1)
+        same_view = self.measure([1000], raw=[100, 200], completed=[100, 200], pending=[50], days=1)
+        self.assertEqual(growth["sourceRawBytes"], 100)
+        self.assertEqual(growth["rawBytes"], 300)
+        self.assertEqual(growth["rawCompletedBytes"], 300)
+        self.assertEqual(growth["lateRawBytes"], 200)
+        self.assertEqual(growth["stagePendingBytes"], 250)
+        self.assertEqual(growth["rawArchiveBytes"], same_view["rawArchiveBytes"])
+        self.assertEqual(self.check(growth)["filesystems"][0]["requiredBytes"] -
+                         self.check(same_view)["filesystems"][0]["requiredBytes"], 200)
+        self.assertFalse(self.check(growth)["compressionAssumed"])
+
+    def test_smaller_completed_view_never_reduces_stage_budget_and_metadata_delta_is_charged(self):
+        smaller = self.measure([1000], raw=[300], completed=[100], pending=[75], days=1)
+        self.assertEqual((smaller["rawBytes"], smaller["lateRawBytes"], smaller["stagePendingBytes"]), (300, 0, 75))
+        metadata_growth = self.measure([1000], raw=[300], completed=[300, 4096], pending=[75], days=1)
+        self.assertEqual(metadata_growth["rawBytes"], 4396)
+        self.assertEqual(metadata_growth["lateRawBytes"], 4096)
+        self.assertEqual(metadata_growth["stagePendingBytes"], 4171)
+        self.assertGreaterEqual(metadata_growth["rawArchiveBytes"], metadata_growth["rawCompletedBytes"])
+        self.check(metadata_growth)
+
+    def test_online_growth_does_not_allow_missing_date_archive_or_empty_state(self):
+        with self.assertRaisesRegex(ValueError, "no date archive"):
+            self.measure([1000], raw=[100], completed=[100, 200], pending=[50], days=0)
+        with self.assertRaisesRegex(ValueError, "Invalid fresh source"):
+            self.measure([], raw=[100], completed=[100, 200], pending=[50], days=1)
+
     def test_same_filesystem_sums_roles_once_and_low_space_does_not_mutate_files(self):
         m = self.measure([1234, 555], raw=[4321], completed=[4321], pending=[111], days=1)
         actual = self.check(m, db=100)["filesystems"]
