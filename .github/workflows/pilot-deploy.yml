@@ -404,9 +404,8 @@ jobs:
             fi
           }
           trap cleanup_remote_stage EXIT
-          ssh "${options[@]}" "$target" "test ! -e '$remote_stage' && test ! -L '$remote_stage' && install -d -m 0700 '$remote_stage'"
+          bash trusted-policy/tools/deployment/send-full-artifact.sh "$RUNNER_TEMP/approved-full.zip" "$remote_stage" "$target" "${ARTIFACT_DIGEST#sha256:}" "$RUNNER_TEMP/pilot_full_key" "$RUNNER_TEMP/pilot_full_known_hosts"
           stage_created=true
-          scp "${options[@]}" "$RUNNER_TEMP/approved-full.zip" "$target:$remote_stage/release-artifact.zip"
           ssh "${options[@]}" "$target" "chmod 0600 '$remote_stage/release-artifact.zip' && sudo '$full' DEPLOY '$RELEASE_ID' '$remote_stage' '$EXPECTED_SOURCE_COMMIT' '$SOURCE_COMMIT' '${ARTIFACT_DIGEST#sha256:}' '$classifier_sha' '$CI_RUN_ID' '$CI_RUN_ATTEMPT'"
           {
             echo '### Complete Pilot release verified'

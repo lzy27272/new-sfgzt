@@ -284,6 +284,8 @@ jobs:
           bash -n infra/production/bootstrap/tests/60-100-full-release-integrity.test.sh
           bash -n infra/production/bootstrap/tests/61-install-fast-lane-release.test.sh
           bash -n infra/production/bootstrap/tests/63-install-full-ci-release.test.sh
+          bash -n tools/deployment/send-full-artifact.sh
+          bash -n tools/deployment/tests/send-full-artifact.test.sh
           bash -n infra/production/health/health-check.sh
           bash -n infra/production/health/health-check.test.sh
           bash -n infra/production/backup/backup-postgres.sh
@@ -292,6 +294,7 @@ jobs:
           bash infra/production/bootstrap/tests/60-100-full-release-integrity.test.sh
           bash infra/production/bootstrap/tests/61-install-fast-lane-release.test.sh
           bash infra/production/bootstrap/tests/63-install-full-ci-release.test.sh
+          bash tools/deployment/tests/send-full-artifact.test.sh
           bash infra/production/health/health-check.test.sh
           python3 -m unittest discover -s infra/production/backup/tests -p 'test_*.py' -v
       - name: Test offline OCR packaging and Linux release activation contracts
