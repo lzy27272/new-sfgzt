@@ -1,0 +1,22 @@
+#!/bin/bash
+set -Eeuo pipefail
+umask 077
+export PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+test "$(id -u)" -eq 0 || { echo 'OCR_RELEASE_ERROR root required' >&2; exit 1; }
+readonly library='/usr/local/lib/hotel-ai-os/finance-ocr'
+for directory in /usr/local/lib /usr/local/lib/hotel-ai-os "${library}"; do
+  test -d "${directory}" && test ! -L "${directory}" &&
+    test "$(stat -c '%u:%g' "${directory}")" = '0:0' &&
+    test -z "$(find "${directory}" -maxdepth 0 -perm /022 -print)" || {
+    echo 'OCR_RELEASE_ERROR unsafe installed helper directory' >&2; exit 1;
+  }
+done
+for script in release.py probe.py finance_ocr_bundle.py hotel-ai-os-finance-ocr.service; do
+  path="${library}/${script}"
+  test -f "${path}" && test ! -L "${path}" &&
+    test "$(stat -c '%u:%g:%h' "${path}")" = '0:0:1' &&
+    test -z "$(find "${path}" -maxdepth 0 -perm /022 -print)" || {
+    echo 'OCR_RELEASE_ERROR unsafe installed helper' >&2; exit 1;
+  }
+done
+exec /usr/bin/python3 -I -B "${library}/release.py" "$@"

@@ -516,6 +516,7 @@ public class FinanceService {
         if(jdbc.queryForObject("select count(*) from finance_attachment where tenant_id=:tenantId and claim_id=:id and retired_at is null",b,Integer.class)>=40) throw bad("每单最多40份凭证");
         b.addValue("kind",kind).addValue("name",name).addValue("type",type).addValue("size",size).addValue("hash",hash).addValue("object",objectKey).addValue("scan",scanStatus).addValue("extraction",json(extraction));
         jdbc.update("insert into finance_attachment(id,tenant_id,claim_id,kind,original_name,media_type,size_bytes,sha256,object_key,scan_status,extraction) values(:attachment,:tenantId,:id,:kind,:name,:type,:size,:hash,:object,:scan,cast(:extraction as jsonb))",b);
+        if("CLEAN".equals(scanStatus)&&Set.of("image/jpeg","image/png").contains(type))appendLocalOcr(p,attachmentId,null,kind,hash,extraction);
         audit.record("FINANCE_EVIDENCE_UPLOADED","FINANCE_CLAIM",id,json(Map.of("attachmentId",attachmentId,"kind",kind,"sha256",hash)));
         return attachments(p,id).stream().filter(a->attachmentId.equals(uuid(a,"id"))).findFirst().orElseThrow();
     }
@@ -523,6 +524,34 @@ public class FinanceService {
         var p=prepare();requireReadable(p,claim(p,id,false));
         var rows=jdbc.queryForList("select * from finance_attachment where tenant_id=:tenantId and claim_id=:id and id=:attachment",base(p).addValue("id",id).addValue("attachment",attachmentId));
         if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"凭证不存在");return rows.getFirst();
+    }
+    public Map<String,Object> recordAttachmentRecognition(UUID id,UUID attachmentId,Map<String,Object> extraction) {
+        var p=prepare("finance.submit","finance.pay");var row=claim(p,id,true);
+        if(!localOcrResultsInstalled())throw conflict("本地识别结果迁移尚未安装，请先完成受控服务升级；原件仍保留");
+        if(!(isCashier(p,row)&&"APPROVED".equals(row.get("status"))&&!p.actorId().equals(uuid(row,"applicant_id")))){requireOwner(p,row);requireEditable(row);}
+        var record=attachment(id,attachmentId);if(record.get("retired_at")!=null)throw conflict("已移除凭证不能重新识别");
+        if(!text(record,"sha256").equals(extraction.get("sourceSha256")))throw conflict("识别结果与已存原件指纹不一致，未采纳候选");
+        if(!"DRAFT".equals(row.get("status"))&&!"RETURNED".equals(row.get("status"))&&!"PAYMENT".equals(record.get("kind")))throw forbidden();
+        appendLocalOcr(p,attachmentId,null,text(record,"kind"),text(record,"sha256"),extraction);
+        return attachments(p,id).stream().filter(a->attachmentId.equals(uuid(a,"id"))).findFirst().orElseThrow();
+    }
+    private boolean localOcrResultsInstalled(){return Boolean.TRUE.equals(jdbc.queryForObject("select to_regclass('finance_local_ocr_result') is not null",Map.of(),Boolean.class));}
+    private Map<String,Object> localOcrOverlay(TenantPrincipal p,UUID attachment,UUID intake,String hash,Map<String,Object> fallback){
+        if(!localOcrResultsInstalled())return fallback;
+        var rows=jdbc.queryForList("select extraction from finance_local_ocr_result where tenant_id=:tenantId and source_sha256=:hash and (attachment_id=:attachment or intake_id=:intake) order by created_at desc,id desc limit 1",base(p).addValue("hash",hash).addValue("attachment",attachment).addValue("intake",intake));
+        return rows.isEmpty()?fallback:parse(rows.getFirst().get("extraction"));
+    }
+    private void appendLocalOcr(TenantPrincipal p,UUID attachment,UUID intake,String kind,String hash,Map<String,Object> extraction){
+        if(!localOcrResultsInstalled()||!hash.equals(extraction.get("sourceSha256")))return;
+        var observation=new LinkedHashMap<String,Object>(extraction);var image=extraction.get("imageHash") instanceof Map<?,?> m?m:Map.of();
+        String phash=Objects.toString(image.get("phash"),""),dhash=Objects.toString(image.get("dhash"),"");
+        var b=base(p).addValue("attachment",attachment).addValue("intake",intake).addValue("hash",hash).addValue("kind",kind);
+        if("phash-dhash-v1".equals(image.get("algorithm"))&&phash.matches("[a-f0-9]{16}")&&dhash.matches("[a-f0-9]{16}")) {
+            boolean similar=Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from finance_local_ocr_result where tenant_id=:tenantId and phash is not null and not(attachment_id is not distinct from :attachment and intake_id is not distinct from :intake) and bit_count(('x'||phash)::bit(64)#('x'||:phash)::bit(64))<=6 and bit_count(('x'||dhash)::bit(64)#('x'||:dhash)::bit(64))<=8)",b.addValue("phash",phash).addValue("dhash",dhash),Boolean.class));
+            if(similar)observation.put("similarityWarning","同一租户存在图像相近的凭证，请核对是否重复；这只是提醒，不作为拒绝依据，也不展示其他员工资料。");
+        } else {phash=null;dhash=null;}
+        jdbc.update("insert into finance_local_ocr_result(id,tenant_id,attachment_id,intake_id,source_sha256,kind,extraction,phash,dhash,created_by) values(:observation,:tenantId,:attachment,:intake,:hash,:kind,cast(:extraction as jsonb),:phash,:dhash,:actorId)",b.addValue("observation",UUID.randomUUID()).addValue("extraction",json(observation)).addValue("phash",phash).addValue("dhash",dhash));
+        audit.record("FINANCE_LOCAL_RECOGNITION_RECORDED",attachment==null?"FINANCE_INVOICE_INTAKE":"FINANCE_CLAIM_ATTACHMENT",attachment==null?intake:attachment,json(Map.of("sourceSha256",hash,"status",Objects.toString(extraction.get("status"),"UNKNOWN"))));
     }
     public void recordEvidenceRead(UUID id,UUID attachmentId) {
         var p=prepare();requireReadable(p,claim(p,id,false));audit.record("FINANCE_ORIGINAL_DOWNLOADED","FINANCE_CLAIM",id,json(Map.of("attachmentId",attachmentId)));
@@ -538,7 +567,7 @@ public class FinanceService {
     }
     private List<Map<String,Object>> attachments(TenantPrincipal p,UUID id) {
         var rows=jdbc.queryForList("select id,kind,original_name,media_type,size_bytes,sha256,scan_status,extraction,created_at from finance_attachment where tenant_id=:tenantId and claim_id=:id and retired_at is null order by created_at,id",base(p).addValue("id",id));
-        rows.forEach(r->r.put("extraction",parse(r.get("extraction"))));return rows;
+        rows.forEach(r->r.put("extraction",localOcrOverlay(p,uuid(r,"id"),null,text(r,"sha256"),parse(r.get("extraction")))));return rows;
     }
     private Map<String,Object> suggestion(TenantPrincipal p,Map<String,Object> row) {
         var categories=jdbc.queryForList("select id,name,keywords from finance_category where tenant_id=:tenantId and hotel_id=:hotel and enabled",base(p).addValue("hotel",row.get("hotel_id")));
@@ -678,6 +707,7 @@ public class FinanceService {
         var original=row.get("original")==null?Map.<String,Object>of():parse(row.get("original"));
         for(String field:List.of("originalName","mediaType","sizeBytes","sha256","extraction","scanStatus"))out.put(field,original.get(field));
         var p=access.principal();
+        if(!original.isEmpty())out.put("extraction",localOcrOverlay(p,null,uuid(row,"id"),Objects.toString(original.get("sha256"),""),original.get("extraction") instanceof Map<?,?> ? parse(json(original.get("extraction"))) : Map.of()));
         if(row.get("amount")!=null&&!text(row,"buyer_tax_number").isBlank()) {
             try {String key=FinanceRules.invoiceKey(text(row,"invoice_code"),text(row,"invoice_number"));
                 var statuses=jdbc.queryForList("select status from finance_invoice_verification where tenant_id=:tenantId and target_kind='INTAKE' and invoice_id=:id and invoice_snapshot=cast(:snapshot as jsonb) order by created_at desc,id desc limit 1",base(p).addValue("id",row.get("id")).addValue("snapshot",json(Map.of("invoice_key",key,"amount",decimal(row,"amount").toPlainString(),"buyer_tax_number",text(row,"buyer_tax_number")))));
@@ -699,11 +729,20 @@ public class FinanceService {
         var p=prepare("finance.submit");var row=loadIntake(p,id,true);requireIntakeOwner(p,row);
         if(row.get("original")!=null) {var old=parse(row.get("original"));if(old.get("sha256").equals(original.get("sha256")))return old;throw conflict("原件已归档不可覆盖；新票请新建收票资料");}
         jdbc.update("update finance_invoice_intake set original=cast(:original as jsonb),version=version+1,updated_at=now() where tenant_id=:tenantId and id=:id",base(p).addValue("id",id).addValue("original",json(original)));
+        if("CLEAN".equals(original.get("scanStatus"))&&Set.of("image/jpeg","image/png").contains(original.get("mediaType"))&&original.get("extraction") instanceof Map<?,?>)appendLocalOcr(p,null,id,"INVOICE",Objects.toString(original.get("sha256")),parse(json(original.get("extraction"))));
         audit.record("FINANCE_INVOICE_INTAKE_ORIGINAL_STORED","FINANCE_INVOICE_INTAKE",id,json(Map.of("sha256",original.get("sha256"))));return original;
     }
     public Map<String,Object> intakeOriginal(UUID id) {
         var p=prepare();var row=loadIntake(p,id,false);if(row.get("original")==null)throw conflict("收票资料尚未上传原件");
         audit.record("FINANCE_ORIGINAL_ACCESSED","FINANCE_INVOICE_INTAKE",id,"{}");return parse(row.get("original"));
+    }
+    public Map<String,Object> recordIntakeRecognition(UUID id,Map<String,Object> extraction){
+        var p=prepare("finance.submit");var row=loadIntake(p,id,true);requireIntakeOwner(p,row);
+        if(!localOcrResultsInstalled())throw conflict("本地识别结果迁移尚未安装，请先完成受控服务升级；原件仍保留");
+        if(row.get("original")==null)throw conflict("收票资料尚未上传原件");var original=parse(row.get("original"));
+        if(!original.get("sha256").equals(extraction.get("sourceSha256")))throw conflict("识别结果与已存原件指纹不一致，未采纳候选");
+        appendLocalOcr(p,null,id,"INVOICE",Objects.toString(original.get("sha256")),extraction);
+        return intakeDetail(id);
     }
     public Map<String,Object> associateIntake(UUID intakeId,FinanceModels.Associate in) {
         var p=prepare("finance.submit");lock(p,"invoice-registry");var intake=loadIntake(p,intakeId,true);

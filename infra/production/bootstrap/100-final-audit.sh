@@ -17,6 +17,7 @@ readonly WEB_CURRENT_LINK='/srv/www/hotel-ai-os/current'
 readonly WEB_HEALTH_URL='https://www.sfgzt.cn/index.html'
 readonly WEB_TREE_FINGERPRINT_ALGORITHM='sha256(sorted-path-colon-size-colon-content-sha256-v1)'
 readonly FULL_RELEASE_MARKER_MAX_BYTES=1024
+readonly OCR_RELEASE_COMMAND='/usr/local/sbin/hotel-ai-os-finance-ocr-release'
 
 fail() {
   printf '%s\n' "$*" >&2
@@ -354,6 +355,12 @@ verify_full_release_integrity() {
     return 1
   }
   verify_served_index_sha256 "${expected_index_sha}" || return $?
+  if test -e "${backend_target}/.finance-ocr.json" || test -L "${backend_target}/.finance-ocr.json"; then
+    require_root_regular_file 'Core OCR source identity' "${backend_target}/.finance-ocr.json" || return $?
+    require_root_regular_file 'installed OCR release helper' "${OCR_RELEASE_COMMAND}" || return $?
+    test -x "${OCR_RELEASE_COMMAND}" || fail 'OCR release helper is not executable.'
+    "${OCR_RELEASE_COMMAND}" VERIFY "${verified_release_id}" "${verified_commit}" || return $?
+  fi
 
   printf 'FULL_RELEASE_INTEGRITY_OK sourceCommit=%s releaseId=%s backend=%s web=%s\n' \
     "${verified_commit}" "${verified_release_id}" "${backend_target}" "${web_target}"

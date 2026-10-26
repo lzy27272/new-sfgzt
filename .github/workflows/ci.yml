@@ -187,11 +187,45 @@ jobs:
             '/actions/artifacts/$ARTIFACT_ID/zip',
             'cleanup_remote_stage',
             'rmdir --',
-            'FULL lane requires the existing complete release gate'
+            'deploy-full-release:',
+            '/usr/local/sbin/hotel-ai-os-install-full-ci-release',
+            'FULL_CI_POLICY',
+            'ARTIFACT_DIGEST'
           )
           foreach ($fragment in $requiredFragments) {
             if (-not $deploymentWorkflow.Contains($fragment, [StringComparison]::Ordinal)) {
               throw "DEPLOYMENT_WORKFLOW_CONTRACT_MISSING: $fragment"
+            }
+          }
+          $fullJob = [regex]::Match($deploymentWorkflow, '(?ms)^  deploy-full-release:\r?\n(?<job>.*?)(?=^  [A-Za-z0-9_-]+:\r?$|\z)')
+          if (-not $fullJob.Success) { throw 'PROTECTED_FULL_DEPLOYMENT_JOB_MISSING' }
+          foreach ($fragment in @(
+            'environment:', 'name: pilot', 'PILOT_ENVIRONMENT_PROTECTED',
+            "needs.resolve-release.outputs.lane == 'FULL'",
+            '/usr/local/sbin/hotel-ai-os-install-full-ci-release',
+            'FULL_CI_POLICY', 'EXPECTED_SOURCE_COMMIT', 'SOURCE_COMMIT', 'ARTIFACT_DIGEST'
+          )) {
+            if (-not $fullJob.Groups['job'].Value.Contains($fragment, [StringComparison]::Ordinal)) {
+              throw "PROTECTED_FULL_DEPLOYMENT_JOB_CONTRACT_MISSING: $fragment"
+            }
+          }
+          $fullEntry = Get-Content -LiteralPath 'infra/production/bootstrap/63-install-full-ci-release.sh' -Raw
+          foreach ($fragment in @(
+            "readonly INSTALLED='/usr/local/sbin/hotel-ai-os-install-full-ci-release'",
+            'root_file "$INSTALLED"',
+            '"$COORDINATOR" STATUS',
+            'coordinator(){ "$COORDINATOR" "$@"; }',
+            'coordinator BEGIN_FULL "$source_commit" "$release_id"',
+            'backup_restore_and_rehearse',
+            'PAIRED_DATABASE_ORIGINALS_RESTORE_OK',
+            'FULL_CI_CLONE_MIGRATION_PASS',
+            'python3 -I "$VERIFIER" flyway "$runtime" hotel_ai_os MIGRATE',
+            'FULL_CI_FLYWAY_MIGRATE_PASS',
+            'FINAL_SERVER_AUDIT_OK',
+            'expected_source_commit', '"$digest"', '"$classifier"'
+          )) {
+            if (-not $fullEntry.Contains($fragment, [StringComparison]::Ordinal)) {
+              throw "FULL_ENTRY_BACKUP_MIGRATION_IDENTITY_CONTRACT_MISSING: $fragment"
             }
           }
           if ($deploymentWorkflow -match '(?m)^\s{2}(push|pull_request|schedule):') {
@@ -244,9 +278,12 @@ jobs:
           bash -n infra/production/bootstrap/60-install-release.sh
           bash -n infra/production/bootstrap/61-install-fast-lane-release.sh
           bash -n infra/production/bootstrap/62-configure-fast-lane-deployer.sh
+          bash -n infra/production/bootstrap/63-install-full-ci-release.sh
           bash -n infra/production/bootstrap/100-final-audit.sh
+          bash -n infra/production/finance-ocr/hotel-ai-os-finance-ocr-release
           bash -n infra/production/bootstrap/tests/60-100-full-release-integrity.test.sh
           bash -n infra/production/bootstrap/tests/61-install-fast-lane-release.test.sh
+          bash -n infra/production/bootstrap/tests/63-install-full-ci-release.test.sh
           bash -n infra/production/health/health-check.sh
           bash -n infra/production/health/health-check.test.sh
           bash -n infra/production/backup/backup-postgres.sh
@@ -254,8 +291,20 @@ jobs:
           bash -n infra/production/bootstrap/99-install-operations.sh
           bash infra/production/bootstrap/tests/60-100-full-release-integrity.test.sh
           bash infra/production/bootstrap/tests/61-install-fast-lane-release.test.sh
+          bash infra/production/bootstrap/tests/63-install-full-ci-release.test.sh
           bash infra/production/health/health-check.test.sh
           python3 -m unittest discover -s infra/production/backup/tests -p 'test_*.py' -v
+      - name: Test offline OCR packaging and Linux release activation contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Ubuntu exercises actual directory symlinks; Windows pointer fixtures are not this acceptance.
+          test -f tools/deployment/tests/test_finance_ocr_bundle.py
+          test -f infra/production/finance-ocr/tests/test_release.py
+          test -f infra/production/bootstrap/tests/test_full_ci_release.py
+          python3 -B -m unittest discover -s tools/deployment/tests -p 'test_finance_ocr_bundle.py' -v
+          python3 -B -m unittest discover -s infra/production/finance-ocr/tests -p 'test_*.py' -v
+          python3 -B -m unittest discover -s infra/production/bootstrap/tests -p 'test_full_ci_release.py' -v
 
   backup-windows-contract:
     name: Verify Windows backup acceptance and interruption contracts
@@ -405,9 +454,78 @@ jobs:
       - name: Test OTA platform modules
         run: mvn --batch-mode --no-transfer-progress --file ota-platform-pom.xml test
 
+  finance-ocr:
+    name: Offline Linux finance OCR
+    needs: classify
+    if: needs.classify.outputs.requires_core == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.classify.outputs.head_sha }}
+      - name: Install Python runtime and synthetic-test Chinese font
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends python3.12-venv fonts-noto-cjk libgomp1
+          python3.12 -c 'import platform,sys; assert sys.version_info[:2] == (3,12) and platform.machine() == "x86_64"'
+      - name: Resolve only locked Linux wheels, then install without network
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3.12 -m venv "$RUNNER_TEMP/finance-ocr-resolver"
+          mkdir "$RUNNER_TEMP/finance-ocr-wheels" "$RUNNER_TEMP/finance-ocr-evidence"
+          "$RUNNER_TEMP/finance-ocr-resolver/bin/python" -m pip download \
+            --require-hashes --only-binary=:all: \
+            -r apps/finance-ocr/requirements.lock -d "$RUNNER_TEMP/finance-ocr-wheels"
+          python3.12 -m venv "$RUNNER_TEMP/finance-ocr-venv"
+          "$RUNNER_TEMP/finance-ocr-venv/bin/python" -m pip install \
+            --no-index --find-links "$RUNNER_TEMP/finance-ocr-wheels" --require-hashes \
+            -r apps/finance-ocr/requirements.lock
+          "$RUNNER_TEMP/finance-ocr-venv/bin/python" -m pip check
+      - name: Verify model identities and run all worker contract tests
+        working-directory: apps/finance-ocr
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$RUNNER_TEMP/finance-ocr-venv/bin/python" -c 'from finance_ocr.models import verified_models; assert len(verified_models()) == 3'
+          "$RUNNER_TEMP/finance-ocr-venv/bin/python" -m unittest discover -s tests -p 'test_*.py' -v \
+            2>&1 | tee "$RUNNER_TEMP/finance-ocr-evidence/unittest.log"
+      - name: Recognize a real synthetic Chinese JPEG with the offline CPU engine
+        working-directory: apps/finance-ocr
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$RUNNER_TEMP/finance-ocr-venv/bin/python" -m tests.real_engine_smoke \
+            --output "$RUNNER_TEMP/finance-ocr-synthetic" \
+            --font /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
+            | tee "$RUNNER_TEMP/finance-ocr-evidence/linux-smoke.json"
+      - name: Build and independently verify the offline OCR component
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.classify.outputs.head_sha }}
+        run: |
+          set -Eeuo pipefail
+          python3.12 -m unittest discover -s tools/deployment/tests -p 'test_finance_ocr_bundle.py' -v
+          mkdir "$RUNNER_TEMP/pilot-finance-ocr"
+          python3.12 tools/deployment/finance_ocr_bundle.py build \
+            --source-root "$GITHUB_WORKSPACE" --source-commit "$SOURCE_COMMIT" \
+            --wheelhouse "$RUNNER_TEMP/finance-ocr-wheels" \
+            --evidence-root "$RUNNER_TEMP/finance-ocr-evidence" \
+            --output "$RUNNER_TEMP/pilot-finance-ocr/finance-ocr.zip"
+          python3.12 tools/deployment/finance_ocr_bundle.py verify \
+            --bundle "$RUNNER_TEMP/pilot-finance-ocr/finance-ocr.zip" --source-commit "$SOURCE_COMMIT"
+      - name: Upload commit-bound offline OCR component
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pilot-finance-ocr-component-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pilot-finance-ocr
+          if-no-files-found: error
+          retention-days: 2
+
   assemble-release:
     name: Assemble immutable Pilot release artifact
-    needs: [classify, workflow-contract, backup-windows-contract, web, core-api, ota-platform]
+    needs: [classify, workflow-contract, backup-windows-contract, web, core-api, ota-platform, finance-ocr]
     if: >-
       always() &&
       needs.classify.result == 'success' &&
@@ -415,7 +533,9 @@ jobs:
       needs.backup-windows-contract.result == 'success' &&
       (needs.web.result == 'success' || needs.web.result == 'skipped') &&
       (needs.core-api.result == 'success' || needs.core-api.result == 'skipped') &&
-      (needs.ota-platform.result == 'success' || needs.ota-platform.result == 'skipped')
+      (needs.ota-platform.result == 'success' || needs.ota-platform.result == 'skipped') &&
+      ((needs.classify.outputs.requires_core == 'true' && needs.finance-ocr.result == 'success') ||
+       (needs.classify.outputs.requires_core != 'true' && needs.finance-ocr.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -439,6 +559,12 @@ jobs:
         with:
           name: pilot-core-component-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-input/core
+      - name: Download the offline OCR component
+        if: needs.classify.outputs.requires_core == 'true'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: pilot-finance-ocr-component-${{ needs.classify.outputs.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-input/finance-ocr
       - name: Assemble the lane-specific payload
         shell: pwsh
         env:
@@ -459,12 +585,15 @@ jobs:
           if ($env:REQUIRES_CORE -ceq 'true') {
             Copy-Item -LiteralPath (Join-Path $inputRoot 'core/core-api.jar') -Destination (Join-Path $bundleRoot 'core-api.jar')
             Copy-Item -LiteralPath (Join-Path $inputRoot 'core/run-migration-once.sh') -Destination (Join-Path $bundleRoot 'run-migration-once.sh')
+            Copy-Item -LiteralPath (Join-Path $inputRoot 'finance-ocr/finance-ocr.zip') -Destination (Join-Path $bundleRoot 'finance-ocr.zip')
           }
+          $requireOcr = $env:REQUIRES_CORE -ceq 'true'
           & ./tools/deployment/New-PilotReleaseManifest.ps1 `
             -PlanPath (Join-Path $bundleRoot 'deployment-plan.json') `
             -SourceCommit $env:SOURCE_COMMIT `
             -ArtifactRoot $bundleRoot `
-            -OutputPath (Join-Path $bundleRoot 'release-manifest.json')
+            -OutputPath (Join-Path $bundleRoot 'release-manifest.json') `
+            -RequireFinanceOcr:$requireOcr
 
       - name: Upload the deployable commit artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

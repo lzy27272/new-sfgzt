@@ -1,0 +1,6 @@
+# Runtime only; lock all transitive versions and official PyPI hashes before installation.
+rapidocr==3.10.0
+onnxruntime==1.30.0
+zxing-cpp==3.1.1
+ImageHash==4.3.2
+Pillow==13.0.0

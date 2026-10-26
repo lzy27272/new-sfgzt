@@ -34,6 +34,16 @@ management:
       probes:
         enabled: true
 
+hotel:
+  ai:
+    os:
+      finance:
+        local-ocr:
+          # A private, self-hosted service; blank leaves originals uploadable without OCR.
+          endpoint: ${FINANCE_LOCAL_OCR_ENDPOINT:}
+          token: ${FINANCE_OCR_TOKEN:}
+          timeout-ms: ${FINANCE_LOCAL_OCR_TIMEOUT_MS:15000}
+
 app:
   ai-evidence:
     # Shadow only. External processing requires a separate privacy/provider approval.

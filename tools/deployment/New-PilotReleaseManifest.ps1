@@ -7,7 +7,9 @@ param(
     [string]$SourceCommit,
     [Parameter(Mandatory)]
     [string]$ArtifactRoot,
-    [string]$OutputPath = ''
+    [string]$OutputPath = '',
+    [switch]$RequireFinanceOcr,
+    [string]$PythonCommand = ''
 )
 
 Set-StrictMode -Version 3.0
@@ -212,7 +214,7 @@ if ($lane -eq 'FULL' -and (-not [bool]$plan.requiresFullRegression -or -not [boo
     throw 'FULL plan must preserve full regression and database backup gates.'
 }
 
-$recognized = @('web.zip', 'core-api.jar', 'run-migration-once.sh')
+$recognized = @('web.zip', 'core-api.jar', 'run-migration-once.sh', 'finance-ocr.zip')
 $unexpected = @(Get-ChildItem -LiteralPath $artifactDirectory -File | Where-Object {
     $_.FullName -ne $outputFullPath -and $_.FullName -ne $planFile -and $_.Name -notin $recognized
 })
@@ -224,6 +226,7 @@ $artifacts = New-Object 'System.Collections.Generic.List[object]'
 $web = $null
 $core = $null
 $migration = $null
+$financeOcr = $null
 if ($requiresWeb) {
     $webPath = Join-Path $artifactDirectory 'web.zip'
     if (-not (Test-Path -LiteralPath $webPath -PathType Leaf)) { throw 'Required Web artifact is missing: web.zip' }
@@ -252,6 +255,38 @@ if ($requiresCore) {
     }
 }
 
+$ocrPath = Join-Path $artifactDirectory 'finance-ocr.zip'
+if ($RequireFinanceOcr -and -not $requiresCore) { throw 'Finance OCR requires the Core API component.' }
+if ($RequireFinanceOcr -and -not (Test-Path -LiteralPath $ocrPath -PathType Leaf)) {
+    throw 'Required Finance OCR artifact is missing: finance-ocr.zip'
+}
+if (Test-Path -LiteralPath $ocrPath -PathType Leaf) {
+    if (-not $requiresCore) { throw 'Finance OCR cannot be included without the Core API component.' }
+    if ([string]::IsNullOrWhiteSpace($PythonCommand)) {
+        foreach ($candidate in @('python3', 'python')) {
+            $python = Get-Command $candidate -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $python) { $PythonCommand = $python.Source; break }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($PythonCommand)) { throw 'Python 3 is required to verify the offline Finance OCR artifact.' }
+    $validator = Join-Path $PSScriptRoot 'finance_ocr_bundle.py'
+    $validation = @(& $PythonCommand $validator verify --bundle $ocrPath --source-commit $SourceCommit.ToLowerInvariant() 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Finance OCR artifact validation failed: $($validation -join ' ')" }
+    $ocr = ($validation -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($ocr.status -cne 'PASS' -or $ocr.sourceCommit -cne $SourceCommit.ToLowerInvariant()) { throw 'Finance OCR verification identity differs.' }
+    $descriptor = Get-FileDescriptor 'finance-ocr' $ocrPath
+    if ($descriptor.sha256 -cne $ocr.bundleSha256) { throw 'Finance OCR bundle changed during verification.' }
+    [void]$artifacts.Add($descriptor)
+    $financeOcr = [ordered]@{
+        sourceCommit = [string]$ocr.sourceCommit
+        bundleSha256 = [string]$ocr.bundleSha256
+        bundleManifestSha256 = [string]$ocr.bundleManifestSha256
+        requirementsSha256 = [string]$ocr.requirementsSha256
+        pythonMajorMinor = [string]$ocr.pythonMajorMinor
+        platform = [string]$ocr.platform
+    }
+}
+
 $manifest = [ordered]@{
     schemaVersion = 1
     status = 'PASS'
@@ -273,6 +308,7 @@ $manifest = [ordered]@{
     web = $web
     core = $core
     migration = $migration
+    financeOcr = $financeOcr
 }
 
 $temporaryPath = "$outputFullPath.$([Guid]::NewGuid().ToString('N')).tmp"

@@ -1,0 +1,41 @@
+name: hotel-finance-ocr
+
+services:
+  finance-ocr:
+    build:
+      context: ../../../apps/finance-ocr
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8095:8095"
+    environment:
+      FINANCE_OCR_HOST: "0.0.0.0"
+      FINANCE_OCR_PORT: "8095"
+      FINANCE_OCR_TOKEN: ${FINANCE_OCR_TOKEN:?Set a private token of at least 32 characters}
+      FINANCE_OCR_TIMEOUT_SECONDS: "12"
+      FINANCE_OCR_STARTUP_TIMEOUT_SECONDS: "120"
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8095/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - recognition
+
+networks:
+  recognition:
+    internal: true

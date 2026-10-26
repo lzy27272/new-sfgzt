@@ -1,11 +1,14 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useRef, useState } from 'react'
 import type { ApiIdentity } from '../../api/client'
 import type { AppNavigate } from '../../app/routeConfig'
-import { errorMessage, financeDownload, financeRequest } from './api'
+import { errorMessage, financeDownload } from './api'
 import { FinanceMutation, FinanceTable } from './FinanceData'
 import { money, type Claim, type FinanceContext } from './model'
 import { emptyTodos, financeTodoState, financeTodoType, rowText, todoTarget, type FinanceList, type FinanceRow, type FinanceTodos } from './unifiedModel'
 import { useFinanceResource } from './useFinanceResource'
+import { InvoiceIntakeEditor } from './InvoiceIntakeEditor'
+import { RecognitionReview } from './RecognitionReview'
+import type { EvidenceExtraction } from './model'
 import s from './finance.module.css'
 
 const todoKindLabels: Record<string, string> = { review: '待我审核', payment: '待我付款', returned: '退回待补', receipt: '待补回单', work: '待本人跟进' }
@@ -32,24 +35,25 @@ export function FinanceInvoicePool({ identity, permissions, go, context }: { ide
   const detail = useFinanceResource<FinanceRow>(identity, selectedId ? `/invoice-pool/${selectedId}` : undefined)
   const canReview = permissions.includes('*') || permissions.includes('finance.review'); const canSubmit = permissions.includes('*') || permissions.includes('finance.submit')
   const claims = useFinanceResource<{ items: Claim[] }>(identity, canSubmit && selectedId ? '/claims?scope=mine&page=0' : undefined)
-  const selected = detail.data
+  const cacheKey = `${identity.tenantId}:${identity.actorId}:${identity.businessActorAssignmentId ?? ''}:${identity.orgScopes.join(',')}:${permissions.join(',')}:${selectedId}`
+  const selectedCache = useRef<{ key: string; data: FinanceRow } | undefined>(undefined)
+  const denied = !!detail.error && typeof detail.error === 'object' && 'status' in detail.error && [401, 403, 404].includes(Number(detail.error.status))
+  if (denied) selectedCache.current = undefined
+  if (detail.data) selectedCache.current = { key: cacheKey, data: detail.data }
+  // Resource refreshes must not unmount a partially typed editor. Never reuse another identity's cached document.
+  const selected = denied ? undefined : detail.data ?? (selectedCache.current?.key === cacheKey ? selectedCache.current.data : undefined)
   const available = (claims.data?.items ?? []).filter(claim => claim.canEdit && claim.hotel_id === selected?.hotelId)
   return <section className={s.panel}><div className={s.heading}><div><small>ORIGINAL DOCUMENTS</small><h2>独立收票与原件资料库</h2></div><div className={s.actions}><button onClick={() => { resource.reload(); detail.reload() }}>刷新原件状态</button>{canSubmit && <button className={s.primary} onClick={() => setCreating(!creating)}>＋ 先收票，后报销</button>}</div></div><p className={s.warning}>{resource.data?.notice || '先归集真实原件，再关联本人同组织报销。人工核对与外部查验分别留状态，人工确认不代表税务验真。'}</p>
     {creating && <FinanceMutation identity={identity} path="/invoice-pool" label="建立独立收票草稿" initial={{ assignmentId: identity.businessActorAssignmentId ?? '' }} fields={[{ key: 'assignmentId', label: '资料归属任职', required: true, type: 'select', options: (context?.assignments ?? []).map(assignment => ({ value: assignment.assignment_id, label: `${assignment.hotel_name} · ${assignment.employee_name}` })) }]} build={(value, requestId) => ({ requestId, assignmentId: value.assignmentId })} onSuccess={value => { setSelectedId(rowText(value, 'id')); setCreating(false) }} />}
     {(resource.error || detail.error || error) && <p role="alert" className={s.error}>{error || errorMessage(resource.error || detail.error)}</p>}
     {resource.loading ? <p role="status" className={s.empty}>读取授权范围内票据…</p> : <FinanceTable rows={resource.data?.items ?? []} columns={[{ key: 'invoiceNumber', label: '完整发票号码' }, { key: 'invoiceCode', label: '传统发票代码' }, { key: 'hotelName', label: '归属组织' }, { key: 'amount', label: '金额' }, { key: 'originalName', label: '原件文件' }, { key: 'status', label: '归集状态' }, { key: 'verificationStatus', label: '核对 / 查验状态' }]} label="独立票据" onOpen={row => setSelectedId(rowText(row, 'id'))} />}
-    {selected && <div className={s.detailPanel} key={`${selected.id}:${selected.version}`}><h3>{rowText(selected, 'invoiceNumber', '尚未填写票号')}</h3><p>{rowText(selected, 'originalName', '原件待上传')} · {rowText(selected, 'hotelName')}</p><p className={s.muted}>原件 SHA256：{rowText(selected, 'sha256')}</p><div className={s.actions}>{!!selected.claimId && <button onClick={() => go('finance', { tab: canSubmit ? 'mine' : 'all', id: rowText(selected, 'claimId') })}>查看关联报销</button>}{!!selected.originalName && <button onClick={() => void financeDownload(identity, `/invoice-pool/${selected.id}/original`, rowText(selected, 'originalName')).catch(error => setError(errorMessage(error)))}>下载授权原件</button>}</div>
-      {selected.canEdit === true && <><IntakeOriginalUpload identity={identity} id={rowText(selected, 'id')} alreadyUploaded={!!selected.originalName} /><FinanceMutation key={`fields:${selected.version}`} identity={identity} path={`/invoice-pool/${selected.id}`} method="PUT" label="保存候选字段" initial={{ invoiceNumber: rowText(selected, 'invoiceNumber', ''), invoiceCode: rowText(selected, 'invoiceCode', ''), amount: rowText(selected, 'amount', ''), buyerTaxNumber: rowText(selected, 'buyerTaxNumber', ''), confirmed: String(selected.confirmed === true) }} fields={[{ key: 'invoiceNumber', label: '完整发票号码（保留前导0）' }, { key: 'invoiceCode', label: '传统发票代码（数电票留空）' }, { key: 'amount', label: '价税合计', type: 'number' }, { key: 'buyerTaxNumber', label: '购买方税号' }, { key: 'confirmed', label: '已对照原件人工确认字段', type: 'checkbox' }]} build={value => ({ ...value, amount: value.amount || null, confirmed: value.confirmed === 'true', expectedVersion: selected.version })} />
+    {selected && <div className={s.detailPanel} key={cacheKey}><h3>{rowText(selected, 'invoiceNumber', '尚未填写票号')}</h3><p>{rowText(selected, 'originalName', '原件待上传')} · {rowText(selected, 'hotelName')}</p><p className={s.muted}>原件 SHA256：{rowText(selected, 'sha256')}</p><div className={s.actions}>{!!selected.claimId && <button onClick={() => go('finance', { tab: canSubmit ? 'mine' : 'all', id: rowText(selected, 'claimId') })}>查看关联报销</button>}{!!selected.originalName && <button onClick={() => void financeDownload(identity, `/invoice-pool/${selected.id}/original`, rowText(selected, 'originalName')).catch(error => setError(errorMessage(error)))}>下载授权原件</button>}</div>
+      {selected.canEdit === true && <><InvoiceIntakeEditor identity={identity} intake={selected} onUpdated={() => { resource.reload(); detail.reload() }} />
         <details><summary>关联本人同组织报销</summary><p className={s.muted}>原件仍引用同一份受保护字节；正式提交报销时才占用票号。已关联资料不会再作为新票重复报销。</p><FinanceMutation identity={identity} path={`/invoice-pool/${selected.id}/associate`} label="关联到所选报销草稿" fields={[{ key: 'claimId', label: '选择本人的可编辑报销', required: true, type: 'select', options: available.map(claim => ({ value: claim.id, label: `${claim.title || '未填写事由'} · ${claim.hotel_name}` })) }]} build={value => { const target = available.find(claim => claim.id === value.claimId); if (!target) throw new Error('所选草稿已不可用，请刷新本人报销列表。'); return { claimId: target.id, expectedVersion: target.version } }} onSuccess={claim => go('finance', { tab: 'mine', id: rowText(claim, 'id') })} /></details></>}
+      {selected.canEdit !== true && <RecognitionReview extraction={selected.extraction as EvidenceExtraction | undefined} />}
       {canReview && <details><summary>记录人工核对依据（非税务验真）</summary><FinanceMutation identity={identity} path={`/invoice-pool/${selected.id}/verification`} label="保存人工核对记录" fields={[{ key: 'note', label: '核对原件的具体依据', type: 'textarea', required: true }]} build={value => value} /></details>}
       <Suspense fallback={<p role="status">读取OCR与验真服务状态…</p>}><FinanceInvoiceAutomation identity={identity} intakeId={rowText(selected, 'id')} permissions={permissions} /></Suspense>
     </div>}
     <div className={s.actions}><button disabled={page <= 0 || resource.loading} onClick={() => { setSelectedId(''); setPage(value => value - 1) }}>上一页</button><span>共 {resource.data?.total ?? '—'} 张</span><button disabled={!resource.data || (page + 1) * 50 >= resource.data.total || resource.loading} onClick={() => { setSelectedId(''); setPage(value => value + 1) }}>下一页</button></div>
   </section>
-}
-
-function IntakeOriginalUpload({ identity, id, alreadyUploaded }: { identity: ApiIdentity; id: string; alreadyUploaded: boolean }) {
-  const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
-  if (alreadyUploaded) return <p className={s.info}>原件已保存且不可覆写。如需换票，请新建独立资料，不覆盖历史原件。</p>
-  return <div className={s.uploadGroup}><label className={s.uploadButton}>{busy ? '安全扫描并保存原件…' : '选择或拍摄发票原件'}<input type="file" disabled={busy} accept=".pdf,.ofd,.xml,.jpg,.jpeg,.png" onChange={async event => { const file = event.target.files?.[0]; if (!file || busy) return; setBusy(true); setError(''); try { const body = new FormData(); body.append('file', file); await financeRequest(identity, `/invoice-pool/${id}/original`, 'POST', body) } catch (error) { setError(errorMessage(error)) } finally { setBusy(false) } }} /></label><small>每份≤20MB；保留原始字节，不将人工核对标记为外部验真。</small>{error && <p role="alert" className={s.error}>{error}</p>}</div>
 }

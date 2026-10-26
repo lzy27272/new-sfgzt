@@ -48,7 +48,7 @@ export function saveFinanceDraft(scope: string, id: string, draft: LocalDraft): 
         const stored = await request<CipherRecord | undefined>(db.transaction('records').objectStore('records').get(fileKey))
         if (!stored) additions.push(await encrypt(key, scope, fileKey, await f.file.arrayBuffer()))
       }
-      const value = { form: draft.form, dirty: draft.dirty, files: draft.files.map(f => ({ id: f.id, kind: f.kind, name: f.file.name, type: f.file.type, lastModified: f.file.lastModified })) }
+      const value = { form: draft.form, dirty: draft.dirty, recognition: draft.recognition, files: draft.files.map(f => ({ id: f.id, kind: f.kind, name: f.file.name, type: f.file.type, lastModified: f.file.lastModified })) }
       const record = await encrypt(key, scope, queueKey, new TextEncoder().encode(JSON.stringify(value)).buffer)
       const tx = db.transaction('records', 'readwrite'); const completion = done(tx)
       let stale = false
@@ -75,7 +75,7 @@ export async function loadFinanceDraft(scope: string, id: string): Promise<(Loca
     if (!record || record.scope !== scope) return null
     if (record.savedAt < Date.now() - TTL) { await erase(db, scope, id); return null }
     const key = await cryptoKey(db, scope)
-    const data = JSON.parse(new TextDecoder().decode(await decrypt(key, record))) as { form: LocalDraft['form']; dirty: boolean; files: { id: string; kind: PendingEvidence['kind']; name: string; type: string; lastModified: number }[] }
+    const data = JSON.parse(new TextDecoder().decode(await decrypt(key, record))) as { form: LocalDraft['form']; dirty: boolean; recognition?: LocalDraft['recognition']; files: { id: string; kind: PendingEvidence['kind']; name: string; type: string; lastModified: number }[] }
     const files: PendingEvidence[] = []
     for (const f of data.files) {
       const encrypted = await request<CipherRecord | undefined>(db.transaction('records').objectStore('records').get(`${queueKey}/file/${f.id}`))
@@ -83,7 +83,7 @@ export async function loadFinanceDraft(scope: string, id: string): Promise<(Loca
       files.push({ id: f.id, kind: f.kind, file: new File([await decrypt(key, encrypted)], f.name, { type: f.type, lastModified: f.lastModified }) })
     }
     seenVersions.set(queueKey, record.etag)
-    return { form: data.form, dirty: data.dirty, files, savedAt: record.savedAt }
+    return { form: data.form, dirty: data.dirty, recognition: data.recognition, files, savedAt: record.savedAt }
   } finally { db.close() }
 }
 async function erase(db: IDBDatabase, scope: string, id: string) {

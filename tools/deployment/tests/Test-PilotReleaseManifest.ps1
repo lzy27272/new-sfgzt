@@ -90,13 +90,13 @@ function New-Plan {
 }
 
 function Invoke-Manifest {
-    param([Parameter(Mandatory)][string]$ArtifactRoot)
+    param([Parameter(Mandatory)][string]$ArtifactRoot, [switch]$RequireFinanceOcr)
 
     $planPath = Join-Path $ArtifactRoot 'deployment-plan.json'
     $output = & $pwshPath -NoLogo -NoProfile -NonInteractive -File $manifestScript `
         -PlanPath $planPath `
         -SourceCommit $sourceCommit `
-        -ArtifactRoot $ArtifactRoot 2>&1
+        -ArtifactRoot $ArtifactRoot -RequireFinanceOcr:$RequireFinanceOcr 2>&1
     return [pscustomobject]@{
         ExitCode = $LASTEXITCODE
         Output = (@($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
@@ -191,6 +191,15 @@ try {
         $backendDocument.migration.fingerprint -ceq $expectedFingerprint -and
         $backendDocument.migration.algorithm -ceq 'sha256(sorted-entry-name-colon-content-sha256-v1)'
     ) "exit=$($backendResult.ExitCode), output=$($backendResult.Output)"
+
+    $missingOcrResult = Invoke-Manifest $backendRoot -RequireFinanceOcr
+    Add-Case 'required-finance-ocr-missing-blocked' (
+        $missingOcrResult.ExitCode -ne 0 -and $missingOcrResult.Output -match 'Required Finance OCR artifact is missing'
+    ) "exit=$($missingOcrResult.ExitCode), output=$($missingOcrResult.Output)"
+    $webOcrResult = Invoke-Manifest $webRoot -RequireFinanceOcr
+    Add-Case 'finance-ocr-without-core-blocked' (
+        $webOcrResult.ExitCode -ne 0 -and $webOcrResult.Output -match 'Finance OCR requires the Core API component'
+    ) "exit=$($webOcrResult.ExitCode), output=$($webOcrResult.Output)"
 
     $mixedRoot = Join-Path $testRoot 'backend-mixed'
     New-Item -ItemType Directory -Path $mixedRoot | Out-Null

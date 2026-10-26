@@ -7,6 +7,8 @@ import { exactDecimalTotal } from './unifiedModel'
 import { EvidencePreview } from './EvidencePreview'
 import { ReviewHistory } from './ReviewHistory'
 import { ProjectPicker } from './ProjectPicker'
+import { RecognitionReview, RecognitionUploadAction } from './RecognitionReview'
+import { applyEvidenceRecognition, emptyRecognition, mergeInvoiceCandidates, reconcileEvidenceAmounts, touchedRecognition, validRecognitionValue, type InvoiceCandidateField } from './recognitionModel'
 import s from './finance.module.css'
 
 export function ClaimEditor({ initial, context, identity, onChange, onBack }: { initial: Claim; context: FinanceContext; identity: ApiIdentity; onChange: () => void; onBack: () => void }) {
@@ -23,14 +25,17 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
     try { const time = await saveFinanceDraft(scope, claim.id, value); setLocalTime(time); setLocalError('') }
     catch (e) { setLocalError(`本机草稿未保存：${errorMessage(e)}。请勿关闭页面。`) }
   }
-  const update = (value: LocalDraft) => { current.current = value; setLocal(value); void retain(value) }
-  const change = (patch: Partial<DraftForm>) => update({ ...current.current, dirty: true, form: { ...current.current.form, ...patch } })
+  const update = (value: LocalDraft) => { const next = { ...value, recognition: value.recognition ?? current.current.recognition }; current.current = next; setLocal(next); void retain(next) }
+  const change = (patch: Partial<DraftForm>, touched = Object.keys(patch)) => update({ ...current.current, dirty: true, recognition: touchedRecognition(current.current, touched), form: { ...current.current.form, ...patch } })
   useEffect(() => {
     let alive = true
     void loadFinanceDraft(scope, claim.id).then(saved => {
       if (!alive) return
       canPersist.current = true
       if (!saved || !claim.canEdit) return
+      if (!saved.dirty && saved.form.expectedVersion === claim.version && saved.recognition) {
+        current.current = { ...current.current, recognition: saved.recognition }; setLocal(current.current)
+      }
       if (saved.dirty) {
         current.current = saved; setLocal(saved); setLocalTime(saved.savedAt)
         setConflict(saved.form.expectedVersion !== claim.version)
@@ -53,26 +58,22 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
     try {
       // Save locally before any network action; network failure must not discard selected File objects.
       await retain(current.current)
+      let uploaded = claim.attachments
       for (const file of [...current.current.files]) {
         if (file.kind === 'INVOICE' && current.current.form.invoices.length >= 30 && !current.current.form.invoices.some(i => i.attachmentId === file.id)) throw new Error('每单最多30张发票明细，请移除多余发票后分单申请。待上传原件仍保留在本机。')
         setBusy(`正在上传 ${evidenceLabels[file.kind]}：${file.file.name}`)
         const body = new FormData(); body.append('file', file.file)
         const attached = await financeRequest<Evidence>(identity, `/claims/${claim.id}/attachments/${file.id}?kind=${file.kind}`, 'POST', body)
-        setClaim(c => ({ ...c, attachments: [...c.attachments.filter(a => a.id !== attached.id), attached] }))
-        let invoices = current.current.form.invoices
-        if (file.kind === 'INVOICE') {
-          const candidate = attached.extraction
-          const found = invoices.some(i => i.attachmentId === file.id)
-          if (found) invoices = invoices.map(i => i.attachmentId === file.id ? { ...i, invoiceCode: i.invoiceCode || candidate.invoiceCode || '', invoiceNumber: i.invoiceNumber || candidate.invoiceNumber || '', amount: i.amount || candidate.amount || '' } : i)
-          else invoices = [...invoices, { id: crypto.randomUUID(), attachmentId: file.id, invoiceCode: candidate.invoiceCode ?? '', invoiceNumber: candidate.invoiceNumber ?? '', amount: candidate.amount ?? '', buyerTaxNumber: '', confirmed: false }]
-        }
-        update({ ...current.current, form: { ...current.current.form, invoices }, files: current.current.files.filter(f => f.id !== file.id), dirty: true })
+        uploaded = [...uploaded.filter(a => a.id !== attached.id), attached]
+        setClaim(c => ({ ...c, attachments: uploaded }))
+        const remaining = current.current.files.filter(f => f.id !== file.id)
+        update({ ...applyEvidenceRecognition(current.current, attached, [...uploaded, ...remaining.map(f => ({ ...f, extraction: emptyRecognition(f.kind) }))], crypto.randomUUID()), files: remaining })
       }
       const validation = submit ? draftValidation(current.current.form) : [current.current.form.transactionAmount, current.current.form.paymentAmount, current.current.form.requestedAmount].some(value => cents(value) === null) ? '金额请填写非负数字，最多两位小数' : undefined
       if (validation) { setError(validation); setNotice('已成功上传的凭证保留在云端；未完成的表单内容保留在本机。请核对识别候选值并补充明细。'); return }
       setBusy(submit ? '正在保存并提交审核…' : '正在保存云端草稿…')
       const saved = await financeRequest<Claim>(identity, `/claims/${claim.id}`, 'PUT', { ...current.current.form, invoices: current.current.form.invoices.map(invoice => ({ ...invoice, amount: invoice.amount === '' ? null : invoice.amount })), items: current.current.form.items?.map(item => ({ ...item, quantity: item.quantity === '' ? null : item.quantity, unitPrice: item.unitPrice === '' ? null : item.unitPrice, amount: item.amount === '' ? null : item.amount })) })
-      setClaim(saved); update({ form: draftFromClaim(saved), files: [], dirty: false })
+      setClaim(saved); update({ form: draftFromClaim(saved), files: [], dirty: false, recognition: current.current.recognition })
       if (submit) {
         const sent = await financeRequest<Claim>(identity, `/claims/${claim.id}/submit`, 'POST', { expectedVersion: saved.version })
         setClaim(sent); current.current = { form: draftFromClaim(sent), files: [], dirty: false }; setLocal(current.current)
@@ -96,12 +97,45 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
       if (current.current.form.invoices.length + missing + files.length > 30) { setError('每单最多30张发票明细，请分单申请。'); return }
     }
     if ([...files, ...current.current.files.map(f => f.file)].reduce((sum, f) => sum + f.size, 0) > 100 * 1024 * 1024) { setError('本机待上传凭证不能超过100MB，请先联网保存。'); return }
-    update({ ...current.current, dirty: true, files: [...current.current.files, ...files.map(file => ({ id: crypto.randomUUID(), kind, file }))] }); setError('')
+    const next = { ...current.current, dirty: true, files: [...current.current.files, ...files.map(file => ({ id: crypto.randomUUID(), kind, file }))] }
+    update(reconcileEvidenceAmounts(next, [...claim.attachments, ...next.files.map(file => ({ ...file, extraction: emptyRecognition(file.kind) }))])); setError('')
   }
   const addInvoice = (attachmentId: string) => {
     if (current.current.form.invoices.length >= 30) { setError('每单最多30张发票明细，请分单申请。'); return }
+    if (current.current.form.invoices.some(invoice => invoice.attachmentId === attachmentId)) { setNotice('该原件已有发票明细，请在下方核对，不重复添加。'); return }
     const candidate = claim.attachments.find(a => a.id === attachmentId)?.extraction
-    change({ invoices: [...current.current.form.invoices, { id: crypto.randomUUID(), attachmentId, invoiceCode: candidate?.invoiceCode ?? '', invoiceNumber: candidate?.invoiceNumber ?? '', amount: candidate?.amount ?? '', buyerTaxNumber: '', confirmed: false }] })
+    const invoice = mergeInvoiceCandidates({ id: crypto.randomUUID(), attachmentId, invoiceCode: '', invoiceNumber: '', amount: '', buyerTaxNumber: '', confirmed: false }, candidate, [])
+    change({ invoices: [...current.current.form.invoices, invoice] }, [])
+  }
+  const retryRecognition = async (evidence: Evidence) => {
+    if (lock.current || !online || !claim.canEdit) return
+    lock.current = true; setBusy(`正在重新识别：${evidence.original_name}`); setError('')
+    try {
+      await retain(current.current)
+      const attached = await financeRequest<Evidence>(identity, `/claims/${claim.id}/attachments/${evidence.id}/recognize`, 'POST', {})
+      const attachments = [...claim.attachments.filter(item => item.id !== attached.id), attached]
+      setClaim(value => ({ ...value, attachments }))
+      update(applyEvidenceRecognition(current.current, attached, [...attachments, ...current.current.files.map(file => ({ ...file, extraction: emptyRecognition(file.kind) }))], crypto.randomUUID()))
+      setNotice('已重新读取云端原件。仅补入空白候选，人工填写和确认内容保留；请核对后保存草稿。')
+    } catch (error) { setError(`${errorMessage(error)} 原件及本机已填内容仍保留，无需重新选图。`) }
+    finally { lock.current = false; setBusy('') }
+  }
+  const useRecognition = (evidence: Evidence, field: string, value: string) => {
+    if (!validRecognitionValue(field, value)) return
+    if (evidence.kind === 'INVOICE' && ['invoiceNumber', 'invoiceCode', 'amount', 'buyerTaxNumber'].includes(field)) {
+      const key = field as InvoiceCandidateField; const invoices = current.current.form.invoices
+      const invoice = invoices.find(item => item.attachmentId === evidence.id)
+      if (!invoice) {
+        if (invoices.length >= 30) { setError('每单最多30张发票明细，请分单申请。'); return }
+        const created = mergeInvoiceCandidates({ id: crypto.randomUUID(), attachmentId: evidence.id, invoiceCode: '', invoiceNumber: '', amount: '', buyerTaxNumber: '', confirmed: false }, evidence.extraction, [])
+        change({ invoices: [...invoices, { ...created, [key]: value, confirmed: false }] }, [`invoice:${created.id}:${key}`]); return
+      }
+      if (invoice[key].trim() && invoice[key] !== value) { setNotice('当前字段已有值，未覆盖。请先对照原件，确需换用候选时清空对应字段再选择。'); return }
+      change({ invoices: invoices.map(item => item.id === invoice.id ? { ...item, [key]: value, confirmed: false } : item) }, [`invoice:${invoice.id}:${key}`])
+    } else if ((evidence.kind === 'TRANSACTION' && field === 'transactionAmount') || (evidence.kind === 'PAYMENT' && field === 'paymentAmount')) {
+      if (!window.confirm(`使用这份${evidenceLabels[evidence.kind]}中的 ${money(value)} 作为本单${field === 'transactionAmount' ? '交易记录' : '实际支付'}金额？多份凭证不会自动相加，请确认该数值确实是本单对应金额。`)) return
+      change({ [field]: value }, [field])
+    }
   }
   const discardLocal = async () => {
     if (!window.confirm('使用云端版本将清除此单本机未同步内容和待上传文件，确定吗？')) return
@@ -146,16 +180,18 @@ export function ClaimEditor({ initial, context, identity, onChange, onBack }: { 
       {(f.items ?? []).map((line, index) => <div className={s.invoice} key={line.id}><div className={s.heading}><strong>费用明细 {index + 1} · {money(line.amount)}</strong><button type="button" onClick={() => updateItems((f.items ?? []).filter(item => item.id !== line.id))}>移除明细</button></div><label>费用说明<input value={line.description} maxLength={500} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, description: e.target.value } : item))} /></label><div className={s.pair}><label>费用类别<select value={line.categoryId ?? ''} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, categoryId: e.target.value || null } : item))}><option value="">请选择类别</option>{context.categories.filter(category => category.hotel_id === claim.hotel_id && category.enabled).map(category => <option key={category.id} value={category.id}>{category.name} · {treatmentLabel(category.treatment)}</option>)}</select></label>{(['quantity', 'unitPrice'] as const).map(key => <label key={key}>{key === 'quantity' ? '数量' : '单价'}<input inputMode="decimal" value={line[key]} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, [key]: e.target.value } : item))} /></label>)}<label>归属部门ID（可选）<input value={line.departmentId ?? ''} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, departmentId: e.target.value || null } : item))} /></label></div><label>关联本单发票（可多选）<select multiple value={line.invoiceIds ?? []} onChange={e => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, invoiceIds: Array.from(e.target.selectedOptions).map(option => option.value) } : item))}>{f.invoices.map(invoice => <option key={invoice.id} value={invoice.id}>{invoice.invoiceNumber || '号码待补'} · {money(invoice.amount)}</option>)}</select></label></div>)}
       {(f.items ?? []).map((line, index) => <div key={`project:${line.id}`}><strong>明细 {index + 1} · {line.description || '未填事由'} 的项目</strong><ProjectPicker identity={identity} hotelId={claim.hotel_id} kind={line.projectKind} projectId={line.projectId} onChange={(projectKind, projectId) => updateItems((f.items ?? []).map(item => item.id === line.id ? { ...item, projectKind, projectId } : item))} /></div>)}
       <button type="button" onClick={() => updateItems([...(f.items ?? []), { id: crypto.randomUUID(), categoryId: f.categoryId, description: '', quantity: '1', unitPrice: (f.items ?? []).length ? '0.00' : f.requestedAmount, amount: '0.00', departmentId: null, allocationMonth: null, invoiceIds: [], projectKind: 'NONE', projectId: null }])}>＋ 增加费用明细</button>
-      <h3>上传凭证</h3><p className={s.muted}>三类原件分别保存，每份≤20MB。电子PDF可提取文字；照片需人工核对，不代表税务验真。</p>
+      <h3>上传凭证</h3><p className={s.muted}>添加后点击“上传并识别凭证”，结果仍需核对。三类原件分别保存，每份≤20MB；识别仅补空白字段，不代表税务验真。多份交易或付款凭证不自动相加。</p>
+      <RecognitionUploadAction pending={local.files.length} busy={!!busy} ready={ready} online={online} conflict={conflict} onUpload={() => void sync(false)} />
       {(Object.keys(evidenceLabels) as EvidenceKind[]).map(kind => <div className={s.uploadGroup} key={kind}>
         <div className={s.heading}><strong>{evidenceLabels[kind]} <span className={s.muted}>必填</span></strong><label className={s.uploadButton}>＋ 添加文件<input type="file" accept="application/pdf,application/ofd,.ofd,application/xml,text/xml,.xml,image/jpeg,image/png" multiple onChange={e => { addFiles(kind, e.target.files); e.target.value = '' }} /></label></div>
-        {claim.attachments.filter(a => a.kind === kind).map(a => <div className={s.fileLine} key={a.id}><span>{a.original_name} · 已上传云端</span>{kind === 'INVOICE' && claim.canEdit && <button type="button" onClick={() => addInvoice(a.id)}>添加发票明细</button>}{claim.canEdit && <button type="button" disabled={!online} onClick={() => void removeUploaded(a.id)}>移除附件</button>}</div>)}
+        {claim.attachments.filter(a => a.kind === kind).map(a => <div key={a.id}><div className={s.fileLine}><span>{a.original_name} · 已上传云端</span>{kind === 'INVOICE' && claim.canEdit && !f.invoices.some(invoice => invoice.attachmentId === a.id) && <button type="button" onClick={() => addInvoice(a.id)}>添加发票明细</button>}{claim.canEdit && <button type="button" disabled={!online} onClick={() => void removeUploaded(a.id)}>移除附件</button>}</div><RecognitionReview extraction={a.extraction} kind={kind} onRetry={claim.canEdit && /image\/(jpeg|png)/.test(a.media_type) ? () => void retryRecognition(a) : undefined} disabled={!online || !!busy} onUse={claim.canEdit ? (field, value) => useRecognition(a, field, value) : undefined} /></div>)}
         {local.files.filter(a => a.kind === kind).map(a => <div className={s.fileLine} key={a.id}><span>{a.file.name} · 待上传</span>{kind === 'INVOICE' && <button type="button" onClick={() => addInvoice(a.id)}>添加发票明细</button>}<button type="button" aria-label={`移除待上传${a.file.name}`} onClick={() => update({ dirty: true, files: current.current.files.filter(x => x.id !== a.id), form: { ...current.current.form, invoices: current.current.form.invoices.filter(i => i.attachmentId !== a.id) } })}>移除</button></div>)}
       </div>)}
+      {(['TRANSACTION', 'PAYMENT'] as const).map(kind => claim.attachments.filter(item => item.kind === kind).length + local.files.filter(item => item.kind === kind).length > 1 && <p key={kind} className={s.warning}>已选择多份{evidenceLabels[kind]}。系统不会求和或采用最后一份；请核对后明确选用候选或填写本单金额。人工填写的金额不会被识别结果覆盖。</p>)}
       <h3>发票明细 <span className={s.muted}>{f.invoices.length}张 · 合计 {money(invoiceTotal(f.invoices))}</span></h3>
       {f.invoices.length === 0 && <p className={s.muted}>添加发票原件后，点击“添加发票明细”。发票号码必须完整，不允许省略前导0。</p>}
       {f.invoices.map((invoice, index) => {
-        const edit = (patch: Partial<typeof invoice>) => change({ invoices: current.current.form.invoices.map(i => i.id === invoice.id ? { ...i, ...patch } : i) })
+        const edit = (patch: Partial<typeof invoice>) => change({ invoices: current.current.form.invoices.map(i => i.id === invoice.id ? { ...i, ...patch } : i) }, Object.keys(patch).map(field => `invoice:${invoice.id}:${field}`))
         return <div className={s.invoice} key={invoice.id}><div className={s.heading}><strong>发票 {index + 1}</strong><button type="button" onClick={() => change({ invoices: f.invoices.filter(i => i.id !== invoice.id) })}>移除明细</button></div>
           <small>关联原件：{invoiceSources.find(a => a.id === invoice.attachmentId)?.name ?? '原件暂不可见'}</small>
           <label>发票号码<input inputMode="numeric" value={invoice.invoiceNumber} maxLength={24} onChange={e => edit({ invoiceNumber: e.target.value, confirmed: false })} /></label>

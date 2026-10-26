@@ -12,10 +12,42 @@ readonly STAGE_ROOT='/tmp/hotel-ai-os-release'
 readonly BACKEND_RELEASE_ROOT='/opt/hotel-ai-os/releases'
 readonly WEB_RELEASE_ROOT='/srv/www/hotel-ai-os/releases'
 readonly WEB_TREE_FINGERPRINT_ALGORITHM='sha256(sorted-path-colon-size-colon-content-sha256-v1)'
+readonly OCR_RELEASE_COMMAND='/usr/local/sbin/hotel-ai-os-finance-ocr-release'
+readonly FULL_RELEASE_IN_PROGRESS_FILE='/var/lib/hotel-ai-os-deploy/FULL_RELEASE_IN_PROGRESS'
 
 candidate_cleanup_armed=false
 backend_candidate=''
 web_candidate=''
+ocr_required=false
+
+validate_prepared_ocr() {
+  local release_id="${1:?Release id is required}"
+  local source_commit="${2:?Source commit is required}"
+  local requirement
+  requirement="$(python3 -I - "${STAGE_ROOT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+stage = Path(sys.argv[1])
+manifest = stage / 'release-manifest.json'
+present = (stage / 'finance-ocr.zip').exists() or (stage / 'finance-ocr.identity.json').exists()
+if manifest.exists():
+    with manifest.open(encoding='utf-8') as stream:
+        present = 'financeOcr' in json.load(stream) or present
+print('REQUIRED' if present else 'NONE')
+PY
+  )" || return $?
+  if test "${requirement}" = 'REQUIRED'; then
+    require_regular_readable_file 'installed OCR release helper' "${OCR_RELEASE_COMMAND}" || return $?
+    test "$(stat --format '%u:%g' -- "${OCR_RELEASE_COMMAND}")" = '0:0' &&
+      test -z "$(find "${OCR_RELEASE_COMMAND}" -maxdepth 0 -perm /022 -print)" &&
+      test -x "${OCR_RELEASE_COMMAND}" || fail 'OCR helper must be root-owned and protected.'
+    "${OCR_RELEASE_COMMAND}" ASSERT_PREPARED "${release_id}" "${source_commit}" || return $?
+    ocr_required=true
+  elif test "${requirement}" != 'NONE'; then
+    fail 'Invalid OCR release requirement.'
+  fi
+}
 
 fail() {
   printf '%s\n' "$*" >&2
@@ -268,6 +300,7 @@ main() {
   validate_sha256 'Web tree SHA-256' "${expected_web_tree_sha}" || exit $?
 
   validate_trusted_stage_tree
+  validate_prepared_ocr "${release_id}" "${source_commit}"
   verify_sha256 'staged Core API JAR' "${STAGE_ROOT}/core-api.jar" "${expected_jar_sha}"
   verify_sha256 'staged migration runner' "${STAGE_ROOT}/run-migration-once.sh" "${expected_runner_sha}"
   verify_sha256 'staged Web index' "${STAGE_ROOT}/web/index.html" "${expected_index_sha}"
@@ -291,7 +324,13 @@ main() {
   fi
 
   if test -x "${FAST_RELEASE_COMMAND}"; then
-    "${FAST_RELEASE_COMMAND}" BEGIN_FULL "${source_commit}" "${release_id}"
+    if test -e "${FULL_RELEASE_IN_PROGRESS_FILE}" || test -L "${FULL_RELEASE_IN_PROGRESS_FILE}"; then
+      # The fixed FULL coordinator reserves the release before its long backup
+      # and isolated migration drill. RESUME verifies the exact existing pair.
+      "${FAST_RELEASE_COMMAND}" RESUME_FULL "${source_commit}" "${release_id}"
+    else
+      "${FAST_RELEASE_COMMAND}" BEGIN_FULL "${source_commit}" "${release_id}"
+    fi
   else
     # The fixed command is absent only during the first-ever baseline bootstrap.
     # An already provisioned host must configure the coordinator before another
@@ -333,6 +372,9 @@ main() {
   write_release_metadata \
     "${backend_release}" "${web_release}" "${source_commit}" "${release_id}" \
     "${expected_jar_sha}" "${expected_runner_sha}" "${expected_index_sha}" "${expected_web_tree_sha}"
+  if test "${ocr_required}" = true; then
+    install -o root -g root -m 0444 "${STAGE_ROOT}/finance-ocr.identity.json" "${backend_release}/.finance-ocr.json"
+  fi
 
   chmod 0444 "${backend_release}/core-api.jar"
   chmod 0555 "${backend_release}/run-migration-once.sh"

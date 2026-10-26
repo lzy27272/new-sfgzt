@@ -21,6 +21,7 @@ public class FinanceController {
     @GetMapping("/invoice-pool/{id}") public Map<String,Object> intakeDetail(@PathVariable UUID id) { return service.intakeDetail(id); }
     @PutMapping("/invoice-pool/{id}") public Map<String,Object> saveIntake(@PathVariable UUID id,@Valid @RequestBody FinanceModels.IntakeDraft input) { return service.saveIntake(id,input); }
     @PostMapping("/invoice-pool/{id}/original") public Map<String,Object> uploadIntake(@PathVariable UUID id,@RequestParam MultipartFile file) { return evidence.uploadIntake(id,file); }
+    @PostMapping("/invoice-pool/{id}/recognize") public Map<String,Object> recognizeIntake(@PathVariable UUID id) {return evidence.recognizeIntake(id);}
     @GetMapping("/invoice-pool/{id}/original") public ResponseEntity<Resource> downloadIntake(@PathVariable UUID id) {
         var file=evidence.downloadIntake(id);return ResponseEntity.ok().contentType(MediaType.parseMediaType(file.mediaType()))
             .header(HttpHeaders.CONTENT_DISPOSITION,ContentDisposition.attachment().filename(file.name(),StandardCharsets.UTF_8).build().toString())
@@ -43,6 +44,7 @@ public class FinanceController {
     @PostMapping("/claims/{id}/payment") public Map<String,Object> payment(@PathVariable UUID id,@Valid @RequestBody FinanceModels.Payment input) { return service.payment(id,input); }
     @PostMapping("/claims/{id}/payments/{paymentId}/receipt") public Map<String,Object> receipt(@PathVariable UUID id,@PathVariable UUID paymentId,@Valid @RequestBody FinanceModels.Receipt input) { return service.linkPaymentReceipt(id,paymentId,input); }
     @PostMapping("/claims/{id}/attachments/{attachmentId}") public Map<String,Object> upload(@PathVariable UUID id,@PathVariable UUID attachmentId,@RequestParam String kind,@RequestParam MultipartFile file) { return evidence.upload(id,attachmentId,kind,file); }
+    @PostMapping("/claims/{id}/attachments/{attachmentId}/recognize") public Map<String,Object> recognizeAttachment(@PathVariable UUID id,@PathVariable UUID attachmentId) {return evidence.recognizeAttachment(id,attachmentId);}
     @DeleteMapping("/claims/{id}/attachments/{attachmentId}") public Map<String,Object> remove(@PathVariable UUID id,@PathVariable UUID attachmentId,@RequestParam int expectedVersion) { return service.removeAttachment(id,attachmentId,expectedVersion); }
     @GetMapping("/claims/{id}/attachments/{attachmentId}") public ResponseEntity<Resource> download(@PathVariable UUID id,@PathVariable UUID attachmentId) {
         var file=evidence.download(id,attachmentId);

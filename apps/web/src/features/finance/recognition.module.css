@@ -1,0 +1,11 @@
+.review { min-width: 0; margin-block: .5rem 1rem; padding: .8rem; background: #f5f9fc; border: 1px solid #d8e4ed; border-radius: 12px; }
+.status { margin: 0 0 .35rem; color: #173d52; font-weight: 700; }
+.review > p, .review > small { overflow-wrap: anywhere; }
+.review > small { display: block; margin-block-start: .6rem; }
+.candidates { margin: .75rem 0; }
+.candidates > div { display: grid; grid-template-columns: minmax(6rem, .6fr) minmax(0, 1fr); gap: .6rem; padding-block: .4rem; }
+.candidates dt { color: #294b60; }
+.candidates dd { margin: 0; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.candidates dd span { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.candidates small { font-weight: 400; }
+@media (max-width: 540px) { .candidates > div { grid-template-columns: 1fr; gap: .2rem; } }

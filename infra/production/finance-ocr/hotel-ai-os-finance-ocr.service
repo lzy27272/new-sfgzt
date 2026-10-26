@@ -1,0 +1,44 @@
+[Unit]
+Description=Hotel AI OS private finance receipt OCR
+After=network.target
+
+[Service]
+Type=simple
+User=hotelai
+Group=hotelai
+WorkingDirectory=/opt/hotel-ai-os/finance-ocr/current/app
+EnvironmentFile=/etc/hotel-ai-os/finance-ocr.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=FINANCE_OCR_HOST=127.0.0.1
+Environment=FINANCE_OCR_PORT=8095
+Environment=FINANCE_OCR_TIMEOUT_SECONDS=12
+Environment=FINANCE_OCR_STARTUP_TIMEOUT_SECONDS=120
+ExecStart=/opt/hotel-ai-os/finance-ocr/current/venv/bin/python -m finance_ocr
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=150s
+TimeoutStopSec=20s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32
+CapabilityBoundingSet=
+AmbientCapabilities=
+TasksMax=128
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

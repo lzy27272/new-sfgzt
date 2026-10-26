@@ -22,12 +22,19 @@ export type FinanceContext = {
   today: string; assignments: { assignment_id: string; employee_name: string; hotel_id: string; hotel_name: string; company_name?: string; company_tax_number?: string; enabled: boolean }[]
   hotels: { id: string; name: string }[]; categories: Category[]
 }
-export type Evidence = { id: string; kind: EvidenceKind; original_name: string; media_type: string; size_bytes: number; sha256: string; extraction: { source: string; notice: string; invoiceNumber?: string; invoiceCode?: string; amount?: string } }
+export type EvidenceExtraction = {
+  source: string; notice?: string; status?: string; confirmationRequired?: boolean; sourceSha256?: string; provider?: string;
+  invoiceNumber?: string; invoiceCode?: string; amount?: string; buyerTaxNumber?: string; buyerName?: string; invoiceDate?: string;
+  transactionAmount?: string; paymentAmount?: string; warnings?: string[]; similarityWarning?: string;
+  candidates?: Record<string, string>; fieldCandidates?: Record<string, { value: string; confidence: number }[]>;
+}
+export type Evidence = { id: string; kind: EvidenceKind; original_name: string; media_type: string; size_bytes: number; sha256: string; extraction: EvidenceExtraction }
 export type Invoice = { id: string; attachmentId: string; invoiceCode: string; invoiceNumber: string; amount: string; buyerTaxNumber: string; confirmed: boolean }
 export type ClaimLine = { id: string; categoryId: string | null; description: string; quantity: string; unitPrice: string; amount: string; departmentId?: string | null; allocationMonth?: string | null; invoiceIds: string[]; projectKind?: string; projectId?: string | null; projectSnapshot?: Record<string, unknown>; categoryCode?: string | null }
 export type DraftForm = { expectedVersion: number; title: string; businessDate: string; categoryId: string | null; transactionAmount: string; paymentAmount: string; requestedAmount: string; differenceNote: string; invoices: Invoice[]; items?: ClaimLine[] }
 export type PendingEvidence = { id: string; kind: EvidenceKind; file: File }
-export type LocalDraft = { form: DraftForm; files: PendingEvidence[]; dirty: boolean }
+export type RecognitionDraft = { touched: string[]; amounts: Partial<Record<'transactionAmount' | 'paymentAmount', { attachmentId: string; value: string }>> }
+export type LocalDraft = { form: DraftForm; files: PendingEvidence[]; dirty: boolean; recognition?: RecognitionDraft }
 export type ReviewRecord = { stage: string; decision: string; note: string; created_at: string; reviewer_name: string; review_snapshot?: {
   claim: { title: string; requested_amount: string; approved_amount: string | null; category_name: string; workflow_version?: number }
   evidence: { id: string; kind: EvidenceKind; original_name: string; sha256: string }[]

@@ -6,6 +6,7 @@ import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.cos.*;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -29,9 +30,12 @@ public class FinanceEvidenceService {
     private final FinanceService service;
     private final AccessPolicy access;
     private final AttachmentMalwareScanner scanner;
-    public FinanceEvidenceService(@Value("${app.finance.attachments-root:var/finance-evidence}") String root,FinanceService service,AccessPolicy access,AttachmentMalwareScanner scanner) {
-        this.root=Path.of(root).toAbsolutePath().normalize();this.service=service;this.access=access;this.scanner=scanner;
+    private final FinanceLocalOcrClient localOcr;
+    @Autowired
+    public FinanceEvidenceService(@Value("${app.finance.attachments-root:var/finance-evidence}") String root,FinanceService service,AccessPolicy access,AttachmentMalwareScanner scanner,FinanceLocalOcrClient localOcr) {
+        this.root=Path.of(root).toAbsolutePath().normalize();this.service=service;this.access=access;this.scanner=scanner;this.localOcr=localOcr;
     }
+    public FinanceEvidenceService(String root,FinanceService service,AccessPolicy access,AttachmentMalwareScanner scanner){this(root,service,access,scanner,new FinanceLocalOcrClient("","",15000,FinanceV2Support.JSON));}
     public Map<String,Object> upload(UUID claim,UUID attachment,String kind,MultipartFile file) {
         service.authorizeUpload(claim);
         if(!Set.of("INVOICE","TRANSACTION","PAYMENT").contains(kind)) throw bad("凭证类型无效");
@@ -51,7 +55,7 @@ public class FinanceEvidenceService {
             try {scan=scanner.scan(destination);} catch(IllegalArgumentException e) {throw bad("凭证安全扫描未通过或扫描服务不可用，请联系管理员。原始文件未被修改，您可保留本机草稿后重试。");}
             if(!scanner.canDownload(scan)||"SANITIZED_IMAGE".equals(scan)) throw bad("财务凭证必须对原文件完成安全扫描，不能使用图片重编码替代扫描");
             String type=mediaType(bytes);
-            Map<String,Object> extraction=inspect(bytes,type);
+            Map<String,Object> extraction=inspectOriginal(bytes,type,kind,scan);
             var result=service.registerAttachment(claim,attachment,kind,name,type,bytes.length,hash,key,scan,extraction);
             stored=true;
             // Concurrent identical retries can return an already committed attachment; discard only this request's unused bytes.
@@ -81,9 +85,10 @@ public class FinanceEvidenceService {
         try {
             byte[] bytes;try(var input=file.getInputStream()){bytes=input.readNBytes((int)LIMIT+1);}
             if(bytes.length==0||bytes.length>LIMIT)throw bad("原件超过20MB");
-            String type=mediaType(bytes);var extraction=inspect(bytes,type);Files.createDirectories(destination.getParent());Files.write(destination,bytes,StandardOpenOption.CREATE_NEW);
+            Files.createDirectories(destination.getParent());Files.write(destination,bytes,StandardOpenOption.CREATE_NEW);
             String scan;try{scan=scanner.scan(destination);}catch(IllegalArgumentException e){throw bad("收票安全扫描不可用或未通过；请保留原件后重试");}
             if(!scanner.canDownload(scan)||"SANITIZED_IMAGE".equals(scan))throw bad("财务原件必须通过原文件扫描，不能以重编码结果代替");
+            String type=mediaType(bytes);var extraction=inspectOriginal(bytes,type,"INVOICE",scan);
             var original=Map.<String,Object>of("originalName",name,"mediaType",type,"sizeBytes",bytes.length,"sha256",FinanceService.hash(bytes),"objectKey",key,"scanStatus",scan,"extraction",extraction);
             var result=service.registerIntakeOriginal(id,original);stored=key.equals(result.get("objectKey"));return service.intakeDetail(id);
         }catch(ResponseStatusException e){throw e;}catch(IOException e){throw bad("原件无法安全读取，请重新选择有效文件");}
@@ -98,6 +103,41 @@ public class FinanceEvidenceService {
             byte[] bytes=Files.readAllBytes(path);if(!FinanceService.hash(bytes).equals(original.get("sha256")))throw new IOException();
             return new Download(original.get("originalName").toString(),original.get("mediaType").toString(),new ByteArrayResource(bytes));
         }catch(IOException e){throw new ResponseStatusException(HttpStatus.CONFLICT,"原件缺失或完整性校验失败，请联系管理员恢复备份");}
+    }
+    public Map<String,Object> recognizeAttachment(UUID claim,UUID attachment){
+        service.authorizeUpload(claim);var record=service.attachment(claim,attachment);
+        if(record.get("retired_at")!=null)throw bad("已移除的凭证不能重新识别");
+        String kind=record.get("kind").toString(),type=record.get("media_type").toString();
+        if(!Set.of("image/jpeg","image/png").contains(type))throw bad("本地图片识别仅支持已保存的JPG或PNG原件");
+        byte[] bytes=originalBytes(record.get("object_key").toString(),((Number)record.get("size_bytes")).longValue(),record.get("sha256").toString());
+        String scan=rescan(resolve(record.get("object_key").toString()));
+        try{return service.recordAttachmentRecognition(claim,attachment,inspectOriginal(bytes,type,kind,scan));}
+        catch(IOException invalid){throw bad("原件图像无法安全解码，请核对已保存的文件");}
+    }
+    public Map<String,Object> recognizeIntake(UUID id){
+        service.authorizeIntakeUpload(id);var original=service.intakeOriginal(id);String type=original.get("mediaType").toString();
+        if(!Set.of("image/jpeg","image/png").contains(type))throw bad("本地图片识别仅支持已保存的JPG或PNG原件");
+        byte[] bytes=originalBytes(original.get("objectKey").toString(),((Number)original.get("sizeBytes")).longValue(),original.get("sha256").toString());
+        String scan=rescan(resolve(original.get("objectKey").toString()));
+        try{return service.recordIntakeRecognition(id,inspectOriginal(bytes,type,"INVOICE",scan));}
+        catch(IOException invalid){throw bad("原件图像无法安全解码，请核对已保存的文件");}
+    }
+    private String rescan(Path path){
+        String scan;try{scan=scanner.scan(path);}catch(IllegalArgumentException invalid){throw bad("原件安全扫描未通过或扫描器不可用；原件仍保留，不执行识别");}
+        if(!scanner.canDownload(scan)||"SANITIZED_IMAGE".equals(scan))throw bad("原始凭证未通过安全扫描，不执行识别");return scan;
+    }
+    private byte[] originalBytes(String key,long size,String sha256){
+        Path path=resolve(key);
+        try{if(size>LIMIT||!Files.isRegularFile(path,LinkOption.NOFOLLOW_LINKS)||Files.size(path)!=size)throw new IOException();byte[] bytes=Files.readAllBytes(path);if(!FinanceService.hash(bytes).equals(sha256))throw new IOException();return bytes;}
+        catch(IOException invalid){throw new ResponseStatusException(HttpStatus.CONFLICT,"原始凭证缺失或完整性校验失败，请联系管理员恢复备份；不能替换原件后重试");}
+    }
+    private Map<String,Object> inspectOriginal(byte[] bytes,String type,String kind,String scan)throws IOException {
+        var extraction=new LinkedHashMap<String,Object>(inspect(bytes,type));
+        if(Set.of("image/jpeg","image/png").contains(type)){
+            String hash=FinanceService.hash(bytes);
+            extraction.putAll("CLEAN".equals(scan)?localOcr.recognize(bytes,type,kind,hash):FinanceLocalOcrClient.unavailable("FAILED",hash,"原件尚未完成真实安全扫描，未调用图片识别；请人工填写并联系管理员完成扫描配置。"));
+        }
+        return extraction;
     }
     private Path resolve(String key) {
         if(!key.matches("[a-f0-9-]{36}/[a-f0-9-]{36}/[a-f0-9-]{36}\\.original")) throw bad("凭证索引无效");

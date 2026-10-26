@@ -277,25 +277,145 @@ jobs:
           - Integrity: **verified**
           "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
-  full-release-required:
-    name: Report complete release gate requirement
+  deploy-full-release:
+    name: Approve and deploy the complete Pilot release
     needs: resolve-release
-    if: needs.resolve-release.outputs.lane != 'WEB_ONLY'
+    if: needs.resolve-release.outputs.lane == 'FULL'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: pilot
     steps:
-      - name: FULL lane requires the existing complete release gate
+      - name: Enforce the protected Pilot environment
         shell: bash
+        env:
+          PILOT_ENVIRONMENT_PROTECTED: ${{ vars.PILOT_ENVIRONMENT_PROTECTED }}
         run: |
+          set -Eeuo pipefail
+          test "$PILOT_ENVIRONMENT_PROTECTED" = true || { echo 'Required Pilot reviewers are not configured.' >&2; exit 2; }
+
+      - name: Check out the pinned trusted FULL policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-release.outputs.policy_commit }}
+          fetch-depth: 0
+          path: trusted-policy
+
+      - name: Require the approved FULL policy to remain current main
+        shell: bash
+        env:
+          POLICY_COMMIT: ${{ needs.resolve-release.outputs.policy_commit }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C trusted-policy rev-parse HEAD)" = "$POLICY_COMMIT"
+          git -C trusted-policy fetch --no-tags origin main
+          test "$(git -C trusted-policy rev-parse origin/main)" = "$POLICY_COMMIT" || { echo 'Policy changed after approval; dispatch again.' >&2; exit 2; }
+
+      - name: Download and verify the same immutable FULL CI artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ needs.resolve-release.outputs.ci_run_id }}
+          ARTIFACT_ID: ${{ needs.resolve-release.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.resolve-release.outputs.artifact_digest }}
+          ARTIFACT_NAME: ${{ needs.resolve-release.outputs.artifact_name }}
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          metadata="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" --jq '[.id,.name,.expired,.digest,.workflow_run.id] | @tsv')"
+          IFS=$'\t' read -r current_id current_name expired digest run <<< "$metadata"
+          test "$current_id" = "$ARTIFACT_ID" && test "$current_name" = "$ARTIFACT_NAME" && test "$expired" = false && test "$digest" = "$ARTIFACT_DIGEST" && test "$run" = "$CI_RUN_ID"
+          gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/approved-full.zip"
+          classifier_sha="$(sha256sum trusted-policy/tools/deployment/Get-PilotDeploymentPlan.ps1 | cut -d' ' -f1)"
+          python3 -I trusted-policy/infra/production/bootstrap/full-ci-release.py verify --archive "$RUNNER_TEMP/approved-full.zip" --digest "${ARTIFACT_DIGEST#sha256:}" --commit "$SOURCE_COMMIT" --classifier "$classifier_sha" > "$RUNNER_TEMP/approved-full-manifest.json"
+
+      - name: Configure the dedicated pinned FULL SSH identity
+        shell: bash
+        env:
+          PILOT_SSH_HOST: ${{ secrets.PILOT_SSH_HOST }}
+          PILOT_SSH_USER: ${{ secrets.PILOT_SSH_USER }}
+          PILOT_SSH_PRIVATE_KEY: ${{ secrets.PILOT_SSH_PRIVATE_KEY }}
+          PILOT_SSH_KNOWN_HOSTS: ${{ secrets.PILOT_SSH_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$PILOT_SSH_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
+          test "$PILOT_SSH_USER" = hotel-ai-deploy
+          test -n "$PILOT_SSH_PRIVATE_KEY" && test -n "$PILOT_SSH_KNOWN_HOSTS"
+          install -m 0600 /dev/null "$RUNNER_TEMP/pilot_full_key"
+          install -m 0600 /dev/null "$RUNNER_TEMP/pilot_full_known_hosts"
+          printf '%s\n' "$PILOT_SSH_PRIVATE_KEY" | tr -d '\r' > "$RUNNER_TEMP/pilot_full_key"
+          printf '%s\n' "$PILOT_SSH_KNOWN_HOSTS" | tr -d '\r' > "$RUNNER_TEMP/pilot_full_known_hosts"
+
+      - name: Verify the preinstalled FULL policy and unchanged cloud baseline
+        id: baseline
+        shell: bash
+        env:
+          PILOT_SSH_HOST: ${{ secrets.PILOT_SSH_HOST }}
+          PILOT_SSH_USER: ${{ secrets.PILOT_SSH_USER }}
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+        run: |
+          set -Eeuo pipefail
+          options=(-i "$RUNNER_TEMP/pilot_full_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/pilot_full_known_hosts" -o ConnectTimeout=15)
+          target="$PILOT_SSH_USER@$PILOT_SSH_HOST"
+          full='/usr/local/sbin/hotel-ai-os-install-full-ci-release'
+          installer='/usr/local/sbin/hotel-ai-os-install-fast-lane-release'
+          base='trusted-policy/infra/production/bootstrap'
+          expected="FULL_CI_POLICY version=1 sha256=$(sha256sum "$base/63-install-full-ci-release.sh" | cut -d' ' -f1) verifier=$(sha256sum "$base/full-ci-release.py" | cut -d' ' -f1) flyway=$(sha256sum "$base/FullCiFlyway.java" | cut -d' ' -f1) installer=$(sha256sum "$base/60-install-release.sh" | cut -d' ' -f1) audit=$(sha256sum "$base/100-final-audit.sh" | cut -d' ' -f1)"
+          actual="$(ssh "${options[@]}" "$target" "sudo '$full' POLICY")"
+          test "$(printf '%s' "$actual" | tr -d '\r\n')" = "$expected" || { echo 'Fixed root FULL policy differs; reviewed root bootstrap required.' >&2; exit 2; }
+          expected_fast="FAST_LANE_POLICY version=1 sha256=$(sha256sum "$base/61-install-fast-lane-release.sh" | cut -d' ' -f1)"
+          test "$(ssh "${options[@]}" "$target" "sudo '$installer' POLICY" | tr -d '\r\n')" = "$expected_fast"
+          baseline="$(ssh "${options[@]}" "$target" "sudo '$installer' STATUS" | tr -d '\r\n')"
+          [[ "$baseline" =~ ^[a-f0-9]{40}$ ]]
+          git -C trusted-policy cat-file -e "$baseline^{commit}"
+          git -C trusted-policy merge-base --is-ancestor "$baseline" "$SOURCE_COMMIT" || { echo 'Cloud baseline is not an ancestor; do not overwrite a different release.' >&2; exit 2; }
+          test "$baseline" != "$SOURCE_COMMIT" || { echo 'Requested FULL source is already deployed; no reinstall or migration was attempted.' >&2; exit 2; }
+          echo "deployed_commit=$baseline" >> "$GITHUB_OUTPUT"
+
+      - name: Execute the fixed complete backup, restore, migration and final audit gate
+        shell: bash
+        env:
+          PILOT_SSH_HOST: ${{ secrets.PILOT_SSH_HOST }}
+          PILOT_SSH_USER: ${{ secrets.PILOT_SSH_USER }}
+          POLICY_COMMIT: ${{ needs.resolve-release.outputs.policy_commit }}
+          SOURCE_COMMIT: ${{ needs.resolve-release.outputs.commit_sha }}
+          EXPECTED_SOURCE_COMMIT: ${{ steps.baseline.outputs.deployed_commit }}
+          RELEASE_ID: ${{ needs.resolve-release.outputs.release_id }}
+          ARTIFACT_DIGEST: ${{ needs.resolve-release.outputs.artifact_digest }}
+          CI_RUN_ID: ${{ needs.resolve-release.outputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.resolve-release.outputs.ci_run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ && "$RELEASE_ID" != *'..'* ]]
+          [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ && "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ && "$ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ && "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          git -C trusted-policy fetch --no-tags origin main
+          test "$(git -C trusted-policy rev-parse origin/main)" = "$POLICY_COMMIT"
+          classifier_sha="$(sha256sum trusted-policy/tools/deployment/Get-PilotDeploymentPlan.ps1 | cut -d' ' -f1)"
+          options=(-i "$RUNNER_TEMP/pilot_full_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/pilot_full_known_hosts" -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+          target="$PILOT_SSH_USER@$PILOT_SSH_HOST"
+          remote_stage="/tmp/hotel-ai-os-full-ci-incoming/$RELEASE_ID"
+          full='/usr/local/sbin/hotel-ai-os-install-full-ci-release'
+          stage_created=false
+          cleanup_remote_stage() {
+            if test "$stage_created" = true; then
+              ssh "${options[@]}" "$target" "if test -d '$remote_stage' && test ! -L '$remote_stage'; then rm -f -- '$remote_stage/release-artifact.zip'; rmdir -- '$remote_stage'; fi" || echo '::warning::Exact incoming cleanup requires administrator review.' >&2
+            fi
+          }
+          trap cleanup_remote_stage EXIT
+          ssh "${options[@]}" "$target" "test ! -e '$remote_stage' && test ! -L '$remote_stage' && install -d -m 0700 '$remote_stage'"
+          stage_created=true
+          scp "${options[@]}" "$RUNNER_TEMP/approved-full.zip" "$target:$remote_stage/release-artifact.zip"
+          ssh "${options[@]}" "$target" "chmod 0600 '$remote_stage/release-artifact.zip' && sudo '$full' DEPLOY '$RELEASE_ID' '$remote_stage' '$EXPECTED_SOURCE_COMMIT' '$SOURCE_COMMIT' '${ARTIFACT_DIGEST#sha256:}' '$classifier_sha' '$CI_RUN_ID' '$CI_RUN_ATTEMPT'"
           {
-            echo '### Fast deployment deliberately blocked'
+            echo '### Complete Pilot release verified'
             echo
-            echo '- Commit: `${{ needs.resolve-release.outputs.commit_sha }}`'
+            echo "- Commit: \`$SOURCE_COMMIT\`"
             echo '- Lane: `FULL`'
-            echo '- Required next step: approved backup and restore verification, migration validation, full release installation, smoke tests, and final audit.'
-            echo '- No cloud credential was opened and no server change was made.'
+            echo "- Release ID: \`$RELEASE_ID\`"
+            echo '- Protected environment approval, immutable CI artifact, private root copy, database/original restore, isolated migration, OCR probe, health and final audit gates all completed.'
           } >> "$GITHUB_STEP_SUMMARY"
-          echo 'FULL lane cannot be deployed by the fast-lane workflow.' >&2
-          exit 3
 
   deploy-fast-lane:
     name: Approve and deploy fast lane to Pilot
