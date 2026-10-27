@@ -158,7 +158,7 @@ public class FinanceEvidenceService {
             try(var document=Loader.loadPDF(bytes)) {
                 if(document.isEncrypted()||document.getNumberOfPages()<1||document.getNumberOfPages()>30) throw bad("PDF须未加密且不超过30页");
                 validatePdf(document.getDocumentCatalog().getCOSObject());
-                var stripper=new PDFTextStripper();stripper.setEndPage(30);
+                var stripper=new PDFTextStripper();stripper.setEndPage(30);stripper.setSortByPosition(true);
                 String text=stripper.getText(document);if(text.length()>100000) throw bad("PDF文字过多，请拆分后上传");
                 result.put("source",text.isBlank()?"MANUAL_REQUIRED":"PDF_TEXT");
                 result.putAll(extract(text));result.put("pages",document.getNumberOfPages());
