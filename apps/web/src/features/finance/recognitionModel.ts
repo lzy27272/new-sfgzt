@@ -74,8 +74,8 @@ export function reconcileEvidenceAmounts(draft: LocalDraft, evidence: Pick<Evide
       continue
     }
     const document = documents[0]; const value = automaticCandidate(document.extraction, field)
-    // Existing nonzero values are user/cloud facts. Only an untouched default zero or our own candidate is replaceable.
-    const replaceable = !form[field].trim() || /^0+(?:\.0{1,2})?$/.test(form[field]) || applied?.value === form[field]
+    // A saved zero is also a cloud fact. Only a new draft's default zero or our own candidate is replaceable.
+    const replaceable = !form[field].trim() || (form.expectedVersion === 0 && /^0+(?:\.0{1,2})?$/.test(form[field])) || applied?.value === form[field]
     if (value && replaceable) { form[field] = value; amounts[field] = { attachmentId: document.id, value } }
   }
   return { ...draft, form, recognition: { ...recognition, amounts } }

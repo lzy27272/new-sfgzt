@@ -93,6 +93,26 @@ class FinanceLocalOcrIntegrationTest {
         var unrelated=upload(claim(),UUID.randomUUID(),"INVOICE",image(60));assertThat(extraction(unrelated)).doesNotContainKey("similarityWarning");
         var similar=upload(claim(),UUID.randomUUID(),"INVOICE",image(70));assertThat(extraction(similar)).containsKey("similarityWarning");assertThat(extraction(similar).get("similarityWarning").toString()).doesNotContain(first.toString(),attachment.toString(),previousOwner.toString());
     }
+    @Test void failedRetryKeepsPriorSimilarityWarningWithoutReusingSuccessfulFieldsOrOtherOriginals()throws Exception{
+        upload(claim(),UUID.randomUUID(),"INVOICE",image(71));UUID claim=claim(),attachment=UUID.randomUUID();byte[] original=image(72);
+        var similar=upload(claim,attachment,"INVOICE",original);assertThat(extraction(similar)).containsEntry("status","CANDIDATES").containsKey("similarityWarning");
+        String initial=admin.queryForObject("select extraction::text from finance_attachment where id=?",String.class,attachment);int count=originalCount();mode="DOWN";
+        var failed=evidence.recognizeAttachment(claim,attachment);assertThat(extraction(failed)).containsEntry("status","UNAVAILABLE").containsEntry("source","MANUAL_REQUIRED").containsKey("similarityWarning").doesNotContainKeys("invoiceNumber","imageHash");
+        assertThat(admin.queryForObject("select extraction->>'similarityWarning' from finance_local_ocr_result where attachment_id=? order by created_at desc,id desc limit 1",String.class,attachment)).isNotBlank();
+        @SuppressWarnings("unchecked")var attachments=(List<Map<String,Object>>)call(()->finance.detail(claim)).get("attachments");assertThat(extraction(attachments.getFirst())).containsEntry("status","UNAVAILABLE").containsKey("similarityWarning");
+        assertThat(admin.queryForObject("select extraction::text from finance_attachment where id=?",String.class,attachment)).isEqualTo(initial);assertThat(originalCount()).isEqualTo(count);
+        String key=admin.queryForObject("select object_key from finance_attachment where id=?",String.class,attachment);assertThat(Files.readAllBytes(files.resolve(key))).isEqualTo(original);assertThat(admin.queryForObject("select version from finance_claim where id=?",Integer.class,claim)).isZero();
+        var unrelated=upload(claim(),UUID.randomUUID(),"INVOICE",image(73));assertThat(extraction(unrelated)).containsEntry("status","UNAVAILABLE").doesNotContainKey("similarityWarning");
+        seedTenant();mode="DOWN";var differentTenant=upload(claim(),UUID.randomUUID(),"INVOICE",original);assertThat(extraction(differentTenant)).doesNotContainKey("similarityWarning");
+    }
+    @Test void intakeOverlayRetainsEarlierWarningForItsExactOriginalAfterLegacyFailedObservation()throws Exception{
+        upload(claim(),UUID.randomUUID(),"INVOICE",image(74));UUID intake=UUID.randomUUID();call(()->finance.createIntake(new FinanceModels.Create(intake,assignment)));byte[] bytes=image(75);
+        evidence.uploadIntake(intake,new MockMultipartFile("file","原件.jpg","image/jpeg",bytes));assertThat(extraction(call(()->finance.intakeDetail(intake)))).containsKey("similarityWarning");
+        String hash=FinanceService.hash(bytes);var failure=FinanceLocalOcrClient.unavailable("UNAVAILABLE",hash,"识别暂不可用，原件保留");
+        admin.update("insert into finance_local_ocr_result(id,tenant_id,intake_id,source_sha256,kind,extraction,created_by,created_at) values(?,?,?,?,'INVOICE',?::jsonb,?,now()+interval '1 second')",UUID.randomUUID(),tenant,intake,hash,FinanceV2Support.json(failure),owner);
+        var detail=call(()->finance.intakeDetail(intake));assertThat(extraction(detail)).containsEntry("status","UNAVAILABLE").containsKey("similarityWarning").doesNotContainKeys("invoiceNumber","imageHash");assertThat(detail).containsEntry("version",1);
+        mode="DOWN";UUID unrelated=UUID.randomUUID();call(()->finance.createIntake(new FinanceModels.Create(unrelated,assignment)));evidence.uploadIntake(unrelated,new MockMultipartFile("file","另一原件.jpg","image/jpeg",image(76)));assertThat(extraction(call(()->finance.intakeDetail(unrelated)))).doesNotContainKey("similarityWarning");
+    }
     @Test void retryRejectsOtherOwnerSubmittedClaimRemovedOriginalAndTamperedFileBeforeCallingWorker()throws Exception{
         UUID claim=claim(),attachment=UUID.randomUUID();upload(claim,attachment,"INVOICE",image(80));int before=posts.get();
         as(other,"finance.submit");assertThatThrownBy(()->evidence.recognizeAttachment(claim,attachment)).isInstanceOf(RuntimeException.class);assertThat(posts.get()).isEqualTo(before);

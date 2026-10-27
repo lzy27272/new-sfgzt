@@ -23,6 +23,16 @@ class FinanceReceiptFieldsTest {
         var low=FinanceReceiptFields.extract("INVOICE",List.of(new FinanceReceiptFields.Block("发票号码00001234",new BigDecimal("0.5"))),List.of());assertThat(low).doesNotContainKey("invoiceNumber");
         assertThat(extract("INVOICE","发票号码00001234","发票号码00001234")).containsEntry("invoiceNumber","00001234");
     }
+    @Test void originalPriceAndUnpaidPrefixesAreNotActualPaymentOrTransactionLabels(){
+        for(String label:List.of("优惠前支付金额","未支付金额","待付款金额","原付款金额","未实际支付金额","优惠前实付金额")) {
+            assertThat(extract("PAYMENT",label+"100.00")).doesNotContainKey("paymentAmount");
+            assertThat(extract("PAYMENT",label+"：","100.00")).doesNotContainKey("paymentAmount");
+        }
+        assertThat(extract("TRANSACTION","优惠前交易金额100.00","原交易总金额110.00")).doesNotContainKey("transactionAmount");
+        assertThat(extract("PAYMENT","优惠前支付金额100.00；实付金额90.00")).containsEntry("paymentAmount","90.00");
+        assertThat(extract("PAYMENT","支付金额：","90.00")).containsEntry("paymentAmount","90.00");
+        assertThat(extract("TRANSACTION","交易金额：90.00")).containsEntry("transactionAmount","90.00");
+    }
     @Test void precisionInvalidDatesAndUnlabelledNumbersAreNotGuessed(){
         assertThat(extract("INVOICE","00001234","开票日期2026-02-30","价税合计￥100.001","发票号码123456789","纳税人识别号91520100123456789X")).doesNotContainKeys("invoiceNumber","invoiceDate","amount","buyerTaxNumber");
         assertThat(extract("PAYMENT","实付金额123456789012345.00")).doesNotContainKey("paymentAmount");

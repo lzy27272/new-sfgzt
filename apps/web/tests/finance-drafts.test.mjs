@@ -61,11 +61,41 @@ test('rapid updates serialize so the final input survives; unchanged files are r
   assert.equal((await loadFinanceDraft(scope, 'c1')).form.title, '最新内容4')
   assert.equal(tables.records.size, 2)
 }))
-test('quota failures are explicit and leave previous encrypted draft intact', async () => withDb(async ({ controls }) => {
+
+test('saving removes only this draft files no longer referenced and reuses retained ciphertext', async () => withDb(async ({ tables }) => {
+  const scope = 'cleanup-scope'; const original = draft()
+  const extra = { ...original.files[0], id: 'file2' }
+  await saveFinanceDraft(scope, 'c1', { ...original, files: [...original.files, extra] })
+  await saveFinanceDraft(scope, 'c10', original)
+  await saveFinanceDraft('cleanup-other-account', 'c1', original)
+  await savePrivateFinanceForm(scope, 'travel:c1', { baseVersion: '0', values: { destination: '保留的差旅资料' } })
+  const retained = tables.records.get(`${scope}/c1/file/file2`)
+  await saveFinanceDraft(scope, 'c1', { ...original, files: [extra] })
+  assert.equal(tables.records.has(`${scope}/c1/file/file1`), false)
+  assert.equal(tables.records.get(`${scope}/c1/file/file2`), retained)
+  assert.deepEqual((await loadFinanceDraft(scope, 'c1')).files.map(file => file.id), ['file2'])
+  assert.equal(await (await loadFinanceDraft(scope, 'c10')).files[0].file.text(), 'original-invoice-bytes')
+  assert.equal((await loadFinanceDraft('cleanup-other-account', 'c1')).files.length, 1)
+  assert.equal((await loadPrivateFinanceForm(scope, 'travel:c1')).values.destination, '保留的差旅资料')
+}))
+
+test('repeated photo replacement or completed uploads do not accumulate abandoned encrypted files', async () => withDb(async ({ tables }) => {
+  const scope = 'upload-cleanup'; const original = draft()
+  for (let index = 0; index < 4; index++) {
+    await saveFinanceDraft(scope, 'c1', { ...original, files: [{ ...original.files[0], id: `photo-${index}` }] })
+    assert.equal(tables.records.size, 2)
+  }
+  await saveFinanceDraft(scope, 'c1', { ...original, files: [] })
+  assert.equal(tables.records.size, 1)
+  assert.equal((await loadFinanceDraft(scope, 'c1')).files.length, 0)
+}))
+test('quota failures are explicit and leave previous encrypted draft intact', async () => withDb(async ({ controls, tables }) => {
   await saveFinanceDraft('quota', 'c1', draft()); controls.failWrites = true
-  await assert.rejects(saveFinanceDraft('quota', 'c1', { ...draft(), form: { ...draft().form, title: '未保存变更' } }), /Quota/)
+  await assert.rejects(saveFinanceDraft('quota', 'c1', { ...draft(), files: [], form: { ...draft().form, title: '未保存变更' } }), /Quota/)
   controls.failWrites = false
   assert.equal((await loadFinanceDraft('quota', 'c1')).form.title, '私密报销内容')
+  assert.equal(await (await loadFinanceDraft('quota', 'c1')).files[0].file.text(), 'original-invoice-bytes')
+  assert.equal(tables.records.size, 2)
 }))
 test('tampered ciphertext or missing encrypted files is never treated as an empty draft', async () => withDb(async ({ tables }) => {
   await saveFinanceDraft('integrity', 'c1', draft())
@@ -77,7 +107,8 @@ test('tampered ciphertext or missing encrypted files is never treated as an empt
 test('unread changes by a different tab cannot be overwritten', async () => withDb(async ({ tables }) => {
   await saveFinanceDraft('tabs', 'c1', draft())
   const record = tables.records.get('tabs/c1'); record.writer = 'another-page'; record.etag = 'new-revision'
-  await assert.rejects(saveFinanceDraft('tabs', 'c1', draft()), /另一页面/)
+  await assert.rejects(saveFinanceDraft('tabs', 'c1', { ...draft(), files: [] }), /另一页面/)
+  assert.ok(tables.records.has('tabs/c1/file/file1'), 'unread changes must abort before pruning another tab files')
 }))
 
 test('travel subform survives page destruction encrypted with its server version and assignment boundary', async () => withDb(async ({ tables }) => {

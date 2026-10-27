@@ -55,6 +55,65 @@ class FinanceIntegrationTest {
         as(owner,true,"finance.configure");service.configure(hotel,config(-1,manager,finance,leader));
         service.category(hotel,category,new FinanceModels.Category("客房费用","EXPENSE","客房,补贴","管理费用",true,-1));
     }
+    @Test void financeApprovedIncreaseRechecksBlockBudgetAndRollsBackWholeReview() {
+        UUID policy=approvalBudget(category,"APPROVAL_A","100",0);
+        UUID claim=financeBudgetClaim100();int events=jdbc.queryForObject("select count(*) from fc_event where source_id=?",Integer.class,claim);
+        as(finance,false,"finance.review");
+        assertThatThrownBy(()->service.review(claim,budgetDecision(category,"120"))).hasMessageContaining("预算超额");
+        assertThat(jdbc.queryForMap("select status,version,approved_amount,category_id from finance_claim where id=?",claim)).containsEntry("status","FINANCE_REVIEW").containsEntry("version",4).containsEntry("approved_amount",null).containsEntry("category_id",category);
+        assertThat(jdbc.queryForObject("select amount from fc_budget_usage where source_id=? and policy_id=?",BigDecimal.class,claim,policy)).isEqualByComparingTo("100");
+        assertThat(jdbc.queryForObject("select state from fc_budget_usage where source_id=? and policy_id=?",String.class,claim,policy)).isEqualTo("INFLIGHT");
+        assertThat(jdbc.queryForObject("select count(*) from finance_review where claim_id=? and stage='FINANCE_REVIEW'",Integer.class,claim)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from fc_event where source_id=?",Integer.class,claim)).isEqualTo(events);
+    }
+    @Test void financeReclassificationRechecksDestinationBudgetAndRestoresOriginalOnBlock() {
+        UUID policyA=approvalBudget(category,"APPROVAL_A","200",0),otherCategory=UUID.randomUUID();
+        UUID policyB=approvalBudget(otherCategory,"APPROVAL_B","80",-1);UUID claim=financeBudgetClaim100();
+        as(finance,false,"finance.review");assertThatThrownBy(()->service.review(claim,budgetDecision(otherCategory,"90"))).hasMessageContaining("预算超额");
+        assertThat(jdbc.queryForMap("select status,approved_amount,category_id from finance_claim where id=?",claim)).containsEntry("status","FINANCE_REVIEW").containsEntry("approved_amount",null).containsEntry("category_id",category);
+        assertThat(jdbc.queryForObject("select amount from fc_budget_usage where source_id=? and policy_id=?",BigDecimal.class,claim,policyA)).isEqualByComparingTo("100");
+        assertThat(jdbc.queryForObject("select state from fc_budget_usage where source_id=? and policy_id=?",String.class,claim,policyA)).isEqualTo("INFLIGHT");
+        assertThat(jdbc.queryForObject("select count(*) from fc_budget_usage where source_id=? and policy_id=?",Integer.class,claim,policyB)).isZero();
+    }
+    @Test void approvedReclassificationMovesBudgetOnceAndDoesNotReviveOldCategoryAtFinalApproval() {
+        UUID policyA=approvalBudget(category,"APPROVAL_A","100",0),otherCategory=UUID.randomUUID();
+        UUID policyB=approvalBudget(otherCategory,"APPROVAL_B","200",-1);UUID claim=financeBudgetClaim100();
+        as(finance,false,"finance.review");var decision=budgetDecision(otherCategory,"90");service.review(claim,decision);service.review(claim,decision);
+        assertThat(jdbc.queryForObject("select state from fc_budget_usage where source_id=? and policy_id=?",String.class,claim,policyA)).isEqualTo("RELEASED");
+        assertThat(jdbc.queryForObject("select amount from fc_budget_usage where source_id=? and policy_id=?",BigDecimal.class,claim,policyB)).isEqualByComparingTo("90");
+        assertThat(jdbc.queryForObject("select count(*) from fc_event where source_id=? and event='BUDGET_APPROVAL_REVALIDATED'",Integer.class,claim)).isOne();
+        finishBudgetClaim(claim);
+        assertThat(jdbc.queryForObject("select state from fc_budget_usage where source_id=? and policy_id=?",String.class,claim,policyA)).isEqualTo("RELEASED");
+        assertThat(jdbc.queryForObject("select state from fc_budget_usage where source_id=? and policy_id=?",String.class,claim,policyB)).isEqualTo("ACTUAL");
+        assertThat(jdbc.queryForObject("select sum(amount) from fc_budget_usage where source_id=? and state<>'RELEASED'",BigDecimal.class,claim)).isEqualByComparingTo("90");
+        assertThat(jdbc.queryForObject("select amount from finance_expense_entry where claim_id=?",BigDecimal.class,claim)).isEqualByComparingTo("90");
+        assertThat(jdbc.queryForObject("select count(*) from finance_review where claim_id=? and stage='FINANCE_REVIEW'",Integer.class,claim)).isOne();
+    }
+    @Test void approvedIncreaseWithCapacityUsesFinalAmountAndKeepsOriginalRequest() {
+        UUID policy=approvalBudget(category,"APPROVAL_A","200",0);UUID claim=financeBudgetClaim100();
+        as(finance,false,"finance.review");service.review(claim,budgetDecision(category,"120"));finishBudgetClaim(claim);
+        assertThat(jdbc.queryForObject("select amount from fc_budget_usage where source_id=? and policy_id=?",BigDecimal.class,claim,policy)).isEqualByComparingTo("120");
+        assertThat(jdbc.queryForObject("select state from fc_budget_usage where source_id=? and policy_id=?",String.class,claim,policy)).isEqualTo("ACTUAL");
+        assertThat(jdbc.queryForObject("select requested_amount from finance_claim where id=?",BigDecimal.class,claim)).isEqualByComparingTo("100");
+        assertThat(jdbc.queryForObject("select approved_amount from finance_claim where id=?",BigDecimal.class,claim)).isEqualByComparingTo("120");
+        assertThat(jdbc.queryForObject("select amount from finance_expense_entry where claim_id=?",BigDecimal.class,claim)).isEqualByComparingTo("120");
+    }
+    private UUID approvalBudget(UUID expenseCategory,String code,String limit,int categoryVersion) {
+        as(owner,true,"finance.configure");service.category(hotel,expenseCategory,new FinanceModels.Category(code,"EXPENSE","","管理费用",true,categoryVersion,code));
+        UUID policy=UUID.randomUUID();controls.savePolicy(new FinanceControlModels.Policy(policy,hotel,"BUDGET","FINAL-"+code,"核准金额分类预算",today.withDayOfMonth(1),null,Map.of("month",YearMonth.from(today).toString(),"amount",limit,"control","BLOCK","categoryId",expenseCategory,"categoryCode",code,"budgetKind","EXPENSE","projectKind","ALL")));
+        as(director,true,"finance.configure");controls.publishPolicy(policy,new FinanceControlModels.Version(0,"独立确认真实费用类别与限额"),false);return policy;
+    }
+    private UUID financeBudgetClaim100() {
+        UUID claim=draft(false);as(owner,false,"finance.submit");var invoice=jdbc.queryForMap("select id,attachment_id from finance_invoice where claim_id=?",claim);
+        var command=new FinanceModels.Invoice((UUID)invoice.get("id"),(UUID)invoice.get("attachment_id"),"",invoiceNumber,new BigDecimal("100"),"91520100123456789X",true);
+        service.save(claim,new FinanceModels.Draft(1,"核准预算真实报销",today,category,new BigDecimal("100"),new BigDecimal("100"),new BigDecimal("100"),"",List.of(command)));
+        service.submit(claim,2);as(manager,false,"finance.review");service.review(claim,new FinanceModels.Review(UUID.randomUUID(),3,"APPROVE","核对原申请100元",null,null,false));return claim;
+    }
+    private FinanceModels.Review budgetDecision(UUID expenseCategory,String amount) {return new FinanceModels.Review(UUID.randomUUID(),4,"APPROVE","核对最终金额、费用类别及差额",expenseCategory,new BigDecimal(amount),true);}
+    private void finishBudgetClaim(UUID claim) {
+        as(director,false,"finance.review");service.review(claim,new FinanceModels.Review(UUID.randomUUID(),5,"APPROVE","独立复核最终金额类别",null,null,false));
+        as(leader,false,"finance.review");var last=new FinanceModels.Review(UUID.randomUUID(),6,"APPROVE","终审核对最终金额类别",null,null,false);service.review(claim,last);service.review(claim,last);
+    }
     @Test void randomRealCategoryIdBudgetBlocksClaimInsteadOfGuessingIdFromCode() {
         as(owner,true,"finance.configure");service.category(hotel,category,new FinanceModels.Category("真实随机类别","EXPENSE","","管理费用",true,0,"RANDOM_COST"));UUID policy=UUID.randomUUID();controls.savePolicy(new FinanceControlModels.Policy(policy,hotel,"BUDGET","REAL-"+policy,"真实类别限额",today.withDayOfMonth(1),null,Map.of("month",java.time.YearMonth.from(today).toString(),"amount","50","control","BLOCK","categoryId",category,"categoryCode","RANDOM_COST","budgetKind","EXPENSE","projectKind","ALL")));
         as(director,true,"finance.configure");controls.publishPolicy(policy,new FinanceControlModels.Version(0,"独立核对真实类别映射"),false);UUID id=draft(false);as(owner,false,"finance.submit");assertThatThrownBy(()->service.submit(id,1)).hasMessageContaining("预算超额");assertThat(jdbc.queryForObject("select status from finance_claim where id=?",String.class,id)).isEqualTo("DRAFT");assertThat(jdbc.queryForObject("select count(*) from finance_invoice_reservation where claim_id=?",Integer.class,id)).isZero();

@@ -40,9 +40,9 @@ final class FinanceReceiptFields {
                     fields.capture("buyerName",joined,"(?:购买方信息)?名称[:：]?([^:：]{2,120}?)(?=纳税人识别号|统一社会信用代码|税号|地址|电话|开户行|$)",scoped);
                 }
             } else if (kind.equals("TRANSACTION")) {
-                fields.capture("transactionAmount",joined,"(?:交易总金额|交易金额)"+SEP+NUMBER,confidence);
+                fields.capture("transactionAmount",joined,"(?<![\\p{L}\\p{N}])(?:交易总金额|交易金额)"+SEP+NUMBER,confidence);
             } else if (kind.equals("PAYMENT")) {
-                fields.capture("paymentAmount",joined,"(?:实付金额|实际支付(?:金额)?|实际付款(?:金额)?|支付金额|付款金额|本次付款)"+SEP+NUMBER,confidence);
+                fields.capture("paymentAmount",joined,"(?<![\\p{L}\\p{N}])(?:实付金额|实际支付(?:金额)?|实际付款(?:金额)?|支付金额|付款金额|本次付款)"+SEP+NUMBER,confidence);
             }
         }
         var warnings=new ArrayList<String>();

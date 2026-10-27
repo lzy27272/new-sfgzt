@@ -395,6 +395,7 @@ public class FinanceService {
                 jdbc.update("update finance_claim set approved_amount=:amount,category_id=:category,category_name=:name,treatment=:treatment,debit_account=:debit,payable_account=:payable where tenant_id=:tenantId and id=:id",
                     base(p).addValue("id",id).addValue("amount",in.approvedAmount()).addValue("category",in.categoryId()).addValue("name",cat.get("name"))
                     .addValue("treatment",cat.get("treatment")).addValue("debit",cat.get("debit_account")).addValue("payable",config.get("payable_account")));
+                if(changed||!in.categoryId().equals(uuid(row,"category_id"))||!Objects.equals(row.get("treatment"),cat.get("treatment"))) new FinanceBudgetControl(jdbc).revalidateClaimApproval(p,id);
             }
         } else next="RETURN".equals(in.decision())?"RETURNED":"REJECTED";
         var reviewed=claim(p,id,false);moneyStrings(reviewed);
@@ -538,12 +539,17 @@ public class FinanceService {
     private boolean localOcrResultsInstalled(){return Boolean.TRUE.equals(jdbc.queryForObject("select to_regclass('finance_local_ocr_result') is not null",Map.of(),Boolean.class));}
     private Map<String,Object> localOcrOverlay(TenantPrincipal p,UUID attachment,UUID intake,String hash,Map<String,Object> fallback){
         if(!localOcrResultsInstalled())return fallback;
-        var rows=jdbc.queryForList("select extraction from finance_local_ocr_result where tenant_id=:tenantId and source_sha256=:hash and (attachment_id=:attachment or intake_id=:intake) order by created_at desc,id desc limit 1",base(p).addValue("hash",hash).addValue("attachment",attachment).addValue("intake",intake));
-        return rows.isEmpty()?fallback:parse(rows.getFirst().get("extraction"));
+        var rows=jdbc.queryForList("select extraction,bool_or(jsonb_exists(extraction,'similarityWarning')) over () as has_similarity_warning from finance_local_ocr_result where tenant_id=:tenantId and source_sha256=:hash and (attachment_id=:attachment or intake_id=:intake) order by created_at desc,id desc limit 1",base(p).addValue("hash",hash).addValue("attachment",attachment).addValue("intake",intake));
+        if(rows.isEmpty())return fallback;
+        var latest=parse(rows.getFirst().get("extraction"));
+        if(Boolean.TRUE.equals(rows.getFirst().get("has_similarity_warning")))latest.put("similarityWarning","同一租户存在图像相近的凭证，请核对是否重复；这只是提醒，不作为拒绝依据，也不展示其他员工资料。");
+        return latest;
     }
     private void appendLocalOcr(TenantPrincipal p,UUID attachment,UUID intake,String kind,String hash,Map<String,Object> extraction){
         if(!localOcrResultsInstalled()||!hash.equals(extraction.get("sourceSha256")))return;
         var observation=new LinkedHashMap<String,Object>(extraction);var image=extraction.get("imageHash") instanceof Map<?,?> m?m:Map.of();
+        var previous=localOcrOverlay(p,attachment,intake,hash,Map.of());
+        if(previous.containsKey("similarityWarning"))observation.put("similarityWarning",previous.get("similarityWarning"));
         String phash=Objects.toString(image.get("phash"),""),dhash=Objects.toString(image.get("dhash"),"");
         var b=base(p).addValue("attachment",attachment).addValue("intake",intake).addValue("hash",hash).addValue("kind",kind);
         if("phash-dhash-v1".equals(image.get("algorithm"))&&phash.matches("[a-f0-9]{16}")&&dhash.matches("[a-f0-9]{16}")) {

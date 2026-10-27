@@ -57,7 +57,12 @@ export function saveFinanceDraft(scope: string, id: string, draft: LocalDraft): 
         const previous = check.result as CipherRecord | undefined
         if (previous && previous.etag !== seenVersions.get(queueKey) && previous.writer !== writerId) { stale = true; tx.abort(); return }
         for (const file of additions) tx.objectStore('records').put(file)
-        tx.objectStore('records').put(record)
+        const saved = tx.objectStore('records').put(record)
+        saved.onsuccess = () => {
+          const retained = new Set(draft.files.map(file => `${queueKey}/file/${file.id}`))
+          const cursor = tx.objectStore('records').index('scope').openCursor(IDBKeyRange.only(scope))
+          cursor.onsuccess = () => { const file = cursor.result; if (file) { if (file.value.key.startsWith(`${queueKey}/file/`) && !retained.has(file.value.key)) file.delete(); file.continue() } }
+        }
       }
       try { await completion } catch (error) { if (stale) throw new Error('另一页面已更新本机草稿，本页未覆盖。请保留当前内容并核对另一个页面。'); throw error }
       seenVersions.set(queueKey, record.etag)

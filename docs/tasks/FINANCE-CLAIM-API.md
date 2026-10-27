@@ -25,7 +25,9 @@
 
 返回资料字段：`id,assignmentId,hotelId,hotelName,invoiceCode,invoiceNumber,amount,buyerTaxNumber,confirmed,claimId,status,version,verificationStatus,createdAt,canEdit,originalName,mediaType,sizeBytes,sha256,extraction,scanStatus`。
 
-单份原件不超过 20 MiB。PDF、JPG、PNG、XML、OFD 按实际内容识别并原件扫描。XML 禁止 DTD、外部实体和外部资源；OFD 限制目录穿越、条目数量及解压大小。OFD/XML 当前提供安全文字候选和原件下载，不伪造图片预览；照片 OCR、真实税务验真服务仍未接入。
+单份原件不超过 20 MiB。PDF、JPG、PNG、XML、OFD 按实际内容识别并原件扫描。XML 禁止 DTD、外部实体和外部资源；OFD 限制目录穿越、条目数量及解压大小。OFD/XML 当前提供安全文字候选和原件下载，不伪造图片预览。V116 接入可选的自建 RapidOCR，JPG/PNG 在原件扫描通过后提取候选；未配置、超时或失败时保留原件与人工填写入口，不标作识别成功或税务验真。
+
+`POST /claims/{id}/attachments/{attachmentId}/recognize` 与 `POST /invoice-pool/{id}/recognize` 重新识别已授权原件，不必重新上传。追加的识别记录绑定租户、原件编号与 SHA256，不修改业务编辑版本或人工确认结果。已有云端金额（包括人工零值）不被新候选静默替换；新建默认零与当前本机明确由 OCR 填入的值可以按候选更新。识别失败仍显示失败状态，同时保留同一原件已有的相似图片提醒，不借用其他原件的成功字段。
 
 ## 付款与回单
 
@@ -45,4 +47,4 @@
 
 现有 AI-data 增加 `FINANCE_CLAIMS` 真实有权结构化数据集，含单据来源、版本、期间、状态、金额和异常，排除姓名、银行账号、税号、原件。通过既有 AI-data 连接、快照和报告权限规则访问，明确不是完整总账报表。
 
-尚未完整实现：实际 OCR/税务验真提供商适配、差旅标准制度、任意可发布单据类型流程模板/受控代理、自动 AI 财务月报模型执行器、原件到期保管审批及恢复演练。这些不能因接口或页面已存在而被验收为完成。
+仍需分别集成及验收的范围包括外部税务验真、任意单据类型的流程模板、真实模型财务月报执行及原件到期处置制度。差旅标准、受控代理、档案及备份恢复已有后续实现，边界以对应控制、档案文档及实际验证记录为准，不能沿用本页早期的未实现清单，也不能因接口或页面已存在就宣称全量完成。

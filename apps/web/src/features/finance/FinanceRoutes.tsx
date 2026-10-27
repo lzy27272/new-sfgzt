@@ -58,7 +58,8 @@ export default function FinanceRoutes({ identity, permissions, params, go }: { i
     return () => { alive = false }
   }, [identity, tab, page, params.id, revision])
   const create = async () => {
-    if (creating.current || !assignment || !navigator.onLine) return
+    if (creating.current || !assignment) return
+    if (!navigator.onLine) { setError('当前离线，无法新建报销。请联网后重试；已打开的草稿可继续填写。'); return }
     creating.current = true; setCreateBusy(true); setError('')
     if (creation.current.assignment !== assignment) creation.current = { assignment, id: crypto.randomUUID() }
     try { const c = await financeRequest<Claim>(identity, '/claims', 'POST', { requestId: creation.current.id, assignmentId: assignment }); creation.current = { assignment: '', id: '' }; open(c.id) }

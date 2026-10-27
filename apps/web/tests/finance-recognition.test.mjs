@@ -5,7 +5,7 @@ import { acceptIntakeRecognition, applyEvidenceRecognition, automaticCandidate, 
 const extraction = (fields = {}) => ({ source: 'LOCAL_OCR', status: 'CANDIDATES', confirmationRequired: true, ...fields })
 const evidence = (id, kind, fields = {}) => ({ id, kind, extraction: extraction(fields), original_name: `${id}.jpg`, media_type: 'image/jpeg', sha256: id.repeat(64).slice(0, 64), size_bytes: 20 })
 const invoice = (fields = {}) => ({ id: 'invoice', attachmentId: 'a', invoiceCode: '', invoiceNumber: '', amount: '', buyerTaxNumber: '', confirmed: false, ...fields })
-const draft = (fields = {}) => ({ dirty: false, files: [], form: { expectedVersion: 2, title: '客房用品', businessDate: '2026-10-26', categoryId: null, transactionAmount: '0.00', paymentAmount: '0.00', requestedAmount: '0.00', differenceNote: '', invoices: [], ...fields } })
+const draft = (fields = {}) => ({ dirty: false, files: [], form: { expectedVersion: 0, title: '客房用品', businessDate: '2026-10-26', categoryId: null, transactionAmount: '0.00', paymentAmount: '0.00', requestedAmount: '0.00', differenceNote: '', invoices: [], ...fields } })
 
 test('invoice candidates fill blank fields including buyer tax number without approving OCR facts', () => {
   const attached = evidence('a', 'INVOICE', { invoiceNumber: '00000000000000123456', amount: '100.00', buyerTaxNumber: '91520000123456789X' })
@@ -61,6 +61,30 @@ test('manually checked amounts including zero survive later receipts and automat
   const manual = { ...first, form: { ...first.form, paymentAmount: '100.00' }, recognition: touchedRecognition(first, ['paymentAmount']) }
   assert.equal(reconcileEvidenceAmounts(manual, [a, b]).form.paymentAmount, '100.00')
   assert.equal(reconcileEvidenceAmounts(draft({ paymentAmount: '73.00' }), [a]).form.paymentAmount, '73.00')
+})
+test('saved zero amounts survive a new device without local provenance while new defaults still fill', () => {
+  const payment = evidence('p', 'PAYMENT', { paymentAmount: '90.00' })
+  const transaction = evidence('t', 'TRANSACTION', { transactionAmount: '100.00' })
+  const saved = draft({ expectedVersion: 2 })
+  assert.equal(saved.recognition, undefined)
+  const preserved = reconcileEvidenceAmounts(saved, [payment, transaction])
+  assert.equal(preserved.form.paymentAmount, '0.00')
+  assert.equal(preserved.form.transactionAmount, '0.00')
+  assert.deepEqual(preserved.recognition.amounts, {})
+  const fresh = reconcileEvidenceAmounts(draft(), [payment, transaction])
+  assert.equal(fresh.form.paymentAmount, '90.00')
+  assert.equal(fresh.form.transactionAmount, '100.00')
+  const blank = reconcileEvidenceAmounts(draft({ expectedVersion: 2, paymentAmount: '' }), [payment])
+  assert.equal(blank.form.paymentAmount, '90.00')
+})
+test('saved OCR provenance may update its own candidate but never a manually touched zero', () => {
+  const payment = evidence('p', 'PAYMENT', { paymentAmount: '0.00' })
+  const first = reconcileEvidenceAmounts(draft(), [payment])
+  const saved = { ...first, form: { ...first.form, expectedVersion: 2 } }
+  const retry = evidence('p', 'PAYMENT', { paymentAmount: '90.00' })
+  assert.equal(reconcileEvidenceAmounts(saved, [retry]).form.paymentAmount, '90.00')
+  const manual = { ...saved, recognition: touchedRecognition(saved, ['paymentAmount']) }
+  assert.equal(reconcileEvidenceAmounts(manual, [retry]).form.paymentAmount, '0.00')
 })
 test('failed or disabled OCR keeps original partial content, and PDF text remains compatible', () => {
   for (const status of ['DISABLED', 'UNAVAILABLE', 'FAILED', 'NO_CANDIDATES']) assert.equal(automaticCandidate(extraction({ status, invoiceNumber: '00000000000000123456' }), 'invoiceNumber'), '')
