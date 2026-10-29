@@ -136,7 +136,9 @@ public class WeeklyAssessmentService {
         var metrics=jdbc.queryForMap("""
                 select count(*) as expected,
                   count(*) filter(where r.status in ('SUBMITTED','APPROVED')) as submitted,
-                  count(*) filter(where r.status='APPROVED' or (r.status='SUBMITTED' and i.review_mode='NONE')) as completed,
+                  count(*) filter(where r.status='APPROVED' or (r.status='SUBMITTED' and (
+                """ + cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy.effectiveModeSql("i", "x") + """
+                  )='NONE')) as completed,
                   count(*) filter(where r.status in ('SUBMITTED','APPROVED') and r.submitted_at<=x.due_at) as on_time,
                   count(*) filter(where r.status in ('SUBMITTED','APPROVED') and r.submitted_at>x.due_at) as late,
                   count(*) filter(where coalesce(r.status,'') not in ('SUBMITTED','APPROVED') and x.due_at<now()) as missed

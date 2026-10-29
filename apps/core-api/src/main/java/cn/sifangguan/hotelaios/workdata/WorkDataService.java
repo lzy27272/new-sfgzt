@@ -1743,11 +1743,15 @@ public class WorkDataService {
     }
 
     private boolean hasExemptReviewConfiguration(TenantPrincipal principal, RecordAccess record) {
-        if (record.workPackageItemId() == null || record.repeatableEntry()) return false;
+        if (record.workPackageItemId() == null || record.expectationId() == null || record.repeatableEntry()) return false;
         return Boolean.TRUE.equals(jdbc.queryForObject("""
-                select required and review_mode='NONE' from work_package_item
-                where tenant_id=:tenantId and id=:itemId
-                """, base(principal).addValue("itemId", record.workPackageItemId()), Boolean.class));
+                select i.required and (
+                """ + WorkReviewPolicy.configuredModeSql("i", "x") + """
+                )='NONE' from work_package_item i join work_expectation x
+                  on x.tenant_id=i.tenant_id and x.work_package_item_id=i.id
+                where i.tenant_id=:tenantId and i.id=:itemId and x.id=:expectationId
+                """, base(principal).addValue("itemId", record.workPackageItemId())
+                .addValue("expectationId", record.expectationId()), Boolean.class));
     }
 
     @Transactional(readOnly = true)

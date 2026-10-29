@@ -9,10 +9,14 @@ import java.util.UUID;
 /** Ordinary work/report management only. Operation permissions and special
  * inventory/cycle reviewers must be checked by the caller before this policy. */
 public final class WorkReviewPolicy {
+    public static String configuredModeSql(String item, String expectation) {
+        return "work_review_configured_mode(" + item + ", " + expectation + ")";
+    }
+
     /** Rejected exempt work remains manual until a manager approves a correction. */
     public static String effectiveModeSql(String item, String expectation) {
         return """
-            case when %1$s.review_mode = 'NONE' and (
+            case when %3$s = 'NONE' and (
               %1$s.item_type in ('REVIEW_APPROVAL','METRIC_REVIEW')
               or coalesce(%1$s.execution_policy ->> 'handoverConfirmationRequired','false') = 'true'
               or coalesce(%1$s.execution_policy ->> 'highRiskImmediateEscalation','false') = 'true'
@@ -21,7 +25,8 @@ public final class WorkReviewPolicy {
               or nullif(btrim(%1$s.execution_policy ->> 'inventoryMovement'),'') is not null
               or %1$s.item_code in ('HKA_ITEM_ISSUE','HKA_USAGE_RETURN','HKA_DAILY_REPORT','HKA_LOST_PROPERTY','HKA_COMPLAINT_EVENT',
                                     'NSA_ITEM_ISSUE','NSA_DAILY_HANDOVER','NSA_LOST_PROPERTY')
-              or (coalesce(%1$s.execution_policy ->> 'requiresExceptionReview','false')='true'
+              or ((coalesce(%1$s.execution_policy ->> 'requiresExceptionReview','false')='true'
+                    or %1$s.item_code='HKA_CART_PREPARATION')
                 and exists (select 1 from work_record exception_record
                   where exception_record.tenant_id=%2$s.tenant_id and exception_record.work_expectation_id=%2$s.id
                     and exception_record.id=(select latest.id from work_record latest
@@ -33,8 +38,8 @@ public final class WorkReviewPolicy {
               or (%2$s.status <> 'SATISFIED' and exists (select 1 from work_record failed_review
                 where failed_review.tenant_id = %2$s.tenant_id
                   and failed_review.work_expectation_id = %2$s.id and failed_review.status = 'REJECTED'))
-            ) then 'MANUAL' else %1$s.review_mode end
-            """.formatted(item, expectation);
+            ) then 'MANUAL' else %3$s end
+            """.formatted(item, expectation, configuredModeSql(item, expectation));
     }
 
     private final NamedParameterJdbcTemplate jdbc;
