@@ -80,3 +80,57 @@ if run_transfer existing >"$fixture/result" 2>"$fixture/stderr"; then exit 1; fi
 test "$(cat "$fixture/remote/existing/sentinel")" = keep
 test "$(find "$fixture/remote/existing" -type f | wc -l)" -eq 1
 printf 'PASS a preexisting incoming directory is rejected without deleting its sentinel\n'
+
+# Exercise the actual workflow functions, not a second implementation of the budget calculation.
+workflow="$here/../../../.github/workflows/pilot-deploy.yml"
+full_job="$(awk '/^  deploy-full-release:/{inside=1;next} inside&&/^  [A-Za-z0-9_-]+:/{exit} inside{sub(/\r$/,"");print}' "$workflow")"
+test "$(printf '%s\n' "$full_job" | sed -n 's/^    timeout-minutes: \([0-9][0-9]*\)$/\1/p')" = 120
+workflow_function(){
+  awk -v name="$1" '{sub(/\r$/,"")} $0=="          "name"(){"{inside=1} inside{sub(/^          /,"");print;if($0=="}"){found=1;exit}} END{if(!found)exit 1}' "$workflow"
+}
+eval "$(workflow_function initialize_full_release_window)"
+eval "$(workflow_function require_full_release_window)"
+start_line="$(printf '%s\n' "$full_job" | grep -nFx '          initialize_full_release_window' | cut -d: -f1)"
+checkout_line="$(printf '%s\n' "$full_job" | grep -nF '      - name: Check out' | head -n 1 | cut -d: -f1)"
+guard_line="$(printf '%s\n' "$full_job" | grep -nFx '          require_full_release_window' | cut -d: -f1)"
+deploy_line="$(printf '%s\n' "$full_job" | grep -nF "&& sudo '\$full' DEPLOY" | cut -d: -f1)"
+test "$start_line" -lt "$checkout_line"
+test "$((guard_line + 1))" -eq "$deploy_line"
+export GITHUB_ENV="$fixture/window.env"
+window_clock=1700000000
+date(){ test "$#" -eq 1 && test "$1" = +%s || return 91; printf '%s\n' "$window_clock"; }
+initialize_full_release_window
+test "$(cat "$GITHUB_ENV")" = FULL_RELEASE_DEADLINE_EPOCH=1700006900
+FULL_RELEASE_DEADLINE_EPOCH="$(sed -n 's/^FULL_RELEASE_DEADLINE_EPOCH=//p' "$GITHUB_ENV")"
+require_full_release_window >"$fixture/window-result"
+grep -Fq 'FULL_RELEASE_WINDOW_PASS remainingSeconds=6900 requiredSeconds=2400' "$fixture/window-result"
+window_clock=1700004500
+require_full_release_window >"$fixture/window-result"
+grep -Fq 'FULL_RELEASE_WINDOW_PASS remainingSeconds=2400 requiredSeconds=2400' "$fixture/window-result"
+printf 'PASS FULL window starts before checkout, includes setup margin, and accepts the exact 40-minute boundary\n'
+
+window_clock=1700004501
+if require_full_release_window >"$fixture/window-result" 2>&1; then exit 1; fi
+grep -Fq 'FULL_RELEASE_WINDOW_INSUFFICIENT remainingSeconds=2399 requiredSeconds=2400' "$fixture/window-result"
+test ! -e "$fixture/root-deploy-called"
+if require_full_release_window >"$fixture/window-result" 2>&1; then printf 'DEPLOY\n' >"$fixture/root-deploy-called"; fi
+test ! -e "$fixture/root-deploy-called"
+window_clock=1700007000
+if require_full_release_window >"$fixture/window-result" 2>&1; then exit 1; fi
+grep -Fq 'FULL_RELEASE_WINDOW_INSUFFICIENT' "$fixture/window-result"
+printf 'PASS exhausted release budget fails before any fixed root DEPLOY/BEGIN_FULL invocation\n'
+
+window_clock=1700000000
+for invalid in '' malformed 17000000000 1700006901; do
+  FULL_RELEASE_DEADLINE_EPOCH=$invalid
+  if require_full_release_window >"$fixture/window-result" 2>&1; then exit 1; fi
+  grep -Fq 'FULL_RELEASE_WINDOW_INVALID' "$fixture/window-result"
+done
+FULL_RELEASE_DEADLINE_EPOCH=1700006900
+window_clock=invalid
+if require_full_release_window >"$fixture/window-result" 2>&1; then exit 1; fi
+grep -Fq 'FULL_RELEASE_WINDOW_INVALID' "$fixture/window-result"
+export GITHUB_ENV="$fixture/invalid-window.env"
+if initialize_full_release_window >"$fixture/window-result" 2>&1; then exit 1; fi
+test ! -e "$GITHUB_ENV"
+printf 'PASS missing, malformed, impossible deadlines and invalid clocks fail closed without persisting a false window\n'
