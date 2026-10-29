@@ -282,7 +282,7 @@ jobs:
     needs: resolve-release
     if: needs.resolve-release.outputs.lane == 'FULL'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     environment:
       name: pilot
     steps:
@@ -293,6 +293,14 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$PILOT_ENVIRONMENT_PROTECTED" = true || { echo 'Required Pilot reviewers are not configured.' >&2; exit 2; }
+          initialize_full_release_window(){
+            local started
+            started="$(date +%s)" || { echo 'FULL_RELEASE_WINDOW_INVALID clock unavailable' >&2; return 2; }
+            [[ "$started" =~ ^[1-9][0-9]{9}$ ]] || { echo 'FULL_RELEASE_WINDOW_INVALID clock value' >&2; return 2; }
+            # This first step budgets five minutes for earlier runner setup; the job still has its independent 120-minute cap.
+            printf 'FULL_RELEASE_DEADLINE_EPOCH=%s\n' "$((started + 115 * 60))" >> "$GITHUB_ENV"
+          }
+          initialize_full_release_window
 
       - name: Check out the pinned trusted FULL policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -387,6 +395,17 @@ jobs:
           CI_RUN_ATTEMPT: ${{ needs.resolve-release.outputs.ci_run_attempt }}
         run: |
           set -Eeuo pipefail
+          require_full_release_window(){
+            local now remaining
+            [[ "${FULL_RELEASE_DEADLINE_EPOCH:-}" =~ ^[1-9][0-9]{9}$ ]] || { echo 'FULL_RELEASE_WINDOW_INVALID missing or malformed deadline; fixed root DEPLOY was not invoked.' >&2; return 2; }
+            now="$(date +%s)" || { echo 'FULL_RELEASE_WINDOW_INVALID clock unavailable; fixed root DEPLOY was not invoked.' >&2; return 2; }
+            [[ "$now" =~ ^[1-9][0-9]{9}$ ]] || { echo 'FULL_RELEASE_WINDOW_INVALID clock value; fixed root DEPLOY was not invoked.' >&2; return 2; }
+            remaining=$((FULL_RELEASE_DEADLINE_EPOCH - now))
+            if ((remaining > 115 * 60)); then echo 'FULL_RELEASE_WINDOW_INVALID deadline exceeds the conservative job window; fixed root DEPLOY was not invoked.' >&2; return 2; fi
+            # Keep time for complete backup/restore, migration and audit. Forty minutes is a conservative historical budget, not a skipped gate.
+            if ((remaining < 40 * 60)); then printf 'FULL_RELEASE_WINDOW_INSUFFICIENT remainingSeconds=%s requiredSeconds=2400; fixed root DEPLOY was not invoked.\n' "$remaining" >&2; return 2; fi
+            printf 'FULL_RELEASE_WINDOW_PASS remainingSeconds=%s requiredSeconds=2400\n' "$remaining"
+          }
           [[ "$RELEASE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ && "$RELEASE_ID" != *'..'* ]]
           [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ && "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ && "$ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
           [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ && "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
@@ -406,6 +425,7 @@ jobs:
           trap cleanup_remote_stage EXIT
           bash trusted-policy/tools/deployment/send-full-artifact.sh "$RUNNER_TEMP/approved-full.zip" "$remote_stage" "$target" "${ARTIFACT_DIGEST#sha256:}" "$RUNNER_TEMP/pilot_full_key" "$RUNNER_TEMP/pilot_full_known_hosts"
           stage_created=true
+          require_full_release_window
           ssh "${options[@]}" "$target" "chmod 0600 '$remote_stage/release-artifact.zip' && sudo '$full' DEPLOY '$RELEASE_ID' '$remote_stage' '$EXPECTED_SOURCE_COMMIT' '$SOURCE_COMMIT' '${ARTIFACT_DIGEST#sha256:}' '$classifier_sha' '$CI_RUN_ID' '$CI_RUN_ATTEMPT'"
           {
             echo '### Complete Pilot release verified'
