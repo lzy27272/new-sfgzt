@@ -9,6 +9,7 @@ import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.events.BusinessEvent;
 import cn.sifangguan.hotelaios.shared.events.BusinessEventPublisher;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy;
 import cn.sifangguan.hotelaios.shared.time.BusinessDayService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -417,8 +418,15 @@ public class DailyReportDispatchTransactionService {
     ) {
         Integer pending = jdbc.queryForObject("""
                 select count(*) from work_record record
+                left join work_package_item review_item
+                  on review_item.tenant_id=record.tenant_id and review_item.id=record.work_package_item_id
+                left join work_expectation review_expectation
+                  on review_expectation.tenant_id=record.tenant_id and review_expectation.id=record.work_expectation_id
                 where record.tenant_id=:tenantId and record.position_assignment_id=:assignment
                   and record.business_date=:day and record.status='SUBMITTED'
+                  and coalesce(
+                """ + WorkReviewPolicy.effectiveModeSql("review_item", "review_expectation") + """
+                  ,'MANUAL')<>'NONE'
                   and exists (select 1 from work_package_item_responsibility responsibility
                     where responsibility.tenant_id=record.tenant_id and responsibility.work_package_item_id=record.work_package_item_id
                       and responsibility.participant_type in ('REVIEWER','ACCEPTOR') and responsibility.resolver_type='DIRECT_MANAGER_ASSIGNMENT')

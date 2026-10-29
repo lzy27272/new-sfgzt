@@ -87,7 +87,7 @@ function CyclePanel({ identity, period, date, go, onDate, onPeriod, onAssessment
     </article>
     <div className="mc-entry-cards">{periods.filter(p => p.id !== 'DAY' && p.id !== period).map(p => <button className="mc-panel" key={p.id} onClick={() => onPeriod(p.id as CycleType)}>
       <strong>{p.name} · {p.count} 项</strong><span>{p.id === 'MONTH' ? '空气能净水设备检查 · 当月28日前' : p.id === 'WEEK' ? '经营跟进、工作部署与员工评估' : '经营复盘、资产核查与人员评估'} ›</span></button>)}</div>
-    <p className="mc-note">按工作归属周期统计，跨月提交不改归属；提交后由分管副总复核。人工周评分与工作完成率分别记录。</p>
+    <p className="mc-note">按工作归属周期统计，跨月提交不改归属；免审项目正常提交后完成，异常及其他需复核项目由分管副总审核。人工周评分与工作完成率分别记录。</p>
     {selected && <Suspense fallback={<p role="status">正在打开工作表单…</p>}><CycleWorkRecordDialog item={selected} identity={identity} onClose={() => setSelected(undefined)} onSaved={async () => { setSelected(undefined); await board.reload(); setMessage('') }} onDelegated={setMessage} /></Suspense>}
     {report && <div className="modal-backdrop" role="presentation"><section className="mc-report" role="dialog" aria-modal="true" aria-label={`店长${name[0]}报`}>
       <header><div><h2>店长{name[0]}报</h2><p>{board.data.start} — {board.data.end} · 自动汇总本周期工作，不另计任务数量</p></div><button className="secondary" onClick={() => setReport(false)}>关闭</button></header>

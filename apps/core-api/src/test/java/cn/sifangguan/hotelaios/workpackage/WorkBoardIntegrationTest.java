@@ -157,8 +157,15 @@ class WorkBoardIntegrationTest {
     }
 
     @Test void activatedOldCartSubmissionCompletesWithoutRewritingFactsAndCanFailSpotCheck() throws Exception {
-        LocalDate day=LocalDate.of(2025,9,4);
-        UUID work=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL","HKA_CART_PREPARATION");
+        historicalActivationPreservesFactsAndSupportsRepeatedSpotChecks("HKA_CART_PREPARATION",LocalDate.of(2025,9,4));
+    }
+
+    @Test void activatedOtherRoleSubmissionPreservesFactsAndSupportsManualRepairAndAnotherSpotCheck() throws Exception {
+        historicalActivationPreservesFactsAndSupportsRepeatedSpotChecks("AGM_NS_PUBLIC_AREA",LocalDate.of(2025,9,8));
+    }
+
+    void historicalActivationPreservesFactsAndSupportsRepeatedSpotChecks(String code,LocalDate day) throws Exception {
+        UUID work=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL",code);
         String actor="19000000-0000-0000-0000-000000000003",assignment="19200000-0000-0000-0000-000000000002";
         jdbc.update("update work_expectation set position_assignment_id=?::uuid where id=?",assignment,work);
         record(work,day,"SUBMITTED",-1,actor);
@@ -185,10 +192,12 @@ class WorkBoardIntegrationTest {
                 Map.of("outcome","REJECTED","reason","工作车抽查不合格","expectedVersion",0),200);
         assertThat(getBoard("?from="+day+"&to="+day).path("period").path("completed").asInt()).isZero();
         Map<String,Object> context=jdbc.queryForMap("select i.form_version_id,a.employee_id,a.org_unit_id from work_expectation x join work_package_item i on i.id=x.work_package_item_id join employee_position_assignment a on a.id=x.position_assignment_id where x.id=?",work);
+        Map<String,Object> repairPayload=code.equals("HKA_CART_PREPARATION") ? Map.of("notes","已完成工作车整理整改")
+                : Map.of("expectedAttendance",1,"actualAttendance",1,"appearancePassed",true,"meetingNotes","整改完成");
         JsonNode repairedResult=workCommand("/api/v1/work-data/records",actor,assignment,
                 Map.of("orgUnitId",context.get("org_unit_id"),"employeeId",context.get("employee_id"),
                         "positionAssignmentId",assignment,"formVersionId",context.get("form_version_id"),"businessDate",day,
-                        "payload",Map.of("notes","已完成工作车整理整改"),"completionStatement","整改完成",
+                        "payload",repairPayload,"completionStatement","整改完成",
                         "workExpectationId",work,"targetOrgUnitId",HOTEL),201);
         UUID repaired=UUID.fromString(repairedResult.path("id").asText());
         assertThat(getBoard("?from="+day+"&to="+day).path("period").path("review").asInt()).isOne();
@@ -203,18 +212,123 @@ class WorkBoardIntegrationTest {
         assertThat(jdbc.queryForObject("select before_record::text from work_review_policy_correction where activation_id=?",String.class,activation)).isEqualTo(original);
     }
 
+    @Test void activationCoversEachApprovedRoleButAllNormalExceptionSignalsStillRequireReview() throws Exception {
+        LocalDate day=LocalDate.of(2025,9,7);
+        List<String> codes=List.of("AGM_NS_PUBLIC_AREA","FD_WORKSTATION_READY","FO_OTA_CHECK",
+                "GM_PUBLIC_AREA_AM_V56","HKS_MORNING_ASSIGNMENT","NSA_CART_PREPARATION","SS_PREARRIVAL");
+        List<String> normalIds=new java.util.ArrayList<>();
+        UUID sample=null;
+        for (String code:codes) {
+            UUID work=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL",code);
+            activateCart(work,day);
+            record(work,day,"SUBMITTED",-1,MANAGER,"{\"issueSummary\":\"无问题\",\"serviceAwareness\":\"达标\",\"receptionProcess\":\"正确\",\"complaintCount\":0,\"reworkCount\":\"0\",\"cashDifference\":0}","无问题",OffsetDateTime.now());
+            normalIds.add(work.toString());
+            sample=work;
+        }
+        UUID statement=cloneExpectation(sample,day,"SUBMITTED");
+        record(statement,day,"SUBMITTED",-1,MANAGER,"{}","公共区域发现异常",OffsetDateTime.now());
+        List<String> exceptionIds=new java.util.ArrayList<>(List.of(statement.toString()));
+        for (String payload:List.of("{\"issueFound\":true}","{\"issueSummary\":\"存在未处理问题\"}",
+                "{\"hasException\":true}","{\"lostPropertyOccurred\":true}","{\"serviceAwareness\":\"需整改\"}",
+                "{\"receptionProcess\":\"不正确\"}","{\"complaintCount\":1}","{\"reworkCount\":\"2\"}",
+                "{\"cashDifference\":-0.01}","{\"complaintCount\":\"待核实\"}","{\"pendingHandover\":\"未完成事项待移交\"}")) {
+            UUID work=cloneExpectation(sample,day,"SUBMITTED");
+            record(work,day,"SUBMITTED",-1,MANAGER,payload,null,OffsetDateTime.now());exceptionIds.add(work.toString());
+        }
+        UUID ordinaryRequest=cloneExpectation(sample,day,"SUBMITTED");
+        record(ordinaryRequest,day,"SUBMITTED",-1,MANAGER,
+                "{\"guestRequestCount\":3,\"specialArrivalRequirement\":\"需要婴儿床\",\"supportNeeded\":\"明日培训资料\",\"plans\":\"次日例行工作\"}",null,OffsetDateTime.now());
+        normalIds.add(ordinaryRequest.toString());
+        JsonNode board=getBoard("?from="+day+"&to="+day+"&size=200");
+        assertThat(board.path("period").path("completed").asInt()).isEqualTo(normalIds.size());
+        assertThat(board.path("period").path("review").asInt()).isEqualTo(exceptionIds.size());
+        assertThat(getBoard("?queue=SPOT_CHECK&from="+day+"&to="+day+"&size=200").path("items").findValuesAsText("id"))
+                .containsAll(normalIds).doesNotContainAnyElementsOf(exceptionIds);
+    }
+
+    @Test void activationCannotOverrideUnapprovedCodesOrMandatoryConfirmationGuards() throws Exception {
+        LocalDate day=LocalDate.of(2025,9,9);
+        List<UUID> manual=new java.util.ArrayList<>();
+        for (String code:List.of("NSA_EQUIPMENT_FIRST","HKA_ITEM_ISSUE","HKS_RESOURCE_REVIEW","BOARD_UNAPPROVED_ROUTINE")) {
+            UUID work=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL",code);
+            activateCart(work,day);record(work,day,"SUBMITTED",-1,MANAGER,"{}",null,OffsetDateTime.now());manual.add(work);
+        }
+        for (String policy:List.of("{\"handoverConfirmationRequired\":true}","{\"highRiskImmediateEscalation\":true}",
+                "{\"inventoryUsage\":true}","{\"inventoryMovement\":\"STORE_TO_EMPLOYEE_ON_HAND\"}","{\"reworkReinspectionRequired\":true}")) {
+            UUID work=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL","FO_PUBLIC_AREA","{}",policy);
+            activateCart(work,day);record(work,day,"SUBMITTED",-1,MANAGER,"{}",null,OffsetDateTime.now());manual.add(work);
+        }
+        UUID inventorySubmission=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL","FD_WORKSTATION_READY","{\"inventoryUsage\":true}");
+        activateCart(inventorySubmission,day);record(inventorySubmission,day,"SUBMITTED",-1,MANAGER,"{}",null,OffsetDateTime.now());manual.add(inventorySubmission);
+        JsonNode board=getBoard("?from="+day+"&to="+day+"&size=200");
+        assertThat(board.path("period").path("completed").asInt()).isZero();
+        assertThat(board.path("period").path("review").asInt()).isEqualTo(manual.size());
+        assertThat(getBoard("?queue=SPOT_CHECK&from="+day+"&to="+day+"&size=200").path("items").findValuesAsText("id"))
+                .doesNotContainAnyElementsOf(manual.stream().map(UUID::toString).toList());
+    }
+
+    @Test void routineEligibilityMatchesTheThirtyFourApprovedItemsAndRetainsBusinessConfirmationGuards() {
+        List<String> approved=List.of("AGM_NS_AFTERNOON_TEA","AGM_NS_APPEARANCE_MEETING","AGM_NS_BREAKFAST_FEEDBACK",
+                "AGM_NS_EVENING_LIGHT_BAR","AGM_NS_OTA_CHECK","AGM_NS_PUBLIC_AREA","AGM_NS_REVIEW_TRAINING","AGM_NS_THREE_FOLLOWUPS",
+                "FD_WORKSTATION_READY","FD_PMS_OTA_PRECHECK","FO_AFTERNOON_TEA","FO_CTRIP_TRAINING","FO_OTA_CHECK","FO_PUBLIC_AREA","FO_THREE_FOLLOWUPS",
+                "GM_APPEARANCE_MEETING_V56","GM_CCTV_REVIEW_V56","GM_FRONT_DESK_COACHING_V56","GM_PUBLIC_AREA_AM_V56","GM_PUBLIC_AREA_PM_V56",
+                "GM_M_CHANNEL","GM_W_MEETING","GM_W_TRAINING","GM_W_HYGIENE","HKS_MORNING_ASSIGNMENT","HKS_READINESS_CHECK",
+                "NSA_CART_PREPARATION","NSA_FINAL_PUBLIC_RECHECK","NSA_NIGHT_PUBLIC_PATROL","SS_AFTERNOON_TEA","SS_INHOUSE_FOLLOWUP",
+                "SS_PREARRIVAL","SS_PUBLIC_AREA","SS_RECEPTION_FOLLOWUP");
+        assertThat(approved).hasSize(34).doesNotHaveDuplicates();
+        for (String code:approved) {
+            assertThat(jdbc.queryForObject("""
+                select work_review_routine_exemption_eligible(jsonb_populate_record(null::work_package_item,
+                  to_jsonb(i)||jsonb_build_object('item_code',cast(? as text),'item_type','SCHEDULED_RECORD',
+                    'required',true,'execution_policy','{}'::jsonb,'submission_policy','{}'::jsonb)))
+                from work_package_item i where i.id=?::uuid
+                """,Boolean.class,code,ITEM)).as(code).isTrue();
+        }
+        for (String forbidden:List.of("{\"item_type\":\"REVIEW_APPROVAL\"}","{\"item_type\":\"METRIC_REVIEW\"}",
+                "{\"required\":false}","{\"execution_policy\":{\"repeatableDailyRecords\":true}}")) {
+            assertThat(jdbc.queryForObject("""
+                select work_review_routine_exemption_eligible(jsonb_populate_record(null::work_package_item,
+                  to_jsonb(i)||jsonb_build_object('item_code','FD_WORKSTATION_READY','item_type','SCHEDULED_RECORD',
+                    'required',true,'execution_policy','{}'::jsonb,'submission_policy','{}'::jsonb)||cast(? as jsonb)))
+                from work_package_item i where i.id=?::uuid
+                """,Boolean.class,forbidden,ITEM)).as(forbidden).isFalse();
+        }
+    }
+
+    @Test void activationLeavesEarlierSameDayApprovalsAndUncapturedPendingAloneButAllowsUnsubmittedDrafts() throws Exception {
+        LocalDate day=LocalDate.of(2025,9,11);
+        UUID approved=variantExpectation(day,"SATISFIED","DAY",false,"MANUAL","FO_PUBLIC_AREA");
+        record(approved,day,"APPROVED",-1);
+        UUID pending=cloneExpectation(approved,day,"SUBMITTED");record(pending,day,"SUBMITTED",-1);
+        UUID draft=cloneExpectation(approved,day,"IN_PROGRESS");record(draft,day,"DRAFT",-1);
+        jdbc.update("update work_record set submitted_at=null where work_expectation_id=?",draft);
+        String oldFacts=jdbc.queryForObject("select jsonb_agg(to_jsonb(r) order by r.id)::text from work_record r where work_expectation_id in (?,?)",String.class,approved,pending);
+        activateCart(approved,day);
+        jdbc.update("update work_record set status='SUBMITTED',submitted_at=now() where work_expectation_id=?",draft);
+        jdbc.update("update work_expectation set status='SUBMITTED' where id=?",draft);
+        UUID fresh=cloneExpectation(approved,day,"SUBMITTED");
+        record(fresh,day,"SUBMITTED",0,MANAGER,"{}",null,OffsetDateTime.now());
+        JsonNode board=getBoard("?from="+day+"&to="+day+"&size=200");
+        assertThat(board.path("period").path("completed").asInt()).isEqualTo(3);
+        assertThat(board.path("period").path("review").asInt()).isOne();
+        assertThat(getBoard("?queue=SPOT_CHECK&from="+day+"&to="+day+"&size=200").path("items").findValuesAsText("id"))
+                .contains(draft.toString(),fresh.toString()).doesNotContain(approved.toString(),pending.toString());
+        assertThat(jdbc.queryForObject("select jsonb_agg(to_jsonb(r) order by r.id)::text from work_record r where work_expectation_id in (?,?)",String.class,approved,pending)).isEqualTo(oldFacts);
+        assertThat(jdbc.queryForObject("select count(*) from work_review_policy_correction where work_expectation_id in (?,?)",Integer.class,approved,pending)).isZero();
+    }
+
     @Test void activatedCartPolicyCoversNewWorkButNotOtherItemsHotelsOrExceptions() throws Exception {
         LocalDate day=LocalDate.of(2025,9,5);
         UUID cart=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL","HKA_CART_PREPARATION");
-        record(cart,day,"SUBMITTED",-1);
         UUID activation=activateCart(cart,day);
+        record(cart,day,"SUBMITTED",-1,MANAGER,"{}",null,OffsetDateTime.now());
         UUID otherHotel=cloneExpectation(cart,day,"SUBMITTED");
         jdbc.update("update work_expectation set target_org_unit_id=?::uuid where id=?",OTHER_HOTEL,otherHotel);
-        record(otherHotel,day,"SUBMITTED",-1);
+        record(otherHotel,day,"SUBMITTED",-1,MANAGER,"{}",null,OffsetDateTime.now());
         UUID issue=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL","HKA_ITEM_ISSUE");
         record(issue,day,"SUBMITTED",-1);
         UUID abnormal=cloneExpectation(cart,day,"SUBMITTED");
-        record(abnormal,day,"SUBMITTED",-1,MANAGER,"{}","工作车设备损坏",null);
+        record(abnormal,day,"SUBMITTED",-1,MANAGER,"{}","工作车设备损坏",OffsetDateTime.now());
         JsonNode result=getBoard("?from="+day+"&to="+day+"&size=200");
         assertThat(result.path("period").path("completed").asInt()).isOne();
         assertThat(result.path("period").path("review").asInt()).isEqualTo(3);
@@ -237,8 +351,9 @@ class WorkBoardIntegrationTest {
         UUID activation=UUID.randomUUID();
         jdbc.update("""
             insert into work_review_policy_activation(id,tenant_id,target_org_unit_id,work_package_item_id,
-              new_work_from,authorization_reference,reason)
-            select ?,x.tenant_id,x.target_org_unit_id,x.work_package_item_id,?,'TEST_USER_CONFIRMATION','用户确认启用工作车免审'
+              new_work_from,authorization_reference,reason,created_at)
+            select ?,x.tenant_id,x.target_org_unit_id,x.work_package_item_id,?,'TEST_USER_CONFIRMATION','用户确认启用例行工作免审',
+              now()-interval '30 minutes'
             from work_expectation x where x.id=?
             """,activation,from,expectation);
         return activation;
@@ -269,15 +384,73 @@ class WorkBoardIntegrationTest {
         assertThat(getBoard("?from="+day+"&to="+day).path("period").path("completed").asInt()).isEqualTo(3);
     }
 
+    @Test void routineOperationCapturesNormalRetiredVersionPendingOnlyAndPreservesAllOriginalFacts() throws Exception {
+        LocalDate day=LocalDate.of(2025,9,10);
+        UUID work=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL","AGM_NS_PUBLIC_AREA");
+        record(work,day,"SUBMITTED",-1);
+        UUID other=cloneExpectation(work,day,"SUBMITTED");
+        jdbc.update("update work_expectation set target_org_unit_id=?::uuid where id=?",OTHER_HOTEL,other);
+        record(other,day,"SUBMITTED",-1);
+        UUID approved=cloneExpectation(work,day,"SATISFIED");record(approved,day,"APPROVED",-1);
+        UUID abnormal=cloneExpectation(work,day,"SUBMITTED");
+        record(abnormal,day,"SUBMITTED",-1,MANAGER,"{\"serviceAwareness\":\"需整改\"}",null,null);
+        UUID repair=cloneExpectation(work,day,"SUBMITTED");
+        record(repair,day,"REJECTED",-2);record(repair,day,"SUBMITTED",-1);
+        UUID usage=cloneExpectation(work,day,"SUBMITTED");record(usage,day,"SUBMITTED",-1);
+        jdbc.update("""
+            insert into store_work_usage(tenant_id,work_record_id,hotel_org_unit_id,reviewer_assignment_id_snapshot,no_usage)
+            select tenant_id,id,target_org_unit_id,?::uuid,true from work_record where work_expectation_id=?
+            """,ASSIGNMENT,usage);
+        // Historic pending work is still legitimate after its published version has retired.
+        jdbc.update("""
+            update work_package_version set lifecycle_status='RETIRED' where id=(
+              select i.work_package_version_id from work_expectation x join work_package_item i on i.id=x.work_package_item_id where x.id=?)
+            """,work);
+        UUID unapproved=variantExpectation(day,"SUBMITTED","DAY",false,"MANUAL","HKA_ITEM_ISSUE");record(unapproved,day,"SUBMITTED",-1);
+        UUID current=variantExpectation(day,"AVAILABLE","DAY",false,"MANUAL","FD_WORKSTATION_READY");
+        String recordsBefore=jdbc.queryForObject("select jsonb_agg(to_jsonb(r) order by r.id)::text from work_record r where business_date=?",String.class,day);
+        String workBefore=jdbc.queryForObject("select jsonb_agg(to_jsonb(x) order by x.id)::text from work_expectation x where business_date=?",String.class,day);
+        java.nio.file.Path root=java.nio.file.Path.of("").toAbsolutePath();
+        while (!java.nio.file.Files.exists(root.resolve("tools/operations/activate-routine-exempt-review.sql"))) root=root.getParent();
+        String sql=java.nio.file.Files.readString(root.resolve("tools/operations/activate-routine-exempt-review.sql"))
+                .replace(":'tenant_id'","'"+TENANT+"'").replace(":'hotel_one'","'"+HOTEL+"'").replace(":'hotel_two'","'"+OTHER_HOTEL+"'");
+        try (var connection=POSTGRES.getPostgresDatabase().getConnection();var statement=connection.createStatement()) {
+            statement.execute(sql);
+            assertThat(jdbc.queryForObject("""
+                select count(*) from work_review_policy_correction c join work_expectation x on x.id=c.work_expectation_id where x.business_date=?
+                """,Integer.class,day)).isEqualTo(2);
+            statement.execute(sql);
+            assertThat(jdbc.queryForObject("""
+                select count(*) from work_review_policy_correction c join work_expectation x on x.id=c.work_expectation_id where x.business_date=?
+                """,Integer.class,day)).isEqualTo(2);
+        }
+        assertThat(jdbc.queryForList("""
+            select c.work_expectation_id::text from work_review_policy_correction c join work_expectation x on x.id=c.work_expectation_id where x.business_date=?
+            """,String.class,day)).containsExactlyInAnyOrder(work.toString(),other.toString());
+        assertThat(jdbc.queryForObject("""
+            select count(*) from work_review_policy_activation a join work_expectation x on x.tenant_id=a.tenant_id
+              and x.work_package_item_id=a.work_package_item_id and x.target_org_unit_id=a.target_org_unit_id where x.id=?
+            """,Integer.class,current)).isOne();
+        assertThat(jdbc.queryForObject("select jsonb_agg(to_jsonb(r) order by r.id)::text from work_record r where business_date=?",String.class,day)).isEqualTo(recordsBefore);
+        assertThat(jdbc.queryForObject("select jsonb_agg(to_jsonb(x) order by x.id)::text from work_expectation x where business_date=?",String.class,day)).isEqualTo(workBefore);
+        assertThat(jdbc.queryForObject("select status from store_work_usage where work_record_id=(select id from work_record where work_expectation_id=?)",String.class,usage)).isEqualTo("PENDING");
+        JsonNode board=getBoard("?from="+day+"&to="+day+"&size=200");
+        assertThat(board.path("period").path("completed").asInt()).isEqualTo(3);
+        assertThat(board.path("period").path("review").asInt()).isEqualTo(4);
+    }
+
     @Test void fullScopeSummaryIsNotTruncatedByPaginationAndReviewIsNotCompletion() throws Exception {
         LocalDate day = LocalDate.of(2025, 1, 17);
+        UUID assignment=isolatedAssignment();
         for (int i = 0; i < 51; i++) expectation(day, "AVAILABLE", 2);
         expectation(day, "MISSED", -2);
         UUID review = expectation(day, "SUBMITTED", -2);
-        record(review, day, "SUBMITTED", -1);
         UUID complete = expectation(day, "SATISFIED", -2);
+        jdbc.update("update work_expectation set position_assignment_id=? where business_date=?",assignment,day);
+        record(review, day, "SUBMITTED", -1);
         record(complete, day, "APPROVED", -3);
-        JsonNode result = getBoard("?from=" + day + "&to=" + day + "&orgUnitId=" + HOTEL + "&assignmentId=" + ASSIGNMENT + "&size=10");
+        String scope="&orgUnitId="+HOTEL+"&assignmentId="+assignment;
+        JsonNode result = getBoard("?from=" + day + "&to=" + day + scope + "&size=10");
         JsonNode m = result.path("period");
         assertThat(result.path("items").size()).isEqualTo(10);
         assertThat(m.path("expected").asInt()).isEqualTo(54);
@@ -289,28 +462,31 @@ class WorkBoardIntegrationTest {
         assertThat(m.path("on_time_completed").asInt()).isEqualTo(1);
         assertThat(m.path("late").asInt()).isEqualTo(1);
         assertThat(result.path("items").get(0).path("id").asText()).isEqualTo(review.toString());
-        assertThat(result.path("recentSubmissions").size()).isBetween(2,5);
+        assertThat(result.path("recentSubmissions").size()).isEqualTo(2);
         assertThat(result.path("recentSubmissions").get(0).path("id").asText()).isEqualTo(review.toString());
-        JsonNode lastPage = getBoard("?from=" + day + "&to=" + day + "&orgUnitId=" + HOTEL + "&size=10&page=5");
+        JsonNode lastPage = getBoard("?from=" + day + "&to=" + day + scope + "&size=10&page=5");
         assertThat(lastPage.path("items").size()).isEqualTo(4);
         assertThat(lastPage.path("filtered").path("item_count").asInt()).isEqualTo(54);
-        assertThat(getBoard("?from=" + day + "&to=" + day + "&lateOnly=true")
+        assertThat(getBoard("?from=" + day + "&to=" + day + scope + "&lateOnly=true")
                 .path("items").get(0).path("board_status").asText()).isEqualTo("REVIEW");
     }
 
     @Test void oldDailyMissesStayHistoricalButLateReviewsRemainDiscoverable() throws Exception {
         LocalDate old = LocalDate.of(2024, 12, 14);
+        UUID assignment=isolatedAssignment();
         UUID missed = expectation(old, "MISSED", -2);
         UUID submitted = expectation(old, "SUBMITTED", -2);
-        record(submitted, old, "SUBMITTED", -1);
         UUID approved = expectation(old, "SATISFIED", -2);
+        jdbc.update("update work_expectation set position_assignment_id=? where business_date=?",assignment,old);
+        record(submitted, old, "SUBMITTED", -1);
         record(approved, old, "APPROVED", -1);
-        JsonNode today = getBoard("");
+        String scope="assignmentId="+assignment;
+        JsonNode today = getBoard("?"+scope);
         assertThat(today.path("items").findValuesAsText("id")).doesNotContain(missed.toString(), submitted.toString());
         assertThat(today.path("recentSubmissions").findValuesAsText("id")).contains(submitted.toString(), approved.toString());
-        JsonNode queue = getBoard("?queue=REVIEW");
+        JsonNode queue = getBoard("?queue=REVIEW&"+scope);
         assertThat(queue.path("items").findValuesAsText("id")).contains(submitted.toString()).doesNotContain(missed.toString());
-        assertThat(getBoard("?from=" + old + "&to=" + old).path("items").findValuesAsText("id"))
+        assertThat(getBoard("?from=" + old + "&to=" + old+"&"+scope).path("items").findValuesAsText("id"))
                 .contains(missed.toString(), submitted.toString());
     }
 

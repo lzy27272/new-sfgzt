@@ -20,21 +20,23 @@ public final class WorkReviewPolicy {
               %1$s.item_type in ('REVIEW_APPROVAL','METRIC_REVIEW')
               or coalesce(%1$s.execution_policy ->> 'handoverConfirmationRequired','false') = 'true'
               or coalesce(%1$s.execution_policy ->> 'highRiskImmediateEscalation','false') = 'true'
+              or coalesce(%1$s.execution_policy ->> 'reworkReinspectionRequired','false') = 'true'
               or coalesce(%1$s.execution_policy ->> 'inventoryUsage','false') = 'true'
               or coalesce(%1$s.submission_policy ->> 'inventoryUsage','false') = 'true'
               or nullif(btrim(%1$s.execution_policy ->> 'inventoryMovement'),'') is not null
+              or exists (select 1 from store_work_usage usage
+                join work_record usage_record on usage_record.tenant_id=usage.tenant_id and usage_record.id=usage.work_record_id
+                where usage_record.tenant_id=%2$s.tenant_id and usage_record.work_expectation_id=%2$s.id)
               or %1$s.item_code in ('HKA_ITEM_ISSUE','HKA_USAGE_RETURN','HKA_DAILY_REPORT','HKA_LOST_PROPERTY','HKA_COMPLAINT_EVENT',
                                     'NSA_ITEM_ISSUE','NSA_DAILY_HANDOVER','NSA_LOST_PROPERTY')
               or ((coalesce(%1$s.execution_policy ->> 'requiresExceptionReview','false')='true'
-                    or %1$s.item_code='HKA_CART_PREPARATION')
+                    or work_review_routine_exemption_eligible(%1$s))
                 and exists (select 1 from work_record exception_record
                   where exception_record.tenant_id=%2$s.tenant_id and exception_record.work_expectation_id=%2$s.id
                     and exception_record.id=(select latest.id from work_record latest
                       where latest.tenant_id=%2$s.tenant_id and latest.work_expectation_id=%2$s.id
                       order by latest.series_entry_no desc,latest.attempt_no desc,latest.id desc limit 1)
-                    and (btrim(coalesce(exception_record.exception_statement,'')) not in ('','无','无异常','正常','未发现问题')
-                      or exception_record.payload ->> 'issueFound' = 'true'
-                      or btrim(coalesce(exception_record.payload ->> 'issueSummary','')) not in ('','无','无异常','正常','未发现问题'))))
+                    and work_review_record_has_exception(exception_record)))
               or (%2$s.status <> 'SATISFIED' and exists (select 1 from work_record failed_review
                 where failed_review.tenant_id = %2$s.tenant_id
                   and failed_review.work_expectation_id = %2$s.id and failed_review.status = 'REJECTED'))

@@ -117,9 +117,16 @@ public class WeComDeliveryWorker {
                     left join lateral (
                         select count(*)::integer as pending_count
                         from work_record pending_record
+                        left join work_package_item pending_item
+                          on pending_item.tenant_id=pending_record.tenant_id and pending_item.id=pending_record.work_package_item_id
+                        left join work_expectation pending_expectation
+                          on pending_expectation.tenant_id=pending_record.tenant_id and pending_expectation.id=pending_record.work_expectation_id
                         where pending_record.tenant_id = report.tenant_id
                           and pending_record.position_assignment_id = report.position_assignment_id
                           and pending_record.business_date = report.business_date and pending_record.status = 'SUBMITTED'
+                          and coalesce(
+                    """ + WorkReviewPolicy.effectiveModeSql("pending_item", "pending_expectation") + """
+                          ,'MANUAL')<>'NONE'
                           and exists (select 1 from work_package_item_responsibility responsibility
                             where responsibility.tenant_id = pending_record.tenant_id
                               and responsibility.work_package_item_id = pending_record.work_package_item_id
@@ -281,9 +288,16 @@ public class WeComDeliveryWorker {
                     left join lateral (
                         select count(*)::integer as pending_count
                         from work_record pending_record
+                        left join work_package_item pending_item
+                          on pending_item.tenant_id=pending_record.tenant_id and pending_item.id=pending_record.work_package_item_id
+                        left join work_expectation pending_expectation
+                          on pending_expectation.tenant_id=pending_record.tenant_id and pending_expectation.id=pending_record.work_expectation_id
                         where pending_record.tenant_id = report.tenant_id
                           and pending_record.position_assignment_id = report.position_assignment_id
                           and pending_record.business_date = report.business_date and pending_record.status = 'SUBMITTED'
+                          and coalesce(
+                    """ + WorkReviewPolicy.effectiveModeSql("pending_item", "pending_expectation") + """
+                          ,'MANUAL')<>'NONE'
                           and exists (select 1 from work_package_item_responsibility responsibility
                             where responsibility.tenant_id = pending_record.tenant_id
                               and responsibility.work_package_item_id = pending_record.work_package_item_id

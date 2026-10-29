@@ -46,6 +46,7 @@ class WorkVisibilityIntegrationTest {
     private static final UUID ITEM = UUID.randomUUID();
     private static final UUID SHARED_ITEM = UUID.randomUUID();
     private static final UUID CART_ITEM = UUID.randomUUID();
+    private static final UUID ROUTINE_ITEM = UUID.randomUUID();
     private static final UUID VERSION = UUID.randomUUID();
     private static final UUID FORM_VERSION = UUID.randomUUID();
     private static final EmbeddedPostgres POSTGRES = startPostgres();
@@ -59,6 +60,8 @@ class WorkVisibilityIntegrationTest {
     @Autowired DailyReportService reports;
     @Autowired ObjectMapper mapper;
     @Autowired cn.sifangguan.hotelaios.dashboard.DashboardService dashboards;
+    @Autowired NotificationService notifications;
+    @Autowired cn.sifangguan.hotelaios.dailyreports.DailyReportDispatchTransactionService reportDispatch;
     @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
 
     @DynamicPropertySource
@@ -496,6 +499,120 @@ class WorkVisibilityIntegrationTest {
         assertThat(jdbc.queryForObject("select status from work_record where id=?",String.class,record)).isEqualTo("SUBMITTED");
     }
 
+    @Test void activeInboxHidesCorrectedNormalRoutineReviewsButRetainsAbnormalAndTaskNotifications() {
+        UUID owner=UUID.randomUUID(),employee=actor(owner,HOTEL,"ASSISTANT_GENERAL_MANAGER",true);
+        UUID normalWork=expectation(employee,HOTEL,ROUTINE_ITEM),normalRecord=draftRecord(employee,HOTEL,normalWork);
+        UUID abnormalWork=expectation(employee,HOTEL,ROUTINE_ITEM),abnormalRecord=draftRecord(employee,HOTEL,abnormalWork);
+        jdbc.update("update work_expectation set status='SUBMITTED',business_date=business_date-1 where id=?",normalWork);
+        jdbc.update("update work_expectation set status='SUBMITTED' where id=?",abnormalWork);
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now(),business_date=(select business_date from work_expectation where id=?) where id=?",owner,normalWork,normalRecord);
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now(),payload='{\"serviceAwareness\":\"需整改\"}'::jsonb where id=?",owner,abnormalRecord);
+        UUID managerAccount=jdbc.queryForObject("select e.account_id from employee e join employee_position_assignment a on a.employee_id=e.id where a.id=?",UUID.class,MANAGER);
+        UUID normalNotice=UUID.randomUUID(),abnormalNotice=UUID.randomUUID(),taskNotice=UUID.randomUUID(),otherNotice=UUID.randomUUID();
+        for (UUID notice : List.of(normalNotice,abnormalNotice)) jdbc.update("""
+                insert into notification(id,tenant_id,recipient_account_id,recipient_assignment_id,notification_type,title,content,source_type,source_id,idempotency_key)
+                values(?,?,?,?,'WORK_RECORD_REVIEW_PENDING','例行工作待审核','原始审核提醒','WORK_RECORD',?,?)
+                """,notice,TENANT,managerAccount,MANAGER,notice.equals(normalNotice)?normalRecord:abnormalRecord,"routine-inbox:"+notice);
+        jdbc.update("""
+                insert into notification(id,tenant_id,recipient_account_id,recipient_assignment_id,notification_type,title,content,source_type,source_id,idempotency_key)
+                values(?,?,?,?,'TASK_RESULT_SUBMITTED','下达任务待验收','任务仍须人工审核','TASK',?,?)
+                """,taskNotice,TENANT,managerAccount,MANAGER,UUID.randomUUID(),"task-inbox:"+taskNotice);
+        jdbc.update("""
+                insert into notification(id,tenant_id,recipient_account_id,recipient_assignment_id,notification_type,title,content,source_type,source_id,idempotency_key)
+                values(?,?,?,?,'WORK_RECORD_REVIEW_PENDING','其他账号的提醒','不属于当前账号','WORK_RECORD',?,?)
+                """,otherNotice,TENANT,owner,employee,abnormalRecord,"own-inbox:"+otherNotice);
+        String originalNotices=jdbc.queryForObject("select jsonb_agg(to_jsonb(n) order by id)::text from notification n where id in (?,?,?,?)",String.class,normalNotice,abnormalNotice,taskNotice,otherNotice);
+        String originalRecord=jdbc.queryForObject("select to_jsonb(r)::text from work_record r where id=?",String.class,normalRecord);
+        String originalExpectation=jdbc.queryForObject("select to_jsonb(x)::text from work_expectation x where id=?",String.class,normalWork);
+        TenantContext.set(identities.resolve(TENANT,managerAccount,UUID.randomUUID(),MANAGER));
+        assertThat(notifications.list(false)).extracting(row->row.get("id"))
+                .contains(normalNotice,abnormalNotice,taskNotice).doesNotContain(otherNotice);
+        UUID activation=jdbc.queryForObject("""
+                insert into work_review_policy_activation(tenant_id,target_org_unit_id,work_package_item_id,new_work_from,authorization_reference,reason)
+                values(?,?,?,?,'TEST_ROUTINE_CONFIRMATION','已确认：正常例行工作及既有待审免审') returning id
+                """,UUID.class,TENANT,HOTEL,ROUTINE_ITEM,LocalDate.now(ZoneId.of("Asia/Shanghai")));
+        jdbc.update("""
+                insert into work_review_policy_correction(tenant_id,activation_id,work_expectation_id,work_record_id,before_record,before_expectation)
+                select x.tenant_id,?,x.id,r.id,to_jsonb(r),to_jsonb(x) from work_expectation x
+                join work_record r on r.tenant_id=x.tenant_id and r.work_expectation_id=x.id where r.id=?
+                """,activation,normalRecord);
+        for (boolean unreadOnly : List.of(false,true)) assertThat(notifications.list(unreadOnly))
+                .extracting(row->row.get("id")).contains(abnormalNotice,taskNotice).doesNotContain(normalNotice,otherNotice);
+        assertThat(jdbc.queryForObject("select jsonb_agg(to_jsonb(n) order by id)::text from notification n where id in (?,?,?,?)",String.class,normalNotice,abnormalNotice,taskNotice,otherNotice)).isEqualTo(originalNotices);
+        assertThat(jdbc.queryForObject("select to_jsonb(r)::text from work_record r where id=?",String.class,normalRecord)).isEqualTo(originalRecord);
+        assertThat(jdbc.queryForObject("select to_jsonb(x)::text from work_expectation x where id=?",String.class,normalWork)).isEqualTo(originalExpectation);
+        TenantContext.set(identities.resolve(TENANT,owner,UUID.randomUUID(),employee));
+        assertThat(notifications.list(false)).extracting(row->row.get("id"))
+                .contains(otherNotice).doesNotContain(normalNotice,abnormalNotice,taskNotice);
+    }
+
+    @Test void aggregateReviewRemindersUseManualSourceCountsWithoutSuppressingReportRevisionReview() throws Exception {
+        UUID owner=UUID.randomUUID(),employee=actor(owner,HOTEL,"ASSISTANT_GENERAL_MANAGER",true);
+        jdbc.update("update employee_position_assignment set manager_assignment_id=? where id=?",MANAGER,employee);
+        UUID normalWork=expectation(employee,HOTEL,ROUTINE_ITEM),normalRecord=draftRecord(employee,HOTEL,normalWork);
+        UUID abnormalWork=expectation(employee,HOTEL,ROUTINE_ITEM),abnormalRecord=draftRecord(employee,HOTEL,abnormalWork);
+        jdbc.update("update work_expectation set status='SUBMITTED' where id in (?,?)",normalWork,abnormalWork);
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now() where id=?",owner,normalRecord);
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now(),payload='{\"hasException\":true}'::jsonb where id=?",owner,abnormalRecord);
+        UUID report=projectedReport(employee,normalRecord);
+        UUID revision=jdbc.queryForObject("select current_revision_id from daily_report where id=?",UUID.class,report);
+        jdbc.update("update daily_report set report_status='SUBMITTED',review_status='PENDING',submitted_at=now() where id=?",report);
+        jdbc.update("update daily_report_revision set revision_status='SUBMITTED',content_hash=repeat('a',64),submitted_at=now(),submitted_by_account_id=? where id=?",owner,revision);
+        UUID managerAccount=jdbc.queryForObject("select e.account_id from employee e join employee_position_assignment a on a.employee_id=e.id where a.id=?",UUID.class,MANAGER);
+        TenantContext.set(identities.resolve(TENANT,managerAccount,UUID.randomUUID(),MANAGER));
+        var policyType=Class.forName("cn.sifangguan.hotelaios.dailyreports.DailyReportDispatchTransactionService$PolicyAssignment");
+        var constructor=policyType.getDeclaredConstructors()[0];
+        constructor.setAccessible(true);
+        Object policy=constructor.newInstance(null,null,null,VERSION,employee,HOTEL,
+                jdbc.queryForObject("select employee_id from employee_position_assignment where id=?",UUID.class,employee),
+                null,null,0,List.of(),List.of());
+        LocalDate reportDay=jdbc.queryForObject("select business_date from daily_report where id=?",LocalDate.class,report);
+        TenantPrincipal dispatchOperator=identities.resolve(TENANT,owner,UUID.randomUUID(),employee);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(reportDispatch,"notifyManagerOfPendingReviews",dispatchOperator,report,policy,reportDay);
+        UUID aggregateTwo=jdbc.queryForObject("select id from notification where source_id=? and idempotency_key=? and recipient_account_id=?",UUID.class,report,"daily-report:review-pending:"+report+":2",managerAccount);
+        String originalAggregate=jdbc.queryForObject("select to_jsonb(n)::text from notification n where id=?",String.class,aggregateTwo);
+        UUID revisionNotice=UUID.randomUUID();
+        jdbc.update("""
+                insert into notification(id,tenant_id,recipient_account_id,recipient_assignment_id,notification_type,title,content,source_type,source_id,idempotency_key)
+                values(?,?,?,?,'DAILY_REPORT_REVIEW_PENDING','日报待审核','真实日报修订需要审核','DAILY_REPORT',?,?)
+                """,revisionNotice,TENANT,managerAccount,MANAGER,report,"report-review:"+report+":"+revision);
+        UUID activation=jdbc.queryForObject("""
+                insert into work_review_policy_activation(tenant_id,target_org_unit_id,work_package_item_id,new_work_from,authorization_reference,reason)
+                values(?,?,?,?,'TEST_ROUTINE_AGGREGATE','普通例行工作及待审按免审执行') returning id
+                """,UUID.class,TENANT,HOTEL,ROUTINE_ITEM,LocalDate.now(ZoneId.of("Asia/Shanghai")));
+        jdbc.update("""
+                insert into work_review_policy_correction(tenant_id,activation_id,work_expectation_id,work_record_id,before_record,before_expectation)
+                select x.tenant_id,?,x.id,r.id,to_jsonb(r),to_jsonb(x) from work_expectation x
+                join work_record r on r.tenant_id=x.tenant_id and r.work_expectation_id=x.id where r.id=?
+                """,activation,normalRecord);
+        assertThat(notifications.list(false).stream().filter(row->aggregateTwo.equals(row.get("id"))).findFirst().orElseThrow().get("content"))
+                .isEqualTo(reportDay+" 当前共有 1 项普通工作待复核，请查看日报来源记录。");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(reportDispatch,"notifyManagerOfPendingReviews",dispatchOperator,report,policy,reportDay);
+        UUID aggregateOne=jdbc.queryForObject("select id from notification where source_id=? and idempotency_key=? and recipient_account_id=?",UUID.class,report,"daily-report:review-pending:"+report+":1",managerAccount);
+        jdbc.update("insert into wecom_user_binding(tenant_id,corp_id,wecom_user_id,account_id,preferred_assignment_id,user_id_fingerprint) values(?,'qa-aggregate-corp','qa-aggregate-member',?,?,repeat('d',64))",TENANT,managerAccount,MANAGER);
+        var properties=org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComProperties.class);
+        org.mockito.Mockito.when(properties.tenantId()).thenReturn(TENANT);
+        org.mockito.Mockito.when(properties.corpId()).thenReturn("qa-aggregate-corp");
+        var worker=new cn.sifangguan.hotelaios.integrations.wecom.WeComDeliveryWorker(
+                new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
+                new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc,true),
+                new org.springframework.transaction.support.TransactionTemplate(transactions),
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.finance.FinanceDeliveryEligibilityService.class),200);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery where notification_id=?",Integer.class,aggregateTwo)).isZero();
+        UUID aggregateDelivery=jdbc.queryForObject("select id from notification_delivery where notification_id=?",UUID.class,aggregateOne);
+        UUID revisionDelivery=jdbc.queryForObject("select id from notification_delivery where notification_id=?",UUID.class,revisionNotice);
+        jdbc.update("update work_record set status='APPROVED',reviewed_by_account_id=?,reviewed_at=now(),review_reason='异常已人工核验' where id=?",managerAccount,abnormalRecord);
+        jdbc.update("update work_expectation set status='SATISFIED' where id=?",abnormalWork);
+        for (boolean unreadOnly : List.of(false,true)) assertThat(notifications.list(unreadOnly)).extracting(row->row.get("id"))
+                .contains(revisionNotice).doesNotContain(aggregateOne,aggregateTwo);
+        List<?> claimed=org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"claim");
+        assertThat(claimed).extracting("id").contains(revisionDelivery).doesNotContain(aggregateDelivery);
+        assertThat(jdbc.queryForObject("select to_jsonb(n)::text from notification n where id=?",String.class,aggregateTwo)).isEqualTo(originalAggregate);
+        assertThat(jdbc.queryForObject("select status from work_record where id=?",String.class,normalRecord)).isEqualTo("SUBMITTED");
+    }
+
     private UUID expectation(UUID assignment, UUID org) {
         return expectation(assignment, org, ITEM);
     }
@@ -560,6 +677,12 @@ class WorkVisibilityIntegrationTest {
                   period_type,timezone_mode,due_local_time,form_version_id,review_mode)
                 values(?,?,?,'HKA_CART_PREPARATION','工作车整理','INSPECTION','DAY','TENANT','23:59',?,'MANUAL')
                 """,CART_ITEM,TENANT,VERSION,FORM_VERSION);
+        jdbc.update("""
+                insert into work_package_item(id,tenant_id,work_package_version_id,item_code,name,item_type,
+                  period_type,timezone_mode,due_local_time,form_version_id,review_mode)
+                values(?,?,?,'AGM_NS_PUBLIC_AREA','例行公共区域巡查','INSPECTION','DAY','TENANT','23:59',?,'MANUAL')
+                """,ROUTINE_ITEM,TENANT,VERSION,FORM_VERSION);
+        jdbc.update("insert into work_package_item_responsibility(tenant_id,work_package_item_id,participant_type,resolver_type) values(?,?,'REVIEWER','DIRECT_MANAGER_ASSIGNMENT')",TENANT,ROUTINE_ITEM);
         jdbc.update("""
                 update work_package_version set lifecycle_status = 'PUBLISHED', content_hash = repeat('a',64),
                   effective_from = now() - interval '1 day', published_at = now()
