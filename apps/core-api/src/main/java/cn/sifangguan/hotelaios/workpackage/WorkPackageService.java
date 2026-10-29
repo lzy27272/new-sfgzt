@@ -963,12 +963,12 @@ public class WorkPackageService {
             predicates.add("""
                     (x.business_date between :boardScanFrom and :boardScanTo
                      or x.status = 'SUBMITTED'
-                     or (i.review_mode <> 'NONE' and first_record.pending_review_count > 0)
+                     or (%1$s <> 'NONE' and first_record.pending_review_count > 0)
                      or latest_record.submitted_at >= :boardRecentSince
                      or x.status = 'FAILED' or latest_record.status in ('REJECTED','RETURNED')
-                     or (i.required and i.review_mode = 'NONE' and latest_record.status in ('SUBMITTED','APPROVED'))
+                     or (i.required and %1$s = 'NONE' and latest_record.status in ('SUBMITTED','APPROVED'))
                      or (i.period_type <> 'DAY' and x.status in ('PLANNED','AVAILABLE','IN_PROGRESS','MISSED','FAILED')))
-                    """);
+                    """.formatted(cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy.configuredModeSql("i", "x")));
         }
         if (status != null && !status.isBlank()) {
             predicates.add("x.status = :status");
