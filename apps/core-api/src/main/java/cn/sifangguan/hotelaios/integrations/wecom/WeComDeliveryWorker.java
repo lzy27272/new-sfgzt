@@ -1,6 +1,7 @@
 package cn.sifangguan.hotelaios.integrations.wecom;
 
 import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
+import cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy;
 import cn.sifangguan.hotelaios.finance.FinanceDeliveryEligibilityService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -109,6 +110,10 @@ public class WeComDeliveryWorker {
                     left join work_record record
                       on n.source_type = 'WORK_RECORD'
                      and record.tenant_id = n.tenant_id and record.id = n.source_id
+                    left join work_package_item review_item
+                      on review_item.tenant_id=record.tenant_id and review_item.id=record.work_package_item_id
+                    left join work_expectation review_expectation
+                      on review_expectation.tenant_id=record.tenant_id and review_expectation.id=record.work_expectation_id
                     left join lateral (
                         select count(*)::integer as pending_count
                         from work_record pending_record
@@ -218,7 +223,9 @@ public class WeComDeliveryWorker {
                                             and revision.revision_status = 'SUBMITTED'))))
                            or (n.source_type = 'WORK_RECORD' and record.id is not null
                                and (n.notification_type <> 'WORK_RECORD_REVIEW_PENDING'
-                                    or record.status = 'SUBMITTED')))
+                                    or (record.status = 'SUBMITTED' and coalesce(
+                    """ + WorkReviewPolicy.effectiveModeSql("review_item", "review_expectation") + """
+                                    ,'MANUAL')<>'NONE'))))
                       and (ub.id is not null
                            or (n.source_type = 'TASK' and chat.chat_id is not null))
                       and not exists (
@@ -267,6 +274,10 @@ public class WeComDeliveryWorker {
                     left join work_record record
                       on n.source_type = 'WORK_RECORD'
                      and record.tenant_id = n.tenant_id and record.id = n.source_id
+                    left join work_package_item review_item
+                      on review_item.tenant_id=record.tenant_id and review_item.id=record.work_package_item_id
+                    left join work_expectation review_expectation
+                      on review_expectation.tenant_id=record.tenant_id and review_expectation.id=record.work_expectation_id
                     left join lateral (
                         select count(*)::integer as pending_count
                         from work_record pending_record
@@ -375,7 +386,9 @@ public class WeComDeliveryWorker {
                                             and revision.revision_status = 'SUBMITTED'))))
                            or (n.source_type = 'WORK_RECORD' and record.id is not null
                                and (n.notification_type <> 'WORK_RECORD_REVIEW_PENDING'
-                                    or record.status = 'SUBMITTED')))
+                                    or (record.status = 'SUBMITTED' and coalesce(
+                    """ + WorkReviewPolicy.effectiveModeSql("review_item", "review_expectation") + """
+                                    ,'MANUAL')<>'NONE'))))
                       and d.status in ('PENDING', 'FAILED')
                       and d.available_at <= now() and (d.next_retry_at is null or d.next_retry_at <= now())
                       and (d.locked_until is null or d.locked_until < now())

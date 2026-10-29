@@ -45,6 +45,7 @@ class WorkVisibilityIntegrationTest {
     private static final UUID MANAGER = UUID.fromString("19200000-0000-0000-0000-000000000001");
     private static final UUID ITEM = UUID.randomUUID();
     private static final UUID SHARED_ITEM = UUID.randomUUID();
+    private static final UUID CART_ITEM = UUID.randomUUID();
     private static final UUID VERSION = UUID.randomUUID();
     private static final UUID FORM_VERSION = UUID.randomUUID();
     private static final EmbeddedPostgres POSTGRES = startPostgres();
@@ -466,6 +467,35 @@ class WorkVisibilityIntegrationTest {
         assertThat(claimed).extracting("sourceId").doesNotContain(report);
     }
 
+    @Test void activatedCartReviewNoticesAreNotEnqueuedOrClaimedAfterThePolicyChanges() {
+        UUID owner=UUID.randomUUID(),employee=actor(owner,HOTEL,"HOUSEKEEPING_ATTENDANT",true);
+        UUID work=expectation(employee,HOTEL,CART_ITEM),record=draftRecord(employee,HOTEL,work);
+        jdbc.update("update work_expectation set status='SUBMITTED' where id=?",work);
+        jdbc.update("update work_record set status='SUBMITTED',submitted_by_account_id=?,submitted_at=now() where id=?",owner,record);
+        UUID managerAccount=jdbc.queryForObject("select e.account_id from employee e join employee_position_assignment a on a.employee_id=e.id where a.id=?",UUID.class,MANAGER);
+        jdbc.update("insert into wecom_user_binding(tenant_id,corp_id,wecom_user_id,account_id,preferred_assignment_id,user_id_fingerprint) values(?,'qa-cart-corp','qa-cart-member',?,?,repeat('c',64))",TENANT,managerAccount,MANAGER);
+        UUID queued=UUID.randomUUID(),later=UUID.randomUUID();
+        jdbc.update("insert into notification(id,tenant_id,recipient_account_id,recipient_assignment_id,notification_type,title,content,source_type,source_id,idempotency_key) values(?,?,?,?,'WORK_RECORD_REVIEW_PENDING','工作车待审','测试','WORK_RECORD',?,?)",queued,TENANT,managerAccount,MANAGER,record,"cart-queued:"+record);
+        var properties=org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComProperties.class);
+        org.mockito.Mockito.when(properties.tenantId()).thenReturn(TENANT);
+        org.mockito.Mockito.when(properties.corpId()).thenReturn("qa-cart-corp");
+        var worker=new cn.sifangguan.hotelaios.integrations.wecom.WeComDeliveryWorker(
+                new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(jdbc),
+                new cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext(jdbc,true),
+                new org.springframework.transaction.support.TransactionTemplate(transactions),
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.integrations.wecom.WeComApiClient.class),properties,
+                org.mockito.Mockito.mock(cn.sifangguan.hotelaios.finance.FinanceDeliveryEligibilityService.class),200);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery where notification_id=?",Integer.class,queued)).isOne();
+        jdbc.update("insert into work_review_policy_activation(tenant_id,target_org_unit_id,work_package_item_id,new_work_from,authorization_reference,reason) values(?,?,?,current_date,'TEST_CONFIRMATION','用户确认工作车免审')",TENANT,HOTEL,CART_ITEM);
+        jdbc.update("insert into notification(id,tenant_id,recipient_account_id,recipient_assignment_id,notification_type,title,content,source_type,source_id,idempotency_key) values(?,?,?,?,'WORK_RECORD_REVIEW_PENDING','过期待审','测试','WORK_RECORD',?,?)",later,TENANT,managerAccount,MANAGER,record,"cart-later:"+record);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"enqueueTaskNotifications");
+        assertThat(jdbc.queryForObject("select count(*) from notification_delivery where notification_id=?",Integer.class,later)).isZero();
+        List<?> claimed=org.springframework.test.util.ReflectionTestUtils.invokeMethod(worker,"claim");
+        assertThat(claimed).extracting("sourceId").doesNotContain(record);
+        assertThat(jdbc.queryForObject("select status from work_record where id=?",String.class,record)).isEqualTo("SUBMITTED");
+    }
+
     private UUID expectation(UUID assignment, UUID org) {
         return expectation(assignment, org, ITEM);
     }
@@ -525,6 +555,11 @@ class WorkVisibilityIntegrationTest {
                   '{"allowedPositionCodes":["ASSISTANT_GENERAL_MANAGER"],"sharedKey":"TEST-SHARED"}'::jsonb)
                 """, SHARED_ITEM, TENANT, VERSION, FORM_VERSION);
         jdbc.update("insert into work_package_item_responsibility(tenant_id,work_package_item_id,participant_type,resolver_type) values(?,?,'REVIEWER','DIRECT_MANAGER_ASSIGNMENT')", TENANT, ITEM);
+        jdbc.update("""
+                insert into work_package_item(id,tenant_id,work_package_version_id,item_code,name,item_type,
+                  period_type,timezone_mode,due_local_time,form_version_id,review_mode)
+                values(?,?,?,'HKA_CART_PREPARATION','工作车整理','INSPECTION','DAY','TENANT','23:59',?,'MANUAL')
+                """,CART_ITEM,TENANT,VERSION,FORM_VERSION);
         jdbc.update("""
                 update work_package_version set lifecycle_status = 'PUBLISHED', content_hash = repeat('a',64),
                   effective_from = now() - interval '1 day', published_at = now()
