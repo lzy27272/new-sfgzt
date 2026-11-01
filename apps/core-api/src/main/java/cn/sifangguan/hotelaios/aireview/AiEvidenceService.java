@@ -31,14 +31,23 @@ public class AiEvidenceService {
     private final AiVisionGateway gateway;
     private final int dailyLimit;
     private final Set<UUID> pilotHotels;
+    private final Set<UUID> backfillHotels;
+    private static final java.time.LocalDate BACKFILL_DATE=java.time.LocalDate.of(2026,10,27);
+    private static final Set<String> BACKFILL_ITEMS=Set.of("GM_APPEARANCE_MORNING_MEETING",
+            "GM_APPEARANCE_MORNING_MEETING_V2","GM_APPEARANCE_MEETING_V56",
+            "AGM_NS_APPEARANCE_MEETING","AGM_WS_APPEARANCE_MEETING");
+    private final String previewSecret=UUID.randomUUID().toString();
 
     public AiEvidenceService(NamedParameterJdbcTemplate jdbc,TenantDatabaseContext db,AccessPolicy access,
             WorkVisibilityPolicy visibility,AuditWriter audit,AttachmentService files,ObjectMapper json,
             AiVisionGateway gateway,@Value("${app.ai-evidence.daily-request-limit:100}") int dailyLimit,
-            @Value("${app.ai-evidence.pilot-hotel-ids:}") String pilotHotels) {
+            @Value("${app.ai-evidence.pilot-hotel-ids:}") String pilotHotels,
+            @Value("${app.ai-evidence.backfill-hotel-ids:1aab2120-75bd-4f68-b360-92b39636980a,12000000-0000-4000-8000-000000000002}") String backfillHotels) {
         this.jdbc=jdbc;this.db=db;this.access=access;this.visibility=visibility;this.audit=audit;
         this.files=files;this.json=json;this.gateway=gateway;this.dailyLimit=Math.max(1,Math.min(10000,dailyLimit));
         this.pilotHotels=Set.copyOf(Arrays.stream(pilotHotels.split(",")).map(String::trim)
+                .filter(s->!s.isEmpty()).map(UUID::fromString).toList());
+        this.backfillHotels=Set.copyOf(Arrays.stream(backfillHotels.split(",")).map(String::trim)
                 .filter(s->!s.isEmpty()).map(UUID::fromString).toList());
     }
     // Distributing standards to all hotels must never implicitly authorize outbound photos.
@@ -329,6 +338,7 @@ public class AiEvidenceService {
         return one("""
                 select w.id,w.position_assignment_id,w.submitted_by_account_id,w.status,w.business_date,
                     w.target_org_unit_id,a.position_id,i.item_code,e.account_id,
+                    coalesce((select u.display_name from user_account u where u.tenant_id=w.tenant_id and u.id=w.submitted_by_account_id),e.name) as owner_name,w.submitted_at,
                     coalesce((select o.id from org_unit_closure c join org_unit o on o.tenant_id=c.tenant_id and o.id=c.ancestor_id
                       where c.tenant_id=w.tenant_id and c.descendant_id=w.target_org_unit_id and o.unit_type='HOTEL'
                       order by c.depth limit 1),w.target_org_unit_id) as hotel_id
@@ -354,7 +364,7 @@ public class AiEvidenceService {
         // reading their other work. Record ownership/visibility is checked above.
         String scope=participantRule(r,activeRules())!=null ? "true" : visibility.scope(access.principal(),p).summary("a");
         return jdbc.queryForList("""
-                select a.position_assignment_id as id,a.position_id,e.name,pd.name as position_name
+                select a.position_assignment_id as id,a.position_id,e.id as employee_id,e.name,pd.name as position_name
                 from (select a.*,a.id as position_assignment_id,cast(:hotel as uuid) as target_org_unit_id
                     from employee_position_assignment a join org_unit_closure c on c.tenant_id=a.tenant_id
                       and c.descendant_id=a.org_unit_id and c.ancestor_id=:hotel
@@ -434,6 +444,200 @@ public class AiEvidenceService {
             evidenceContent(a);result.add(a);
         }
         return result;
+    }
+    private boolean backfillManager() {
+        var p=access.principal();
+        return p.hasRole("PLATFORM_ADMIN") || p.hasPermission("ai-evidence.backfill");
+    }
+    private void requireBackfill(Map<String,Object> r) {
+        if(!backfillManager()) throw new AccessDeniedException("仅平台管理员或后台明确授权的门店负责人可发起AI补查");
+        access.requireOrgScope((UUID)r.get("hotel_id"));
+        requirePilotHotel(r.get("hotel_id"));
+        if(!backfillHotels.contains(r.get("hotel_id"))) throw new AccessDeniedException("此门店不在本次历史补查的授权范围");
+        if(!BACKFILL_DATE.equals(((java.sql.Date)r.get("business_date")).toLocalDate())
+                || !BACKFILL_ITEMS.contains(String.valueOf(r.get("item_code"))))
+            throw new AccessDeniedException("本次补查仅适用于两家试点店2026年10月27日的仪容仪表工作");
+        if(!Set.of("SUBMITTED","APPROVED").contains(r.get("status"))) throw conflict("原工作尚未提交或状态已变化，请刷新后处理");
+        boolean submitted=Boolean.TRUE.equals(jdbc.queryForObject("""
+                select (submitted_at at time zone 'Asia/Shanghai')::date=date '2026-10-27'
+                from work_record where tenant_id=:tenant and id=:record
+                """,params().addValue("record",r.get("id")),Boolean.class));
+        if(!submitted) throw new AccessDeniedException("原工作不属于2026年10月27日上传批次");
+    }
+    private int remainingBackfillCalls() {
+        Long used=jdbc.queryForObject("""
+                select (select count(*) from ai_evidence_event where tenant_id=:tenant and action='MODEL_STARTED'
+                  and created_at>=date_trunc('day',now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai')
+                  +(select count(*) from ai_evidence_check where tenant_id=:tenant and state='QUEUED')
+                """,params(),Long.class);
+        return (int)Math.max(0,dailyLimit-(used==null?0:used));
+    }
+    private List<Map<String,Object>> backfillPhotos(UUID recordId) {
+        return jdbc.queryForList("""
+                select id,original_name,media_type,checkpoint_code,'WORK' as source,created_at,
+                  (created_at at time zone 'Asia/Shanghai')::date=date '2026-10-27' as batch_eligible
+                from attachment where tenant_id=:tenant and work_record_id=:record
+                union all
+                select id,original_name,media_type,null as checkpoint_code,'AI' as source,created_at,
+                  (created_at at time zone 'Asia/Shanghai')::date=date '2026-10-27' as batch_eligible
+                from ai_evidence_photo where tenant_id=:tenant and work_record_id=:record order by created_at,id
+                """,params().addValue("record",recordId));
+    }
+    private List<Map<String,Object>> backfillSubjects(UUID recordId) {
+        // Current validity is rechecked by subjects(); historical images cannot be assigned to a later hire.
+        var historical=jdbc.queryForList("""
+                select id from employee_position_assignment where tenant_id=:tenant
+                  and valid_from<=date '2026-10-27' and (valid_to is null or valid_to>=date '2026-10-27')
+                """,params(),UUID.class);
+        var r=record(recordId);var rules=activeRules();
+        var people=subjects(recordId).stream().filter(s->historical.contains(s.get("id"))).map(s->{
+            var result=new LinkedHashMap<>(s);result.put("configured",resolveRule(r,s.get("position_id"),rules)!=null);return (Map<String,Object>)result;
+        }).sorted(Comparator.comparing(s->!Boolean.TRUE.equals(s.get("configured")))).toList();
+        var unique=new LinkedHashMap<Object,Map<String,Object>>();
+        people.forEach(s->unique.putIfAbsent(s.get("employee_id"),s));
+        return List.copyOf(unique.values());
+    }
+    @Transactional(readOnly=true)
+    public Map<String,Object> backfillContext(UUID recordId) {
+        var r=record(recordId);
+        try { requireBackfill(r); }
+        catch(AccessDeniedException | ResponseStatusException denied) {
+            return Map.of("canBackfill",false,"blockedReason",denied instanceof ResponseStatusException rs?Objects.toString(rs.getReason(),""):denied.getMessage());
+        }
+        var actor=one("select display_name as name from user_account where tenant_id=:tenant and id=:actor",params());
+        var original=new LinkedHashMap<String,Object>();original.put("ownerName",r.get("owner_name"));
+        original.put("submittedAt",r.get("submitted_at"));original.put("businessDate",r.get("business_date"));
+        var result=new LinkedHashMap<String,Object>();
+        result.put("canBackfill",true);result.put("blockedReason","");result.put("providerReady",gateway.ready());
+        result.put("dailyRequestLimit",dailyLimit);result.put("remainingCalls",remainingBackfillCalls());result.put("original",original);result.put("actor",actor);
+        result.put("attachments",backfillPhotos(recordId));result.put("subjects",backfillSubjects(recordId));
+        var backfills=jdbc.queryForList("""
+                select c.id,u.display_name as requester_name,event.reason as backfill_reason
+                from ai_evidence_check c join ai_evidence_event event on event.tenant_id=c.tenant_id and event.check_id=c.id and event.action='BACKFILL_REQUESTED'
+                join user_account u on u.tenant_id=c.tenant_id and u.id=c.requested_by
+                where c.tenant_id=:tenant and c.work_record_id=:record
+                """,params().addValue("record",recordId)).stream().collect(java.util.stream.Collectors.toMap(row->row.get("id"),row->row));
+        result.put("backfillChecks",checks(recordId).stream().filter(c->backfills.containsKey(c.get("id"))).map(c->{
+            var merged=new LinkedHashMap<>(c);merged.putAll(backfills.get(c.get("id")));return merged;
+        }).toList());
+        return result;
+    }
+    private record BackfillPlan(Map<String,Object> preview,List<Map<String,Object>> people) {}
+    private List<Map<String,Object>> backfillEvidence(UUID recordId,List<UUID> ids) {
+        var evidence=evidence(recordId,ids);
+        for(var photo:evidence) try(var input=evidenceContent(photo).resource().getInputStream()) {
+            var digest=MessageDigest.getInstance("SHA-256");
+            byte[] buffer=new byte[8192];int read;
+            while((read=input.read(buffer))!=-1) digest.update(buffer,0,read);
+            if(!HexFormat.of().formatHex(digest.digest()).equals(photo.get("sha256"))) throw conflict("照片内容已变化，请人工复核");
+        } catch(ResponseStatusException changed) { throw changed; }
+        catch(Exception unavailable) { throw new IllegalArgumentException("照片文件当前不可用，请人工复核"); }
+        return evidence;
+    }
+    private BackfillPlan planBackfill(UUID recordId,AiEvidenceModels.BackfillRequest request) {
+        var r=record(recordId);requireBackfill(r);
+        if(request.reason()==null || request.reason().isBlank() || request.reason().length()>1000
+                || request.photos()==null || request.photos().isEmpty() || request.photos().size()>100)
+            throw new IllegalArgumentException("请填写补查原因并确认照片用途");
+        var attachments=backfillPhotos(recordId).stream().collect(java.util.stream.Collectors.toMap(a->(UUID)a.get("id"),a->a));
+        var subjects=backfillSubjects(recordId).stream().collect(java.util.stream.Collectors.toMap(s->(UUID)s.get("id"),s->s));
+        var groups=new TreeMap<UUID,List<UUID>>();var excluded=new ArrayList<Map<String,Object>>();var seen=new HashSet<UUID>();
+        for(var photo:request.photos()) {
+            if(photo==null || photo.attachmentId()==null || !seen.add(photo.attachmentId())) throw new IllegalArgumentException("照片不能重复选择");
+            var attachment=attachments.get(photo.attachmentId());
+            if(attachment==null) throw new AccessDeniedException("照片不属于原工作记录");
+            if(!Set.of("SINGLE","MEETING","GROUP","OTHER","UNCONFIRMED").contains(Objects.toString(photo.purpose(),"")))
+                throw new IllegalArgumentException("请选择有效照片用途");
+            if(!"SINGLE".equals(photo.purpose())) {
+                if(photo.subjectAssignmentId()!=null || photo.confirmed()) throw new IllegalArgumentException("非单人仪容照片不能关联被检查员工");
+                excluded.add(Map.of("attachmentId",photo.attachmentId(),"reason",switch(photo.purpose()) {
+                    case "MEETING"->"会议记录";case "GROUP"->"多人合照";case "OTHER"->"其他用途";default->"尚未确认用途";
+                }));continue;
+            }
+            if("meeting_minutes".equals(attachment.get("checkpoint_code"))) throw new IllegalArgumentException("晨会纪要不能作为个人仪容照片");
+            if(!Boolean.TRUE.equals(attachment.get("batch_eligible"))) throw new AccessDeniedException("只能选择2026年10月27日已上传的照片");
+            if(photo.subjectAssignmentId()==null || !photo.confirmed()) throw new IllegalArgumentException("请明确选择员工并确认该照片为此员工的单人照片");
+            if(!subjects.containsKey(photo.subjectAssignmentId())) throw new AccessDeniedException("被检查员工不在本门店有效任职及历史批次范围");
+            groups.computeIfAbsent(photo.subjectAssignmentId(),key->new ArrayList<>()).add(photo.attachmentId());
+        }
+        var rules=activeRules();var people=new ArrayList<Map<String,Object>>();int images=0,duplicates=0;
+        var tokenData=new ArrayList<Object>();tokenData.add(access.principal().tenantId());tokenData.add(access.principal().actorId());
+        tokenData.add(Objects.toString(access.principal().businessActorAssignmentId(),""));tokenData.add(recordId);
+        tokenData.add(r.get("submitted_at"));tokenData.add(r.get("position_assignment_id"));tokenData.add(request.reason().trim());tokenData.add(request.photos());
+        for(var group:groups.entrySet()) {
+            if(group.getValue().size()>4) throw new IllegalArgumentException("每名员工最多选择4张单人照片");
+            var subject=subjects.get(group.getKey());var rule=resolveRule(r,subject.get("position_id"),rules);
+            if(rule==null) throw new IllegalArgumentException("此员工或工作项尚未配置适用的仪容仪表规则");
+            var evidence=backfillEvidence(recordId,group.getValue());
+            // Samples must still exist and pass retention checks before a manager confirms outbound work.
+            for(var sample:node(rule.get("configuration")).path("sampleIds")) sampleDownload(UUID.fromString(sample.asText()));
+            var existing=jdbc.queryForList("""
+                    select c.id from ai_evidence_check c join employee_position_assignment a
+                      on a.tenant_id=c.tenant_id and a.id=c.subject_assignment_id
+                    where c.tenant_id=:tenant and c.work_record_id=:record and a.employee_id=:employee
+                    order by c.created_at desc,c.id limit 1
+                    """,params().addValue("record",recordId).addValue("employee",subject.get("employee_id")));
+            var person=new LinkedHashMap<String,Object>();person.put("subjectAssignmentId",group.getKey());person.put("name",subject.get("name"));
+            person.put("attachmentIds",group.getValue());person.put("ruleId",rule.get("id"));person.put("ruleVersion",rule.get("version_no"));
+            person.put("duplicate",!existing.isEmpty());person.put("evidence",evidence);person.put("existingId",existing.isEmpty()?null:existing.getFirst().get("id"));
+            people.add(person);tokenData.add(rule.get("id"));tokenData.add(evidence);
+            if(existing.isEmpty()) images+=evidence.size();else duplicates++;
+        }
+        int count=people.size()-duplicates,remaining=remainingBackfillCalls();
+        String blocked=!gateway.ready()?"AI接口尚未配置或外发审批未完成":count==0?"所选员工均已有检查或尚未选择可检查照片":remaining<count?"当日可用调用额度不足，请稍后重新预览":"";
+        var preview=new LinkedHashMap<String,Object>();preview.put("previewToken",hash(previewSecret+encode(tokenData)));
+        preview.put("personCount",count);preview.put("imageCount",images);preview.put("excludedCount",excluded.size());preview.put("duplicateCount",duplicates);
+        preview.put("remainingCalls",remaining);preview.put("canEnqueue",blocked.isEmpty());preview.put("blockedReason",blocked);
+        preview.put("subjects",people.stream().map(p->{var copy=new LinkedHashMap<>(p);copy.remove("evidence");copy.remove("existingId");return copy;}).toList());
+        preview.put("excluded",excluded);return new BackfillPlan(preview,people);
+    }
+    @Transactional(readOnly=true)
+    public Map<String,Object> backfillPreview(UUID recordId,AiEvidenceModels.BackfillRequest request) {
+        return planBackfill(recordId,request).preview();
+    }
+    @Transactional
+    public Map<String,Object> backfill(UUID recordId,AiEvidenceModels.BackfillRequest request) {
+        // Same tenant quota lock as claim(); no network request occurs in this transaction.
+        prepare();jdbc.queryForObject("select pg_advisory_xact_lock(hashtextextended(:key,81))",params()
+                .addValue("key",access.principal().tenantId().toString()),Object.class);
+        var selected=request.photos().stream().map(AiEvidenceModels.BackfillPhoto::subjectAssignmentId).filter(Objects::nonNull).distinct().toList();
+        var lockSubjects=selected.isEmpty()?List.<UUID>of():jdbc.queryForList("""
+                select a.id from employee_position_assignment a where a.tenant_id=:tenant and a.employee_id in (
+                  select s.employee_id from employee_position_assignment s where s.tenant_id=:tenant and s.id in (:selected))
+                order by a.id
+                """,params().addValue("selected",selected),UUID.class);
+        for(UUID subject:lockSubjects)
+            jdbc.queryForObject("select pg_advisory_xact_lock(hashtextextended(:key,82))",params()
+                    .addValue("key",access.principal().tenantId()+":"+recordId+":"+subject),Object.class);
+        var plan=planBackfill(recordId,request);
+        if(request.previewToken()==null || !MessageDigest.isEqual(request.previewToken().getBytes(StandardCharsets.UTF_8),
+                String.valueOf(plan.preview().get("previewToken")).getBytes(StandardCharsets.UTF_8))) throw conflict("规则、照片或补查信息已变化，请重新预览后确认");
+        int count=((Number)plan.preview().get("personCount")).intValue();
+        if(count>0 && !Boolean.TRUE.equals(plan.preview().get("canEnqueue"))) throw conflict(String.valueOf(plan.preview().get("blockedReason")));
+        int createdCount=0;
+        for(var person:plan.people()) {
+            if(Boolean.TRUE.equals(person.get("duplicate"))) continue;
+            UUID id=UUID.randomUUID();
+            @SuppressWarnings("unchecked") var evidence=(List<Map<String,Object>>)person.get("evidence");
+            String signature=evidence.stream().map(a->a.get("id")+":"+a.get("sha256")).sorted().reduce("",(a,b)->a+"|"+b);
+            String fingerprint=hash(recordId+":"+person.get("subjectAssignmentId")+":"+person.get("ruleId")+signature);
+            jdbc.update("""
+                    insert into ai_evidence_check(id,tenant_id,work_record_id,subject_assignment_id,rule_id,requested_by,
+                      requested_assignment_id,evidence,fingerprint,state)
+                    values(:id,:tenant,:record,:subject,:rule,:actor,:assignment,cast(:evidence as jsonb),:hash,'QUEUED')
+                    """,params().addValue("id",id).addValue("record",recordId).addValue("subject",person.get("subjectAssignmentId"))
+                    .addValue("rule",person.get("ruleId")).addValue("assignment",access.principal().businessActorAssignmentId())
+                    .addValue("evidence",encode(evidence)).addValue("hash",fingerprint));
+            event(id,"BACKFILL_REQUESTED",request.reason().trim());
+            audit.record("AI_EVIDENCE_BACKFILL_MAPPING_CONFIRMED","AI_EVIDENCE_CHECK",id,
+                    encode(Map.of("reason",request.reason().trim(),"photos",request.photos(),"ruleId",person.get("ruleId"),
+                            "subjectAssignmentId",person.get("subjectAssignmentId"),"evidence",evidence,"mode","SHADOW")));
+            createdCount++;
+        }
+        var selectedIds=plan.people().stream().map(p->p.get("subjectAssignmentId")).collect(java.util.stream.Collectors.toSet());
+        var priorIds=plan.people().stream().map(p->p.get("existingId")).filter(Objects::nonNull).collect(java.util.stream.Collectors.toSet());
+        return Map.of("checks",checks(recordId).stream().filter(c->selectedIds.contains(c.get("subject_assignment_id")) || priorIds.contains(c.get("id"))).toList(),
+                "queuedCount",createdCount,"duplicateCount",plan.preview().get("duplicateCount"));
     }
     @Transactional
     public Map<String,Object> request(UUID recordId,AiEvidenceModels.CheckRequest request) {
@@ -546,9 +750,13 @@ public class AiEvidenceService {
     }
     @Transactional
     public void invalidateRequester(UUID tenant,UUID id) {
+        invalidateQueued(tenant,id,"IDENTITY_CHANGED");
+    }
+    @Transactional
+    public void invalidateQueued(UUID tenant,UUID id,String failure) {
         db.apply(tenant);
-        jdbc.update("update ai_evidence_check set state='UNAVAILABLE',failure_code='IDENTITY_CHANGED',row_version=row_version+1 where tenant_id=:tenant and id=:id and state='QUEUED'",
-                new MapSqlParameterSource("tenant",tenant).addValue("id",id));
+        jdbc.update("update ai_evidence_check set state='UNAVAILABLE',failure_code=:failure,row_version=row_version+1 where tenant_id=:tenant and id=:id and state='QUEUED'",
+                new MapSqlParameterSource("tenant",tenant).addValue("id",id).addValue("failure",failure));
     }
     @Transactional
     public Map<String,Object> claim(UUID id) {
@@ -561,7 +769,30 @@ public class AiEvidenceService {
             jdbc.update("update ai_evidence_check set state='UNAVAILABLE',failure_code='SUPERSEDED',row_version=row_version+1 where tenant_id=:tenant and id=:id",p);
             return Map.of();
         }
-        var r=record((UUID)c.get("work_record_id"));owner(r);access.requirePermission("work-record.submit");
+        if(!access.principal().actorId().equals(c.get("requested_by"))) throw new AccessDeniedException("检查发起人身份已变化");
+        var r=record((UUID)c.get("work_record_id"));
+        boolean backfill=Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from ai_evidence_event where tenant_id=:tenant and check_id=:id and action='BACKFILL_REQUESTED')
+                """,p,Boolean.class));
+        if(backfill) {
+            requireBackfill(r);
+            if(!gateway.ready()) throw conflict("模型当前不可用，请转人工复核");
+            var currentSubject=backfillSubjects((UUID)c.get("work_record_id")).stream()
+                    .filter(s->c.get("subject_assignment_id").equals(s.get("id"))).findFirst()
+                    .orElseThrow(()->new AccessDeniedException("被检查人任职或授权范围已变化"));
+            var rule=resolveRule(r,currentSubject.get("position_id"),activeRules());
+            if(rule==null || !c.get("rule_id").equals(rule.get("id"))) throw conflict("检查规则已变化，请由管理人员核对");
+            var attachments=backfillPhotos((UUID)c.get("work_record_id"));
+            for(var photo:node(c.get("evidence"))) {
+                UUID photoId=UUID.fromString(photo.path("id").asText());
+                var attachment=attachments.stream().filter(a->photoId.equals(a.get("id"))).findFirst()
+                        .orElseThrow(()->new AccessDeniedException("补查照片已删除"));
+                if(!Boolean.TRUE.equals(attachment.get("batch_eligible")) || "meeting_minutes".equals(attachment.get("checkpoint_code")))
+                    throw new AccessDeniedException("补查照片批次或用途已变化");
+                var actual=backfillEvidence((UUID)c.get("work_record_id"),List.of(photoId)).getFirst();
+                if(!photo.path("sha256").asText().equals(actual.get("sha256"))) throw conflict("补查证据已变化");
+            }
+        } else { owner(r);access.requirePermission("work-record.submit"); }
         requirePilotHotel(r.get("hotel_id"));
         if(subjects((UUID)c.get("work_record_id")).stream().noneMatch(s->c.get("subject_assignment_id").equals(s.get("id"))))
             throw new AccessDeniedException("被检查人任职或授权范围已变化");

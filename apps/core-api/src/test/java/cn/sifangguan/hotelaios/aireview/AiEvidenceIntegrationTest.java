@@ -66,6 +66,7 @@ class AiEvidenceIntegrationTest {
         r.add("app.ai-evidence.enabled",()->false);
         r.add("app.ai-evidence.daily-request-limit",()->2);
         r.add("app.ai-evidence.pilot-hotel-ids",()->HOTEL);
+        r.add("app.ai-evidence.backfill-hotel-ids",()->HOTEL);
     }
     static EmbeddedPostgres postgres() { try { return EmbeddedPostgres.builder().start(); } catch(Exception e) { throw new ExceptionInInitializerError(e); } }
     static Path temp() { try { return Files.createTempDirectory("ai-evidence-test-"); } catch(Exception e) { throw new ExceptionInInitializerError(e); } }
@@ -146,6 +147,202 @@ class AiEvidenceIntegrationTest {
             .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of("expectedVersion",check.path("row_version").asInt(),"action",action,"reason",reason))),expected);
     }
     void principal() { TenantContext.set(identities.resolve(UUID.fromString(TENANT),UUID.fromString(MANAGER),UUID.randomUUID(),UUID.fromString(ASSIGNMENT))); }
+
+    UUID backfillRecord() throws Exception {
+        return backfillRecord(HOTEL,"2026-10-27","2026-10-27 10:17+08");
+    }
+    UUID backfillRecord(String org,String date,String submitted) throws Exception {
+        rule(true);when(gateway.ready()).thenReturn(true);
+        UUID id=UUID.randomUUID();
+        jdbc.update("""
+                insert into work_record(id,tenant_id,org_unit_id,employee_id,position_assignment_id,form_version_id,
+                  business_date,status,payload,submitted_at,work_package_version_id,work_package_item_id,record_kind,
+                  target_org_unit_id,occurred_at,submitted_by_account_id,attempt_no,content_hash,completion_statement)
+                select ?,a.tenant_id,?::uuid,a.employee_id,a.id,i.form_version_id,?::date,'SUBMITTED','{}'::jsonb,
+                  ?::timestamptz,i.work_package_version_id,i.id,'INSPECTION',?::uuid,now(),?::uuid,1,repeat('b',64),'历史仪容补查测试'
+                from employee_position_assignment a cross join work_package_item i where a.id=?::uuid and i.id=?::uuid
+                """,id,org,date,submitted,org,MANAGER,ASSIGNMENT,ITEM);
+        return id;
+    }
+    String backfillPhoto(UUID id) throws Exception {
+        String photo=upload(id);
+        jdbc.update("update ai_evidence_photo set created_at=timestamptz '2026-10-27 10:16+08' where id=?::uuid",photo);
+        return photo;
+    }
+    com.fasterxml.jackson.databind.node.ObjectNode backfillBody(String... photos) {
+        var body=json.createObjectNode().put("reason","原提交人暂不可操作，由授权管理人员核对照片后补查");
+        var list=body.putArray("photos");
+        for(String photo:photos) list.addObject().put("attachmentId",photo).put("purpose","SINGLE").put("subjectAssignmentId",ASSIGNMENT).put("confirmed",true);
+        return body;
+    }
+    JsonNode preview(UUID id,JsonNode body) throws Exception {
+        return response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID)
+                .contentType(MediaType.APPLICATION_JSON).content(body.toString()),200);
+    }
+    JsonNode enqueue(UUID id,JsonNode body,int expected) throws Exception {
+        return response(as(post("/api/v1/ai-evidence/records/{id}/backfill",id),PlatformAdminTestFixture.ACCOUNT_ID)
+                .contentType(MediaType.APPLICATION_JSON).content(body.toString()),expected);
+    }
+    void adminPrincipal() {
+        TenantContext.set(identities.resolve(UUID.fromString(TENANT),UUID.fromString(PlatformAdminTestFixture.ACCOUNT_ID),UUID.randomUUID(),null));
+    }
+    void managerBackfillPrincipal(boolean granted,Set<UUID> scopes) {
+        var p=identities.resolve(UUID.fromString(TENANT),UUID.fromString(MANAGER),UUID.randomUUID(),UUID.fromString(ASSIGNMENT));
+        var permissions=new HashSet<>(p.permissions());if(granted) permissions.add("ai-evidence.backfill");
+        TenantContext.set(new cn.sifangguan.hotelaios.shared.context.TenantPrincipal(p.tenantId(),p.actorId(),p.roleCode(),p.roleCodes(),permissions,
+                scopes,p.assignmentIds(),p.businessActorAssignmentId(),false,p.correlationId()));
+    }
+    @Test void managerBackfillPreservesRealActorOriginalRecordAndDeduplicatesPhotosByEmployee() throws Exception {
+        UUID id=backfillRecord();String first=backfillPhoto(id),second=backfillPhoto(id);
+        var before=jdbc.queryForMap("select * from work_record where id=?",id);
+        var context=response(as(get("/api/v1/ai-evidence/records/{id}/backfill",id),PlatformAdminTestFixture.ACCOUNT_ID),200);
+        assertThat(context.path("canBackfill").asBoolean()).isTrue();
+        assertThat(context.path("subjects").isArray()).isTrue();
+        var body=backfillBody(first,second);var preview=preview(id,body);
+        assertThat(preview.path("personCount").asInt()).isEqualTo(1);assertThat(preview.path("imageCount").asInt()).isEqualTo(2);
+        body.put("previewToken",preview.path("previewToken").asText());var queued=enqueue(id,body,200);
+        assertThat(queued.path("queuedCount").asInt()).isEqualTo(1);
+        var check=queued.path("checks").get(0);
+        assertThat(check.path("requested_by").asText()).isEqualTo(PlatformAdminTestFixture.ACCOUNT_ID);
+        assertThat(jdbc.queryForObject("select requested_assignment_id from ai_evidence_check where id=?::uuid",UUID.class,check.path("id").asText())).isNull();
+        assertThat(check.path("evidence")).hasSize(2);assertThat(check.path("state").asText()).isEqualTo("QUEUED");
+        assertThat(enqueue(id,body,200).path("queuedCount").asInt()).isZero();
+        var restored=response(as(get("/api/v1/ai-evidence/records/{id}/backfill",id),PlatformAdminTestFixture.ACCOUNT_ID),200).path("backfillChecks");
+        assertThat(restored).hasSize(1);assertThat(restored.get(0).path("requester_name").asText()).isEqualTo("集成测试平台管理员");
+        assertThat(restored.get(0).path("backfill_reason").asText()).isEqualTo(body.path("reason").asText());
+        assertThat(jdbc.queryForObject("select reason from ai_evidence_event where check_id=?::uuid and action='BACKFILL_REQUESTED'",String.class,check.path("id").asText()))
+                .isEqualTo(body.path("reason").asText());
+        when(gateway.inspect(any(),any())).thenReturn(new AiVisionGateway.Observation(json.readTree("{\"personCount\":1,\"checks\":[]}"),31,9,"offline-test"));
+        new AiEvidenceWorker(service,gateway,identities,TENANT).process();
+        assertThat(jdbc.queryForObject("select state from ai_evidence_check where id=?::uuid",String.class,check.path("id").asText())).isEqualTo("COMPLETE");
+        assertThat(jdbc.queryForMap("select * from work_record where id=?",id)).isEqualTo(before);
+        verify(gateway).inspect(any(),argThat(images->images.size()==2)); // Offline mock, never an external provider.
+    }
+    @Test void backfillRequiresExplicitPermissionScopeAndDoesNotRelaxOwnerApi() throws Exception {
+        UUID id=backfillRecord();var body=backfillBody(backfillPhoto(id));
+        var context=response(as(get("/api/v1/ai-evidence/records/{id}/backfill",id),MANAGER),200);
+        assertThat(context.path("canBackfill").asBoolean()).isFalse();assertThat(context.has("attachments")).isFalse();
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),MANAGER).contentType(MediaType.APPLICATION_JSON).content(body.toString()),403);
+        response(as(post("/api/v1/ai-evidence/records/{id}/checks",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"subjectAssignmentId\":\""+ASSIGNMENT+"\",\"attachmentIds\":[\""+body.path("photos").get(0).path("attachmentId").asText()+"\"]}"),403);
+        var request=json.treeToValue(body,AiEvidenceModels.BackfillRequest.class);
+        managerBackfillPrincipal(true,Set.of(UUID.fromString(OTHER_HOTEL)));
+        assertThatThrownBy(()->service.backfillPreview(id,request)).isInstanceOf(cn.sifangguan.hotelaios.shared.security.AccessDeniedException.class);
+        managerBackfillPrincipal(true,Set.of(UUID.fromString(HOTEL)));
+        var preview=service.backfillPreview(id,request);body.put("previewToken",String.valueOf(preview.get("previewToken")));
+        var queued=service.backfill(id,json.treeToValue(body,AiEvidenceModels.BackfillRequest.class));
+        @SuppressWarnings("unchecked") var check=((List<Map<String,Object>>)queued.get("checks")).getFirst();
+        assertThat(check.get("requested_by")).isEqualTo(UUID.fromString(MANAGER));assertThat(check.get("requested_assignment_id")).isEqualTo(UUID.fromString(ASSIGNMENT));
+        managerBackfillPrincipal(false,Set.of(UUID.fromString(HOTEL)));
+        assertThatThrownBy(()->service.claim((UUID)check.get("id"))).isInstanceOf(cn.sifangguan.hotelaios.shared.security.AccessDeniedException.class);
+        assertThat(jdbc.queryForObject("select count(*) from ai_evidence_event where action='MODEL_STARTED'",Integer.class)).isZero();
+    }
+    @Test void backfillRejectsOtherDatesHotelsAndPhotoBatches() throws Exception {
+        UUID id=backfillRecord(HOTEL,"2026-10-28","2026-10-27 10:17+08");String photo=backfillPhoto(id);var body=backfillBody(photo);
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON).content(body.toString()),403);
+        id=backfillRecord(HOTEL,"2026-10-27","2026-10-28 01:00+08");
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON).content(body.toString()),403);
+        id=backfillRecord();photo=backfillPhoto(id);body=backfillBody(photo);
+        jdbc.update("update ai_evidence_photo set created_at=timestamptz '2026-10-28 01:00+08' where id=?::uuid",photo);
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON).content(body.toString()),403);
+        id=backfillRecord(OTHER_HOTEL,"2026-10-27","2026-10-27 10:17+08");
+        assertThat(response(as(get("/api/v1/ai-evidence/records/{id}/backfill",id),PlatformAdminTestFixture.ACCOUNT_ID),200).path("canBackfill").asBoolean()).isFalse();
+    }
+    @Test void backfillRequiresExplicitCorrespondenceExcludesGroupsAndInvalidatesChangedPreview() throws Exception {
+        UUID id=backfillRecord();String first=backfillPhoto(id),group=backfillPhoto(id);var body=backfillBody(first);
+        var excluded=body.withArray("photos").addObject().put("attachmentId",group).put("purpose","GROUP").put("confirmed",false);
+        var initial=preview(id,body);assertThat(initial.path("excludedCount").asInt()).isEqualTo(1);
+        ((com.fasterxml.jackson.databind.node.ObjectNode)body.withArray("photos").get(0)).put("confirmed",false);
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON).content(body.toString()),400);
+        ((com.fasterxml.jackson.databind.node.ObjectNode)body.withArray("photos").get(0)).put("confirmed",true);
+        body.put("previewToken",initial.path("previewToken").asText()).put("reason","修改后的补查原因");enqueue(id,body,409);
+        body.put("reason","原提交人暂不可操作，由授权管理人员核对照片后补查");
+        rule(true);enqueue(id,body,409);
+        var duplicate=backfillBody(first,first);
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON).content(duplicate.toString()),400);
+        verify(gateway,never()).inspect(any(),any());
+    }
+    @Test void backfillPreviewAndWorkerEnforceRetentionBytesAndSecurityScan() throws Exception {
+        UUID id=backfillRecord();String photo=backfillPhoto(id);var body=backfillBody(photo);
+        ageImage(photo,6);jdbc.update("update data_retention_policy set image_cleanup_enabled=true where tenant_id=?::uuid",TENANT);
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON).content(body.toString()),410);
+        jdbc.update("update data_retention_policy set image_cleanup_enabled=false where tenant_id=?::uuid",TENANT);
+        var preview=preview(id,body);body.put("previewToken",preview.path("previewToken").asText());
+        jdbc.update("update ai_evidence_photo set scan_status='INFECTED' where id=?::uuid",photo);enqueue(id,body,404);
+        jdbc.update("update ai_evidence_photo set scan_status='CLEAN' where id=?::uuid",photo);
+        var queued=enqueue(id,body,200);adminPrincipal();
+        jdbc.update("update image_retention_object set state='DELETED',deleted_at=now() where source_id=?::uuid",photo);
+        UUID check=UUID.fromString(queued.path("checks").get(0).path("id").asText());
+        assertThatThrownBy(()->service.claim(check)).isInstanceOf(RuntimeException.class);
+        new AiEvidenceWorker(service,gateway,identities,TENANT).process();
+        assertThat(jdbc.queryForObject("select failure_code from ai_evidence_check where id=?",String.class,check)).isEqualTo("EVIDENCE_EXPIRED");
+        assertThat(jdbc.queryForObject("select count(*) from ai_evidence_event where action='MODEL_STARTED'",Integer.class)).isZero();
+        verify(gateway,never()).inspect(any(),any());
+    }
+    @Test void backfillRejectsMissingOrChangedFileBeforeAnyQueueOrModelCall() throws Exception {
+        UUID id=backfillRecord();String photo=backfillPhoto(id);var body=backfillBody(photo);
+        var preview=preview(id,body);body.put("previewToken",preview.path("previewToken").asText());
+        Path file=PHOTOS.resolve(jdbc.queryForObject("select object_key from ai_evidence_photo where id=?::uuid",String.class,photo));
+        Files.write(file,new byte[]{1,2,3});enqueue(id,body,409);Files.delete(file);enqueue(id,body,400);
+        assertThat(jdbc.queryForObject("select count(*) from ai_evidence_check where work_record_id=?",Integer.class,id)).isZero();
+    }
+    @Test void backfillRechecksQuotaReadinessAndSkipsExistingRootWithChangedPhotos() throws Exception {
+        UUID first=backfillRecord();String photo=backfillPhoto(first);var body=backfillBody(photo);
+        when(gateway.ready()).thenReturn(false);assertThat(preview(first,body).path("canEnqueue").asBoolean()).isFalse();
+        when(gateway.ready()).thenReturn(true);var preview=preview(first,body);body.put("previewToken",preview.path("previewToken").asText());enqueue(first,body,200);
+        var changed=backfillBody(backfillPhoto(first));var duplicate=preview(first,changed);
+        assertThat(duplicate.path("duplicateCount").asInt()).isEqualTo(1);assertThat(duplicate.path("personCount").asInt()).isZero();
+        changed.put("previewToken",duplicate.path("previewToken").asText());assertThat(enqueue(first,changed,200).path("queuedCount").asInt()).isZero();
+        UUID second=backfillRecord();var secondBody=backfillBody(backfillPhoto(second));var secondPreview=preview(second,secondBody);
+        secondBody.put("previewToken",secondPreview.path("previewToken").asText());enqueue(second,secondBody,200);
+        UUID third=backfillRecord();var thirdBody=backfillBody(backfillPhoto(third));var denied=preview(third,thirdBody);
+        assertThat(denied.path("remainingCalls").asInt()).isZero();assertThat(denied.path("canEnqueue").asBoolean()).isFalse();
+        thirdBody.put("previewToken",denied.path("previewToken").asText());enqueue(third,thirdBody,409);
+    }
+    @Test void meetingCheckpointCannotBeRelabelledAsPersonalPhoto() throws Exception {
+        UUID id=backfillRecord();principal();
+        var upload=files.upload(id,new MockMultipartFile("file","minutes.png","image/png",photo()),"FILE_PICKER","meeting_minutes",null,null);
+        String photo=String.valueOf(upload.get("id"));
+        jdbc.update("update attachment set created_at=timestamptz '2026-10-27 10:16+08' where id=?::uuid",photo);
+        var body=backfillBody(photo);
+        response(as(post("/api/v1/ai-evidence/records/{id}/backfill/preview",id),PlatformAdminTestFixture.ACCOUNT_ID).contentType(MediaType.APPLICATION_JSON).content(body.toString()),400);
+        ((com.fasterxml.jackson.databind.node.ObjectNode)body.withArray("photos").get(0)).put("purpose","MEETING").put("confirmed",false).remove("subjectAssignmentId");
+        var preview=preview(id,body);assertThat(preview.path("excludedCount").asInt()).isEqualTo(1);assertThat(preview.path("personCount").asInt()).isZero();
+    }
+    @Test void existingCheckInAnotherAppointmentOfSameEmployeeIsNotBilledTwice() throws Exception {
+        UUID id=backfillRecord();String photo=backfillPhoto(id);
+        request(id,photo,null,200);
+        String alternative="00000000-0000-4000-8000-000000000010";
+        jdbc.update("""
+                insert into employee_position_assignment(id,tenant_id,employee_id,org_unit_id,position_id,valid_from)
+                select ?::uuid,tenant_id,employee_id,org_unit_id,position_id,date '2025-01-01'
+                from employee_position_assignment where id=?::uuid
+                """,alternative,ASSIGNMENT);
+        try {
+            var body=backfillBody(backfillPhoto(id));
+            ((com.fasterxml.jackson.databind.node.ObjectNode)body.withArray("photos").get(0)).put("subjectAssignmentId",alternative);
+            var preview=preview(id,body);assertThat(preview.path("duplicateCount").asInt()).isEqualTo(1);assertThat(preview.path("personCount").asInt()).isZero();
+            body.put("previewToken",preview.path("previewToken").asText());assertThat(enqueue(id,body,200).path("queuedCount").asInt()).isZero();
+            assertThat(jdbc.queryForObject("select count(*) from ai_evidence_check where work_record_id=?",Integer.class,id)).isEqualTo(1);
+        } finally {
+            // Assignment creation also allocates work; retain those immutable references in this disposable database.
+            jdbc.update("update employee_position_assignment set status='ENDED' where id=?::uuid",alternative);
+        }
+    }
+    @Test void backfillPreviewCannotBeReusedByAnotherActorAndEnqueueRechecksRevokedScope() throws Exception {
+        UUID id=backfillRecord();var body=backfillBody(backfillPhoto(id));var preview=preview(id,body);
+        body.put("previewToken",preview.path("previewToken").asText());
+        managerBackfillPrincipal(true,Set.of(UUID.fromString(HOTEL)));
+        var request=json.treeToValue(body,AiEvidenceModels.BackfillRequest.class);
+        assertThatThrownBy(()->service.backfill(id,request)).isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .hasMessageContaining("409");
+        var managerPreview=service.backfillPreview(id,request);body.put("previewToken",String.valueOf(managerPreview.get("previewToken")));
+        var queued=service.backfill(id,json.treeToValue(body,AiEvidenceModels.BackfillRequest.class));
+        @SuppressWarnings("unchecked") var check=((List<Map<String,Object>>)queued.get("checks")).getFirst();
+        managerBackfillPrincipal(true,Set.of(UUID.fromString(OTHER_HOTEL)));
+        assertThatThrownBy(()->service.claim((UUID)check.get("id"))).isInstanceOf(cn.sifangguan.hotelaios.shared.security.AccessDeniedException.class);
+        assertThat(jdbc.queryForObject("select count(*) from ai_evidence_event where action='MODEL_STARTED'",Integer.class)).isZero();
+    }
 
     @Test void fullShadowRetakeAppealReviewFlowPreservesFormalWorkAndEvidence() throws Exception {
         rule(true);UUID id=record(DEPT);String photo=upload(id);

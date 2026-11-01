@@ -35,7 +35,14 @@ public class AiEvidenceWorker {
                 TenantContext.set(principal);
                 Map<String,Object> job;
                 try { job=service.claim(id); }
-                catch(RuntimeException denied) { service.invalidateRequester(tenant,id);continue; }
+                catch(RuntimeException denied) {
+                    String failure="CHECK_CONTEXT_CHANGED";
+                    if(denied instanceof cn.sifangguan.hotelaios.shared.security.AccessDeniedException) failure="IDENTITY_CHANGED";
+                    else if(denied instanceof org.springframework.web.server.ResponseStatusException status
+                            && status.getStatusCode().value()==410) failure="EVIDENCE_EXPIRED";
+                    else if(denied instanceof IllegalArgumentException) failure="EVIDENCE_UNAVAILABLE";
+                    service.invalidateQueued(tenant,id,failure);continue;
+                }
                 if(job.isEmpty()) continue;
                 AiVisionGateway.Observation result=null;String error=null;
                 try { var images=service.images(job);result=provider.inspect(service.node(job.get("configuration")),images); }

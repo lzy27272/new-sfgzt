@@ -25,6 +25,12 @@ public final class AiEvidenceModels {
     public record CheckRequest(@NotNull UUID subjectAssignmentId,
                                @NotEmpty @Size(max=4) List<@NotNull UUID> attachmentIds,
                                UUID supersedesId) {}
+    public record BackfillPhoto(@NotNull UUID attachmentId,
+            @NotNull @Pattern(regexp="SINGLE|MEETING|GROUP|OTHER|UNCONFIRMED") String purpose,
+            UUID subjectAssignmentId, boolean confirmed) {}
+    public record BackfillRequest(@NotBlank @Size(max=1000) String reason,
+            @NotEmpty @Size(max=100) List<@NotNull @Valid BackfillPhoto> photos,
+            @Size(max=64) String previewToken) {}
     public record Decision(@Min(0) int expectedVersion,
                             @NotBlank @Pattern(regexp="PASS|RETAKE|OVERTURNED|APPEAL|RETRY") String action,
                             @NotBlank @Size(max=2000) String reason) {}

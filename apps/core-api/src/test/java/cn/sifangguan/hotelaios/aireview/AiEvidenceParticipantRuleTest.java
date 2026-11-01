@@ -27,7 +27,7 @@ class AiEvidenceParticipantRuleTest {
     final ObjectMapper json=new ObjectMapper();
     AiEvidenceService service(String pilots) {
         return new AiEvidenceService(jdbc,db,access,mock(WorkVisibilityPolicy.class),mock(AuditWriter.class),
-                mock(AttachmentService.class),json,gateway,100,pilots);
+                mock(AttachmentService.class),json,gateway,100,pilots,pilots);
     }
     Map<String,Object> rule(UUID position,String scope,UUID target,String item) throws Exception {
         return Map.of("id",UUID.randomUUID(),"position_id",position,"position_name","店助","version_no",1,"state","SHADOW",

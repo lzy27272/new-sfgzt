@@ -43,4 +43,19 @@ class AiEvidenceWorkerTest {
         worker.process();verify(service).invalidateRequester(tenant,id);
         verify(gateway,never()).inspect(any(),any());assertThat(TenantContext.current()).isEmpty();
     }
+    @Test void expiredBackfillPhotosAreNotMisreportedAsRevokedIdentity() {
+        ready();when(service.claim(id)).thenThrow(new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.GONE,"expired"));
+        worker.process();verify(service).invalidateQueued(tenant,id,"EVIDENCE_EXPIRED");
+        verify(gateway,never()).inspect(any(),any());verify(service,never()).images(any());
+    }
+    @Test void changedRulesReturnToManualReviewWithoutCallingModel() {
+        ready();when(service.claim(id)).thenThrow(new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,"rule changed"));
+        worker.process();verify(service).invalidateQueued(tenant,id,"CHECK_CONTEXT_CHANGED");
+        verify(gateway,never()).inspect(any(),any());
+    }
+    @Test void revokedManagerGrantStillFailsBeforeAnyImageRead() {
+        ready();when(service.claim(id)).thenThrow(new cn.sifangguan.hotelaios.shared.security.AccessDeniedException("revoked"));
+        worker.process();verify(service).invalidateQueued(tenant,id,"IDENTITY_CHANGED");
+        verify(gateway,never()).inspect(any(),any());verify(service,never()).images(any());
+    }
 }
