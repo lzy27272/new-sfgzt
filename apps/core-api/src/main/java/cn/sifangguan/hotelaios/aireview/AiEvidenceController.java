@@ -33,6 +33,11 @@ public class AiEvidenceController {
                 .header("X-Content-Type-Options","nosniff").body(download.resource());
     }
     @GetMapping("/records/{id}") public Object context(@PathVariable UUID id) { return service.context(id); }
+    @GetMapping("/records/{id}/backfill") public Object backfillContext(@PathVariable UUID id) { return service.backfillContext(id); }
+    @PostMapping("/records/{id}/backfill/preview") public Object backfillPreview(@PathVariable UUID id,
+            @Valid @RequestBody AiEvidenceModels.BackfillRequest body) { return service.backfillPreview(id,body); }
+    @PostMapping("/records/{id}/backfill") public Object backfill(@PathVariable UUID id,
+            @Valid @RequestBody AiEvidenceModels.BackfillRequest body) { return service.backfill(id,body); }
     @PostMapping(value="/records/{id}/photos",consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
     public Object photo(@PathVariable UUID id,@RequestParam(defaultValue="FILE_PICKER") String captureSource,@RequestPart("file") MultipartFile file) {
         return service.uploadPhoto(id,captureSource,file);

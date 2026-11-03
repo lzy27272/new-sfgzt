@@ -47,11 +47,14 @@ export const statusText: Record<string, string> = {
 export const failureText: Record<string, string> = {
   MODEL_NOT_CONFIGURED: '模型服务或外发审批尚未配置，请人工复核。',
   DAILY_LIMIT: '今日检查调用已达到限额，请人工复核或稍后重试。',
-  IDENTITY_CHANGED: '原提交人的任职或权限已变化，请人工复核。',
+  IDENTITY_CHANGED: '检查发起人的任职或权限已变化，请人工复核。',
   SUPERSEDED: '已有新的补拍版本，请查看最新检查。',
   WORKER_INTERRUPTED: '检查处理中断，可重试；不影响原工作提交时间。',
   PROVIDER_OR_EVIDENCE_UNAVAILABLE: '模型服务或图片暂不可用，请重试或人工复核。',
   EVIDENCE_OR_OUTPUT_INVALID: '证据已变化、过期或模型输出无法核对，请人工复核。',
+  EVIDENCE_EXPIRED: '照片已超过留存期限，本次历史补查无法使用；请转人工核对。',
+  EVIDENCE_UNAVAILABLE: '照片已删除、内容已变化或当前无法读取，请人工核对。',
+  CHECK_CONTEXT_CHANGED: '检查规则或工作情况已变化，请重新核对，不认定员工违规。',
 }
 export function latestChecks(checks: Check[]): Check[] {
   const superseded = new Set(checks.map(check => check.supersedes_id).filter(Boolean))

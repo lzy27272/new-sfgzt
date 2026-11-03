@@ -6,6 +6,7 @@ import { criterionNames, errorText, failureText, latestChecks, statusText } from
 import type { Check, ReviewContext } from './model'
 import { EvidencePhoto } from './EvidencePhoto'
 import { AiRuleReference } from './AiRuleReference'
+import { AiManagerBackfill } from './AiManagerBackfill'
 export { EvidencePhoto } from './EvidencePhoto'
 import './aiEvidence.css'
 
@@ -60,7 +61,8 @@ function EvidenceRecord({ identity, recordId, review = false, canDecide = true, 
       setChosen(ids => [...ids, attachment.id].slice(-4))
     }, '照片已关联原工作，请选择同一员工的照片后提交检查。')
   }
-  if (!resource.loading && !resource.error && !configuredSubjects.length && !checks.length) return null
+  if (!resource.loading && !resource.error && !configuredSubjects.length && !checks.length) return review
+    ? <AiManagerBackfill key={`${identity.key}:${recordId}`} identity={identity} recordId={recordId} checks={resource.data.checks} onChanged={() => { void resource.reload(); onChanged?.() }} /> : null
   return <section className="ai-card ai-record" aria-label="仪容仪表AI检查">
     <header className="ai-heading"><h2>{review ? '仪容仪表复核' : resource.data.participantScope ? '全员仪容仪表检查' : '仪容仪表 · AI 检查'}</h2><AiRuleReference identity={identity} recordId={recordId} /><span className="ai-pill">AI 建议 · 人工复核</span></header>
     <p className="ai-muted">按已启用标准检查，包括规则中启用的妆容要求；不自动扣绩效，不改变原工作提交时间。</p>
@@ -68,6 +70,7 @@ function EvidenceRecord({ identity, recordId, review = false, canDecide = true, 
     {resource.loading && <p role="status">正在读取检查记录…</p>}
     {!!resource.error && <p className="ai-error" role="alert">{errorText(resource.error)}<button type="button" className="secondary" onClick={() => void resource.reload()}>重试</button></p>}
     {error && <p className="ai-error" role="alert">{error}</p>}{message && <p className="ai-success" role="status">{message}</p>}
+    {review && <AiManagerBackfill key={`${identity.key}:${recordId}`} identity={identity} recordId={recordId} checks={resource.data.checks} onChanged={() => { void resource.reload(); onChanged?.() }} />}
     <div className={resource.data.participantScope && !review ? 'ai-participant-layout' : ''}>
     {resource.data.participantScope && !review && <aside className="ai-participant-list"><h3>本店可参与员工</h3><p className="ai-muted">选择本次参与人员，逐人关联照片；不重复生成个人工作任务。</p>
       <label>搜索姓名或岗位<input aria-label="搜索检查人员" value={peopleQuery} onChange={event => setPeopleQuery(event.target.value)} placeholder="搜索姓名或岗位" /></label>
@@ -109,7 +112,7 @@ function EvidenceRecord({ identity, recordId, review = false, canDecide = true, 
       <div className="ai-actions">{canReview && <><button className="secondary" disabled={busy || !reason.trim()} onClick={() => decide('RETAKE')}>要求补拍</button><button className="primary" disabled={busy || !reason.trim()} onClick={() => decide('PASS')}>确认通过</button><button className="secondary" disabled={busy || !reason.trim()} onClick={() => decide('OVERTURNED')}>撤销误判</button></>}{!review && resource.data.canSubmit && <><button className="secondary" disabled={busy || !reason.trim()} onClick={() => decide('APPEAL')}>申请人工复核</button>{['UNAVAILABLE', 'FAILED'].includes(current.state) && resource.data.providerReady && <button className="secondary" disabled={busy || !reason.trim()} onClick={() => decide('RETRY')}>重新检查</button>}</>}
         <button className="secondary" disabled={busy} onClick={() => void mutate(async () => { setHistory(await apiRequest(`/ai-evidence/checks/${current.id}/history`, identity)) }, '')}>查看处理记录</button></div>
       {history && <ol className="ai-history">{history.map((event, index) => <li key={`${event.created_at}:${index}`}><time>{time(event.created_at)}</time><span>{event.reason || '处理已留痕'}</span></li>)}</ol>}
-    </div> : !resource.loading && <p className="ai-empty">{configuredSubjects.length ? review ? '尚未发起 AI 检查。由原提交人在本人工作详情选择参与员工和对应照片，再点击“开始 AI 检查”。' : '此员工暂无 AI 检查记录。请选择对应照片后发起检查；系统不会自动扫描历史照片。' : '暂无适用规则，请联系管理员配置此门店和工作项。'}</p>}
+    </div> : !resource.loading && <p className="ai-empty">{configuredSubjects.length ? review ? '尚未发起 AI 检查。原提交人可在本人工作详情选择员工和对应照片；获授权管理人员可使用上方补查入口。' : '此员工暂无 AI 检查记录。请选择对应照片后发起检查；系统不会自动扫描历史照片。' : '暂无适用规则，请联系管理员配置此门店和工作项。'}</p>}
     </div></div>
     {review && <p className="ai-warning">此处仅复核 AI 影子建议。正式工作复核仍在原工作详情中完成，不替代绩效或薪酬审批。</p>}
   </section>

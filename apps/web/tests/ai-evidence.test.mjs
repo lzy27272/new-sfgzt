@@ -65,6 +65,9 @@ test('failure and uncertain states do not misrepresent employees as non-complian
   assert.match(failureText.MODEL_NOT_CONFIGURED, /人工复核/)
   assert.match(failureText.WORKER_INTERRUPTED, /不影响原工作提交时间/)
   assert.match(failureText.DAILY_LIMIT, /限额/)
+  assert.match(failureText.IDENTITY_CHANGED, /检查发起人/)
+  assert.match(failureText.EVIDENCE_EXPIRED, /照片.*留存期限/)
+  assert.match(failureText.CHECK_CONTEXT_CHANGED, /不认定员工违规/)
 })
 
 test('participant copy preserves exact manager standards, exceptions and source version', () => {
