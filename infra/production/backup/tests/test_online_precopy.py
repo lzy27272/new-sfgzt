@@ -16,10 +16,10 @@ OPTIONS=SOURCE[SOURCE.index('state_rsync_options=('):SOURCE.index('\n# Identical
 
 
 class OnlinePrecopyTest(unittest.TestCase):
- def run_copy(self,online_exit=0,final_exit=0,capacity_exit=None):
+ def run_copy(self,online_exit=0,final_exit=0,capacity_exit=None,final_fail_at=1):
   with tempfile.TemporaryDirectory() as root:
    # Stub all copying, use only synthetic paths, and retain the actual option arrays/call sites.
-   environment=os.environ.copy();environment['ONLINE_EXIT']=str(online_exit);environment['FINAL_EXIT']=str(final_exit)
+   environment=os.environ.copy();environment['ONLINE_EXIT']=str(online_exit);environment['FINAL_EXIT']=str(final_exit);environment['FINAL_FAIL_AT']=str(final_fail_at)
    script='''set -Eeuo pipefail
 source_state=/synthetic/state
 source_core=/synthetic/core
@@ -29,12 +29,15 @@ stage_raw=/synthetic/stage/raw
 source_raw=.
 measurement_root=.
 phase=ONLINE
+final_calls=0
 rsync() {
  printf 'RSYNC_PHASE=%s' "$phase"
  printf ' ARG=<%s>' "$@"
  printf '\\n'
  if [[ $phase == ONLINE ]]; then return "$ONLINE_EXIT"; fi
- return "$FINAL_EXIT"
+ final_calls=$((final_calls+1))
+ if [[ $final_calls -eq $FINAL_FAIL_AT ]]; then return "$FINAL_EXIT"; fi
+ return 0
 }
 '''+OPTIONS+'\n'+HELPER+'\n'
    if capacity_exit is None:
@@ -81,12 +84,13 @@ rsync() {
 
  def test_final_vanished_or_partial_copy_never_becomes_a_successful_snapshot(self):
   for code in (24,23,11):
-   with self.subTest(code=code):
-    result=self.run_copy(online_exit=24,final_exit=code)
-    self.assertEqual(result.returncode,code,result.stdout+result.stderr)
-    self.assertIn('ONLINE_COMPLETED',result.stdout)
-    self.assertNotIn('FINAL_COMPLETED',result.stdout)
-    self.assertEqual(result.stdout.count('RSYNC_PHASE=FINAL'),1)
+   for fail_at in (1,2,3):
+    with self.subTest(code=code,copy=fail_at):
+     result=self.run_copy(online_exit=24,final_exit=code,final_fail_at=fail_at)
+     self.assertEqual(result.returncode,code,result.stdout+result.stderr)
+     self.assertIn('ONLINE_COMPLETED',result.stdout)
+     self.assertNotIn('FINAL_COMPLETED',result.stdout)
+     self.assertEqual(result.stdout.count('RSYNC_PHASE=FINAL'),fail_at)
 
  def test_capacity_dry_run_is_still_fail_closed_for_vanished_or_partial_sources(self):
   capacity=SOURCE[SOURCE.index('check_backup_capacity() ('):SOURCE.index('\n# Fail before allocating')]
