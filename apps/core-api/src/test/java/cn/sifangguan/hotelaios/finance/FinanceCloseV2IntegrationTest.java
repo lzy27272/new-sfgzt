@@ -43,7 +43,15 @@ class FinanceCloseV2IntegrationTest {
  }
  @Test void bankExplanationIsIndependentAndAnyCrossDomainAllocationChangeInvalidatesSnapshot(){
   UUID bank=bank(),explanation=UUID.randomUUID();call(()->service.explain(new FinanceCloseModels.Explanation(explanation,book,bank,"2026-10","真实未达账项：已查原始流水，责任人与预计清算日见银行说明")));assertThat(passed("BANK_RECONCILIATION")).isFalse();as(director,"finance.review");call(()->service.confirmExplanation(explanation,new FinanceCloseModels.Confirm(0,true,"独立核实该笔未达项")));as(owner,"*");assertThat(passed("BANK_RECONCILIATION")).isTrue();
-  UUID entry=revenue("CONFIRMED"),movement=UUID.randomUUID();jdbc.update("insert into fb_revenue_movement(id,tenant_id,entry_id,kind,amount,occurred_on,bank_reference,note,created_by) values(?,?,?,'RECEIPT',40,?,'真实部分到账','原始收入实收',?)",movement,T,entry,MONTH,owner);jdbc.update("insert into fb_bank_match(id,tenant_id,transaction_id,source_type,source_id,amount,request_id,note,actor_id) values(?,?,?,'REVENUE',?,40,?,'真实部分匹配',?)",UUID.randomUUID(),T,bank,movement,UUID.randomUUID(),owner);assertThat(passed("BANK_RECONCILIATION")).isFalse();
+  UUID entry=revenue("CONFIRMED"),laterMovement=UUID.randomUUID();
+  jdbc.update("insert into fb_revenue_movement(id,tenant_id,entry_id,kind,amount,occurred_on,bank_reference,note,created_by) values(?,?,?,'RECEIPT',10,?,'真实另一笔到账','期后才关联的收入实收',?)",laterMovement,T,entry,MONTH,owner);
+  jdbc.update("insert into fb_bank_match(id,tenant_id,transaction_id,source_type,source_id,amount,request_id,note,actor_id,created_at) values(?,?,?,'REVENUE',?,10,?,'期后新增匹配',?,?)",UUID.randomUUID(),T,bank,laterMovement,UUID.randomUUID(),owner,MONTH.plusMonths(1).atStartOfDay(java.time.ZoneId.of("Asia/Shanghai")).toOffsetDateTime());
+  assertThat(passed("BANK_RECONCILIATION")).as("期后创建的匹配不应改写旧月末快照").isTrue();
+  UUID movement=UUID.randomUUID();
+  jdbc.update("insert into fb_revenue_movement(id,tenant_id,entry_id,kind,amount,occurred_on,bank_reference,note,created_by) values(?,?,?,'RECEIPT',40,?,'真实部分到账','原始收入实收',?)",movement,T,entry,MONTH,owner);
+  // The fixture belongs to October even when CI runs after the month-end cutoff.
+  jdbc.update("insert into fb_bank_match(id,tenant_id,transaction_id,source_type,source_id,amount,request_id,note,actor_id,created_at) values(?,?,?,'REVENUE',?,40,?,'真实部分匹配',?,?)",UUID.randomUUID(),T,bank,movement,UUID.randomUUID(),owner,MONTH.plusDays(1).atStartOfDay(java.time.ZoneId.of("Asia/Shanghai")).toOffsetDateTime());
+  assertThat(passed("BANK_RECONCILIATION")).isFalse();
   assertThat(jdbc.queryForObject("select status from fcl_bank_explanation where id=?",String.class,explanation)).isEqualTo("CONFIRMED");
  }
  @Test void revenueCashMustMatchButRedemptionAloneIsNotCash(){
