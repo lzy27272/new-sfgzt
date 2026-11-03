@@ -57,6 +57,11 @@ public final class WorkEntryPolicy {
                         && !HOUSEKEEPING_FIELDS.get(itemCode).contains(field.getKey()))) removed.add(field.getKey());
         });
         properties.remove(removed);
+        if (properties.path("issueSummary").isObject()) {
+            ((ObjectNode) properties.get("issueSummary"))
+                    .put("title", "异常及处理")
+                    .put("description", "仅填写实际问题、异常及处理情况；订单数、好评率、完成数量等普通统计请填上方‘工作结果说明’。正常时可留空；如标注必填，请填‘无异常’。");
+        }
         var required = result.putArray("required");
         for (JsonNode field : original.path("required")) if (properties.has(field.asText())) required.add(field.asText());
         if ("HKA_CART_PREPARATION".equals(itemCode) || "HKA_USAGE_RETURN".equals(itemCode)) {

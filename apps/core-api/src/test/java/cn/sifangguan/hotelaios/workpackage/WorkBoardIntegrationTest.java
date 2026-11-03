@@ -22,6 +22,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest
@@ -265,6 +266,56 @@ class WorkBoardIntegrationTest {
         assertThat(board.path("period").path("review").asInt()).isEqualTo(manual.size());
         assertThat(getBoard("?queue=SPOT_CHECK&from="+day+"&to="+day+"&size=200").path("items").findValuesAsText("id"))
                 .doesNotContainAnyElementsOf(manual.stream().map(UUID::toString).toList());
+    }
+
+    @Test void ordinaryResultDraftSubmissionStaysExemptWhileExplicitAndLegacyExceptionsRemainManual() throws Exception {
+        LocalDate day=LocalDate.of(2025,9,12);
+        String actor="19000000-0000-0000-0000-000000000003",assignment="19200000-0000-0000-0000-000000000002";
+        UUID normal=variantExpectation(day,"AVAILABLE","DAY",false,"MANUAL","AGM_NS_REVIEW_TRAINING");
+        jdbc.update("update work_expectation set position_assignment_id=?::uuid where id=?",assignment,normal);
+        activateCart(normal,day);
+        Map<String,Object> context=jdbc.queryForMap("select i.form_version_id,a.employee_id,a.org_unit_id from work_expectation x join work_package_item i on i.id=x.work_package_item_id join employee_position_assignment a on a.id=x.position_assignment_id where x.id=?",normal);
+        Map<String,Object> payload=Map.of("expectedAttendance",1,"actualAttendance",1,"appearancePassed",true,"meetingNotes","当班例行培训");
+        String summary="美团订单51 好评20\n飞猪订单7 好评3\n抖音订单2 好评0\n截止目前好评率38%";
+        Map<String,Object> body=new java.util.LinkedHashMap<>(Map.of("orgUnitId",context.get("org_unit_id"),
+                "employeeId",context.get("employee_id"),"positionAssignmentId",assignment,
+                "formVersionId",context.get("form_version_id"),"businessDate",day,"payload",payload,
+                "completionStatement",summary,"workExpectationId",normal,"targetOrgUnitId",HOTEL,"saveAsDraft",true));
+        UUID normalRecord=UUID.fromString(workCommand("/api/v1/work-data/records",actor,assignment,body,201).path("id").asText());
+        JsonNode saved=json.readTree(mvc.perform(get("/api/v1/work-data/records/"+normalRecord)
+                .header("X-Tenant-Id",TENANT).header("X-Actor-Id",actor).header("X-Assignment-Id",assignment))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(saved.path("completion_statement").asText()).isEqualTo(summary);
+        String updated=summary+"\n已完成当班培训记录";
+        mvc.perform(put("/api/v1/work-data/records/"+normalRecord)
+                .header("X-Tenant-Id",TENANT).header("X-Actor-Id",actor).header("X-Assignment-Id",assignment)
+                .contentType("application/json").content(json.writeValueAsString(Map.of("payload",payload,
+                        "completionStatement",updated,"expectedVersion",0))))
+                .andExpect(status().isOk());
+        workCommand("/api/v1/work-data/records/"+normalRecord+"/actions/submit",actor,assignment,
+                Map.of("expectedVersion",1),200);
+        assertThat(jdbc.queryForObject("select completion_statement from work_record where id=?",String.class,normalRecord)).isEqualTo(updated);
+        assertThat(jdbc.queryForObject("select work_review_record_has_exception(r) from work_record r where id=?",Boolean.class,normalRecord)).isFalse();
+        assertThat(jdbc.queryForObject("select count(*) from notification where source_type='WORK_RECORD' and source_id=? and notification_type='WORK_RECORD_REVIEW_PENDING'",Integer.class,normalRecord)).isZero();
+
+        UUID explicit=cloneExpectation(normal,day,"AVAILABLE");
+        body.remove("saveAsDraft");body.put("workExpectationId",explicit);body.put("completionStatement",summary);
+        body.put("exceptionStatement","培训记录缺失，待补充并复核");
+        UUID explicitRecord=UUID.fromString(workCommand("/api/v1/work-data/records",actor,assignment,body,201).path("id").asText());
+        assertThat(jdbc.queryForObject("select work_review_record_has_exception(r) from work_record r where id=?",Boolean.class,explicitRecord)).isTrue();
+
+        // Existing problem-field prose is not silently reclassified as an ordinary result.
+        UUID legacy=cloneExpectation(normal,day,"SUBMITTED");
+        record(legacy,day,"SUBMITTED",0,actor,json.writeValueAsString(Map.of("issueSummary",summary)),null,OffsetDateTime.now());
+        String original=jdbc.queryForObject("select to_jsonb(r)::text from work_record r where work_expectation_id=?",String.class,legacy);
+        JsonNode board=getBoard("?from="+day+"&to="+day+"&size=200");
+        assertThat(board.path("period").path("completed").asInt()).isOne();
+        assertThat(board.path("period").path("review").asInt()).isEqualTo(2);
+        assertThat(getBoard("?queue=REVIEW&from="+day+"&to="+day+"&size=200").path("items").findValuesAsText("id"))
+                .contains(explicit.toString(),legacy.toString()).doesNotContain(normal.toString());
+        assertThat(getBoard("?queue=SPOT_CHECK&from="+day+"&to="+day+"&size=200").path("items").findValuesAsText("id"))
+                .contains(normal.toString()).doesNotContain(explicit.toString(),legacy.toString());
+        assertThat(jdbc.queryForObject("select to_jsonb(r)::text from work_record r where work_expectation_id=?",String.class,legacy)).isEqualTo(original);
     }
 
     @Test void routineEligibilityMatchesTheThirtyFourApprovedItemsAndRetainsBusinessConfirmationGuards() {

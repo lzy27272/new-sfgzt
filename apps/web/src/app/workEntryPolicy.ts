@@ -38,10 +38,12 @@ export function workPolicyValue(payload: Record<string, unknown>, field: string)
   return payload[field]
 }
 
-export function focusedWorkFields<T extends { title?: string }>(fields: Record<string, T>, itemCode?: string): Record<string, T> {
+export function focusedWorkFields<T extends { title?: string; description?: string }>(fields: Record<string, T>, itemCode?: string): Record<string, T> {
   const allowed = housekeepingFields[itemCode ?? '']
   return Object.fromEntries(Object.entries(fields).filter(([key, field]) =>
-    !isGenericWorkQuestion(key, field.title) && (!allowed || allowed.has(key))))
+    !isGenericWorkQuestion(key, field.title) && (!allowed || allowed.has(key))).map(([key, field]) => [key,
+      key === 'issueSummary' ? { ...field, title: '异常及处理',
+        description: '仅填写实际问题、异常及处理情况；订单数、好评率、完成数量等普通统计请填上方‘工作结果说明’。正常时可留空；如标注必填，请填‘无异常’。' } : field]))
 }
 
 export function matchesTaskAssignee(

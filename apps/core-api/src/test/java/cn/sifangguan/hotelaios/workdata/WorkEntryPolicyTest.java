@@ -93,6 +93,48 @@ class WorkEntryPolicyTest {
         assertThat(WorkEntryPolicy.policyValue(json.readTree("{\"specialArrivalRequirement\":true}"),"specialArrivalRequirement").asBoolean()).isTrue();
     }
 
+    @Test void clarifiesExceptionInputWithoutRewritingPublishedSchemaOrWeakeningItsRequirements() throws Exception {
+        var original = json.readTree("""
+          {"type":"object","additionalProperties":false,"required":["issueSummary","customerCount"],
+           "properties":{"issueSummary":{"type":"string","title":"问题及处理","maxLength":1000},
+                         "customerCount":{"type":"integer","minimum":0}}}
+          """);
+        var snapshot = original.deepCopy();
+        var effective = WorkEntryPolicy.schema(original,"AGM_NS_REVIEW_TRAINING");
+
+        assertThat(effective.path("properties").path("issueSummary").path("title").asText())
+                .isEqualTo("异常及处理");
+        assertThat(effective.path("properties").path("issueSummary").path("description").asText())
+                .contains("实际问题", "工作结果说明", "好评率");
+        assertThat(effective.path("properties").path("issueSummary").path("maxLength").asInt()).isEqualTo(1000);
+        assertThat(effective.path("required")).isEqualTo(original.path("required"));
+        assertThat(effective.path("additionalProperties").asBoolean()).isFalse();
+        assertThat(original).isEqualTo(snapshot);
+    }
+
+    @Test void legacyIssueDetailsRemainEvidenceAndOrdinaryResultsDoNotImplyAnException() throws Exception {
+        var original = json.readTree("""
+          {"type":"object","additionalProperties":false,"required":[],"properties":{
+           "workSummary":{"type":"string","title":"工作结果"},
+           "issueSummary":{"type":"string","title":"问题及处理"},
+           "customerCount":{"type":"integer"}}}
+          """);
+        var oldDraft = json.readTree("""
+          {"workSummary":"旧草稿正常统计","issueSummary":"订单51，好评20，好评率38%","customerCount":51}
+          """);
+        var snapshot = oldDraft.deepCopy();
+        var effective = WorkEntryPolicy.schema(original,"AGM_NS_REVIEW_TRAINING");
+        var validated = WorkEntryPolicy.validationPayload(oldDraft,effective,original,"AGM_NS_REVIEW_TRAINING");
+
+        assertThat(validated.path("issueSummary").asText()).isEqualTo("订单51，好评20，好评率38%");
+        assertThat(validated.path("customerCount").asInt()).isEqualTo(51);
+        assertThat(WorkEntryPolicy.policyValue(validated,"issueFound").asBoolean()).isTrue();
+        assertThat(oldDraft).isEqualTo(snapshot);
+        assertThat(WorkEntryPolicy.policyValue(json.readTree("""
+          {"workSummary":"订单51，好评20，好评率38%","customerCount":51}
+          """),"issueFound").asBoolean()).isFalse();
+    }
+
     @Test void onlyTheThreeEventsAreOptionalIncludingTheirReportReferences() {
         for (String code : WorkEntryPolicy.OCCURRENCE_ITEMS) {
             assertThat(WorkEntryPolicy.occursOnDemand(code)).isTrue();

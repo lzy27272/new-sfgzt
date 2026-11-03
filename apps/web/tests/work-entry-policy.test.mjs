@@ -66,3 +66,17 @@ test('conditional photos use actual issue details, not a hidden stale yes/no val
   assert.equal(workPolicyValue({}, 'issueFound'), false)
   assert.equal(workPolicyValue({ specialArrivalRequirement: true }, 'specialArrivalRequirement'), true)
 })
+
+test('exception field clearly separates ordinary statistics without changing validation or legacy drafts', () => {
+  const fields = { issueSummary: { type: 'string', title: '问题及处理', maxLength: 2000 },
+    customerCount: { type: 'integer', title: '客户或回访数量', minimum: 0 } }
+  const projected = focusedWorkFields(fields, 'AGM_NS_REVIEW_TRAINING')
+  assert.equal(projected.issueSummary.title, '异常及处理')
+  assert.match(projected.issueSummary.description, /普通统计请填上方‘工作结果说明’/)
+  assert.equal(projected.issueSummary.maxLength, 2000)
+  assert.deepEqual(projected.customerCount, fields.customerCount)
+  assert.equal(fields.issueSummary.title, '问题及处理')
+  assert.equal(fields.issueSummary.description, undefined)
+  assert.equal(workPolicyValue({ workSummary: '美团订单51，好评20，好评率38%' }, 'issueFound'), false)
+  assert.equal(workPolicyValue({ issueSummary: '美团订单51，好评20，好评率38%' }, 'issueFound'), true)
+})
