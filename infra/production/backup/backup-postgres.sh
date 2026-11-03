@@ -266,12 +266,25 @@ for legacy_backup in "${db_root}"/hotel_ai_os-auto-*.dump.enc; do
 done
 
 
+# A live browser may replace a session file during this preliminary copy.
+# Only vanished-source exit 24 is provisional; the quiesced final copy stays strict.
+online_precopy() {
+  local domain=$1 status
+  shift
+  if rsync "$@"; then return 0; else status=$?; fi
+  if [[ ${status} -eq 24 ]]; then
+    printf 'BACKUP_ONLINE_PRECOPY_VANISHED domain=%s rsyncExit=24 finalSync=REQUIRED\n' "${domain}"
+    return 0
+  fi
+  return "${status}"
+}
+
 # First pass copies the bulk while writers remain online. Browser caches and
 # sockets are replaceable runtime material; login/session stores are retained.
-rsync "${state_rsync_options[@]}" "${source_state}/" "${stage_state}/var/lib/sifangguan-ota/"
-rsync "${core_rsync_options[@]}" "${source_core}/" "${stage_core}/"
+online_precopy OTA_STATE "${state_rsync_options[@]}" "${source_state}/" "${stage_state}/var/lib/sifangguan-ota/"
+online_precopy CORE_ORIGINALS "${core_rsync_options[@]}" "${source_core}/" "${stage_core}/"
 if [[ -d ${source_raw} ]]; then
-  rsync "${raw_rsync_options[@]}" "${source_raw}/" "${stage_raw}/"
+  online_precopy OTA_RAW "${raw_rsync_options[@]}" "${source_raw}/" "${stage_raw}/"
 fi
 
 writer_timers=(

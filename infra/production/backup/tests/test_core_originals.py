@@ -86,11 +86,14 @@ class CoreOriginalsTest(unittest.TestCase):
   self.assertNotIn('find "${source_core}"',source);self.assertIn('trap cleanup EXIT INT TERM',source)
  def test_both_core_staging_copies_preserve_acls_xattrs_and_numeric_owners(self):
   source=(MODULE.parent/'backup-postgres.sh').read_text()
-  copies=[line for line in source.splitlines() if line.startswith('rsync ') and '"${source_core}/"' in line]
+  copies=[line for line in source.splitlines() if line.startswith(('online_precopy CORE_ORIGINALS ','rsync ')) and '"${source_core}/"' in line]
   self.assertEqual(len(copies),2,'Both the online bulk copy and quiesced final copy must preserve source metadata')
+  self.assertTrue(copies[0].startswith('online_precopy CORE_ORIGINALS "${core_rsync_options[@]}" '))
+  self.assertTrue(copies[1].startswith('rsync "${core_rsync_options[@]}" '))
+  self.assertLess(source.index(copies[0]),source.index('\nquiesced=true\n'))
+  self.assertLess(source.index('\nquiesced=true\n'),source.index(copies[1]))
   self.assertIn('core_rsync_options=(-aHAX --numeric-ids --delete --one-file-system --no-specials --no-devices)',source)
   for line in copies:
-   self.assertTrue(line.startswith('rsync "${core_rsync_options[@]}" '),line)
    self.assertIn('"${stage_core}/"',line)
    self.assertNotIn('--no-acls',line);self.assertNotIn('--no-xattrs',line)
  def test_restore_never_targets_live_database_or_original_root(self):
