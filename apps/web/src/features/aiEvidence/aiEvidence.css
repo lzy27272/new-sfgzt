@@ -3,6 +3,7 @@
 /* Preserve evidence aspect ratio so normalized observation boxes stay aligned. */
 .ai-card input:not([type=checkbox]):not([type=radio]):not([type=file]),.ai-card select,.ai-filter select{font-family:inherit;font-size:14px;font-weight:400;line-height:1.5}
 .ai-record .ai-photo-frame>img{max-height:none}
+.ai-start{margin:18px 0}.ai-start-toolbar{display:flex;align-items:end;gap:12px;flex-wrap:wrap}.ai-start-toolbar label{max-width:230px}.ai-start-work-list article{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0;border-bottom:1px solid #e1eaf2}.ai-start-work-list article>div{min-width:0;overflow-wrap:anywhere}.ai-start-work-list small{display:block;margin-top:6px;color:#637c8e}.ai-start .ai-error button{margin-left:12px}@media(max-width:560px){.ai-start-toolbar{align-items:stretch}.ai-start-toolbar label{max-width:none;width:100%}.ai-start-work-list article{align-items:stretch;flex-direction:column}.ai-start-work-list button{width:100%}}
 .ai-card .ai-definitions{border:0;border-radius:0;overflow:visible;gap:16px}
 .ai-card .ai-definitions>div{padding:0;min-height:0;border:0}
 .ai-card .ai-definitions dt{font-size:14px;font-weight:500;letter-spacing:0;text-transform:none}

@@ -31,6 +31,7 @@ import { loadWorkBoard } from './features/workbench/workBoardApi'
 import { spotCheckImpactFromBoard, spotCheckPreviewParams, type SpotCheckPreview } from './features/workbench/spotCheckPreview'
 import './features/workbench/roleDailyWorkflow.css'
 import { AiEvidenceRecord, AiEvidenceTeam } from './features/aiEvidence/AiEvidenceReview'
+import { aiWorkDetailParams } from './features/aiEvidence/startModel'
 
 const statusLabels: Record<string, string> = {
   PLANNED: '待开放', AVAILABLE: '可填报', PENDING: '待完成', IN_PROGRESS: '执行中',
@@ -96,7 +97,10 @@ export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { 
   }, [identity.key, routeParams.expectationId])
   const departmentGroups = resource.data.groups.filter(group => group.dimension === 'department' && group.group_id)
   const employeeGroups = resource.data.groups.filter(group => group.dimension === 'employee' && group.group_id)
-  if (aiReviewOpen) return <AiEvidenceTeam key={identity.key} identity={identity} hotelId={routeParams.hotelId} permissions={permissions} onClose={() => setAiReviewOpen(false)} />
+  if (aiReviewOpen) return <AiEvidenceTeam key={identity.key} identity={identity} hotelId={routeParams.hotelId} permissions={permissions} onClose={() => setAiReviewOpen(false)} onOpenWork={item => {
+    setAiReviewOpen(false)
+    go('team-work', aiWorkDetailParams(item, routeParams.hotelId))
+  }} />
   return <section className="wb-page">
     <header className="wb-page-heading"><div><h1>团队工作看板</h1><p>按原工作日期汇总；待审核独立于完成，补交保留完整证据链。</p></div>
       <div className="page-actions"><button className="secondary" onClick={() => setAiReviewOpen(true)}>仪容仪表复核</button><button className="secondary" onClick={() => go('workbench', withBoardParams(routeParams, { status: undefined, queue: undefined, departmentId: undefined, assignmentId: undefined }))}>返回工作台</button></div></header>
