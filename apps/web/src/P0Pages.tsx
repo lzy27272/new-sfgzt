@@ -115,13 +115,14 @@ export function TeamWorkPage({ identity, permissions, routeParams = {}, go }: { 
         <button type="button" key={queue} aria-pressed={resource.query.queue === queue} className={resource.query.queue === queue ? 'active' : ''}
           onClick={() => change({ queue, status: 'ALL', lateOnly: undefined })}>{title}</button>)}
     </nav>
-    <article className="wb-panel"><WorkStatusCards metric={resource.data.period} loading={resource.loading || Boolean(resource.error)}
+    <article className="wb-panel"><WorkStatusCards metric={resource.data.period} loading={resource.summaryLoading || Boolean(resource.summaryError)}
       selected={resource.query.status} onSelect={status => change({ status, queue: undefined })} />
-      {!resource.loading && !resource.error && <CompletionRates metric={resource.data.period} />}</article>
-    {!resource.loading && !resource.error && <WorkQueueAlerts data={resource.data} onOpen={change} />}
+      {resource.summaryError && <p className="inline-error" role="alert">统计读取失败：{resource.summaryError}<button onClick={resource.reloadSummary}>重新加载统计</button></p>}
+      {!resource.summaryLoading && !resource.summaryError && <CompletionRates metric={resource.data.period} />}</article>
+    {!resource.summaryLoading && !resource.summaryError && <WorkQueueAlerts data={resource.data} onOpen={change} />}
     {detailError && <p className="inline-error" role="alert">{detailError}</p>}
-    <WorkBoardList data={resource.data} loading={resource.loading} error={resource.error} params={routeParams} onChange={change}
-      onOpen={item => go('team-work', { ...routeParams, expectationId: item.id, recordId: undefined })} onRetry={resource.reload} />
+    <WorkBoardList data={resource.data} loading={resource.itemsLoading} error={resource.itemsError} params={routeParams} onChange={change}
+      onOpen={item => go('team-work', { ...routeParams, expectationId: item.id, recordId: undefined })} onRetry={resource.reloadItems} />
     {selected && <TeamWorkDrawer key={`${identity.key}:${selected.id}:${routeParams.recordId ?? ''}`} initial={selected} requestedRecordId={routeParams.recordId} identity={identity} permissions={permissions} go={go}
       onClose={() => go('team-work', { ...routeParams, expectationId: undefined, recordId: undefined })} onChanged={resource.reload} />}
   </section>
@@ -355,6 +356,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   const [reviewReason, setReviewReason] = useState('')
   const [spotPreview, setSpotPreview] = useState<SpotCheckPreview>()
   const previewRequest = useRef(0)
+  const previewAbort = useRef<AbortController | undefined>(undefined)
   const [taskTitle, setTaskTitle] = useState(`整改：${initial.title}`)
   const [taskDescription, setTaskDescription] = useState('请根据工作标准完成整改，补充结果说明和现场证据。')
   const [taskPriority, setTaskPriority] = useState('NORMAL')
@@ -378,7 +380,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   useEffect(() => {
     previewRequest.current += 1
     setSpotPreview(undefined)
-    return () => { previewRequest.current += 1 }
+    return () => { previewRequest.current += 1; previewAbort.current?.abort() }
   }, [identity.key, record?.id, record?.rowVersion])
 
   useEffect(() => {
@@ -453,10 +455,13 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
   const prepareSpotCheck = async () => {
     if (!record || !reviewEligibility?.canReview || !reviewEligibility.spotCheck || isDemo || busy || !reviewReason.trim()) return
     const request = ++previewRequest.current
+    previewAbort.current?.abort()
+    const controller = new AbortController()
+    previewAbort.current = controller
     setSpotPreview({ loading: true })
     try {
       const params = spotCheckPreviewParams(record, expectation)
-      const result = await loadWorkBoard(identity, 'team', params)
+      const result = await loadWorkBoard(identity, 'team', params, undefined, { section: 'SUMMARY', signal: controller.signal })
       if (request !== previewRequest.current) return
       if (result.source !== 'api') throw new Error('未读取到实际统计，无法预估。请刷新后重试。')
       setSpotPreview({ impact: spotCheckImpactFromBoard(result.data, params) })
@@ -557,7 +562,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
 
           {(allows('work-record.review') || reviewEligibility?.canReview) && <WorkRecordReviewActions status={record.status}
             eligibility={reviewEligibility} reason={reviewReason} busy={busy} isDemo={isDemo} onReason={setReviewReason} onReview={review}
-            preview={spotPreview} onPrepareSpotCheck={() => void prepareSpotCheck()} onCancelSpotCheck={() => { previewRequest.current += 1; setSpotPreview(undefined) }} />}
+            preview={spotPreview} onPrepareSpotCheck={() => void prepareSpotCheck()} onCancelSpotCheck={() => { previewRequest.current += 1; previewAbort.current?.abort(); setSpotPreview(undefined) }} />}
 
           {allows('evaluation.manual-review') && <section className="action-box" id="standard-evaluation-action"><h3>创建标准评价</h3><label>评价依据<select value={selectedStandard} onChange={(event) => setSelectedStandard(event.target.value)}><option value="">请选择已发布标准</option>{standards.map((standard) => <option value={standard.standardVersionId} key={standard.standardVersionId}>{standard.title}（第{standard.versionNo}版）</option>)}</select></label>{!standards.length && <div className="inline-warning">工作包条目尚未返回绑定标准，不能由页面猜测评价依据。</div>}<div><button className="primary" disabled={!!busy || !selectedStandard || isDemo} onClick={evaluate}>{busy === 'evaluation' ? '创建中…' : '按标准创建评价'}</button></div></section>}
 

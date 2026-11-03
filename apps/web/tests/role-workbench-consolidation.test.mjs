@@ -77,7 +77,7 @@ assert.match(workbench, /executive && canReadTeam/)
 })
 
 test('headquarters personal work is loaded independently and is never counted as a hotel', () => {
-  assert.match(workbench, /useWorkBoard\(identity, 'my', dateParams, canReadOwn\)/)
+  assert.match(workbench, /useWorkBoard\(identity, 'my', dateParams, canReadOwn, true\)/)
   assert.match(workbench, /group.dimension === 'hotel' && group.group_id/)
   assert.match(workbench, /!executive && hotels.length === 1/)
   assert.match(boardService, /groupAggregate\("employee", "position_assignment_id"/)
@@ -96,7 +96,7 @@ assert.match(workbench, /当日闭环完成率/)
 })
 
 test('workbench uses server business day and shared date query across both boards', () => {
-assert.match(boardUi, /setServerDate\(resource.data.businessDate\)/)
+  assert.match(boardUi, /setServerDay\(\{ identity: identity.key, date: businessDate \}\)/)
   assert.match(boardModel, /timeZone: 'Asia\/Shanghai'/)
   assert.match(boardApi, /boardQuery\(params, today\)/)
   assert.match(workbench, /useWorkBoard\(identity, 'my', dateParams/)

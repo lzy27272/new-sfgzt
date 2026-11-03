@@ -24,8 +24,9 @@ public class WorkBoardController {
             @RequestParam(defaultValue = "PERIOD") String queue,
             @RequestParam(defaultValue = "false") boolean lateOnly,
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "50") int size) {
+            @RequestParam(defaultValue = "50") int size,
+            @RequestParam(defaultValue = "ALL") String section) {
         return service.board(scope.equals("my"), orgUnitId, departmentId, assignmentId,
-                from, to, status, queue, lateOnly, page, size);
+                from, to, status, queue, lateOnly, page, size, section);
     }
 }

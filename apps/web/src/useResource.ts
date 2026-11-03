@@ -17,33 +17,60 @@ export function createLatestRequestGuard() {
   }
 }
 
-export function useResource<T>(key: string, loader: () => Promise<Loaded<T>>, initial: T, refreshMs = 0, showRefreshErrors = false) {
+export function createResourceRequestGuard(cancellable = false) {
+  const latest = createLatestRequestGuard()
+  let controller: AbortController | undefined
+  return {
+    start(silent = false) {
+      if (cancellable && silent && controller) return undefined
+      if (cancellable) controller?.abort()
+      controller = new AbortController()
+      return { generation: latest.next(), signal: controller.signal }
+    },
+    isCurrent: latest.isCurrent,
+    finish(generation: number) { if (latest.isCurrent(generation)) controller = undefined },
+    invalidate() {
+      latest.invalidate()
+      if (cancellable) controller?.abort()
+      controller = undefined
+    },
+  }
+}
+
+export function useResource<T>(key: string, loader: (signal?: AbortSignal) => Promise<Loaded<T>>, initial: T,
+  refreshMs = 0, showRefreshErrors = false, options: { cancellable?: boolean } = {}) {
   const [data, setData] = useState<T>(initial)
   const [source, setSource] = useState<ApiSource>('api')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
-  const requestGuard = useRef(createLatestRequestGuard()).current
+  const [settledKey, setSettledKey] = useState<string>()
+  const requestGuard = useRef(createResourceRequestGuard(options.cancellable)).current
 
   const load = useCallback(async (silent: boolean) => {
-    const requestGeneration = requestGuard.next()
+    const request = requestGuard.start(silent)
+    if (!request) return
+    const requestGeneration = request.generation
     if (!silent) {
       setLoading(true)
       setError(undefined)
     }
     try {
-      const loaded = await loader()
+      const loaded = await loader(request.signal)
       if (!requestGuard.isCurrent(requestGeneration)) return
       setData(loaded.data)
       setSource(loaded.source)
       setError(undefined)
+      setSettledKey(key)
     } catch (reason) {
       if ((!silent || showRefreshErrors) && requestGuard.isCurrent(requestGeneration)) {
         setData(initial)
         setSource('api')
         setError(reason instanceof Error ? reason.message : '数据加载失败')
+        setSettledKey(key)
       }
     } finally {
       if (requestGuard.isCurrent(requestGeneration)) setLoading(false)
+      requestGuard.finish(requestGeneration)
     }
   // key deliberately represents every loader dependency.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -61,5 +88,7 @@ export function useResource<T>(key: string, loader: () => Promise<Loaded<T>>, in
     }, refreshMs)
     return () => window.clearInterval(timer)
   }, [load, refreshMs])
-  return { data, source, loading, error, reload, setData }
+  const awaitingKey = options.cancellable && settledKey !== key
+  return { data: awaitingKey ? initial : data, source, loading: awaitingKey || loading,
+    error: awaitingKey ? undefined : error, reload, setData }
 }

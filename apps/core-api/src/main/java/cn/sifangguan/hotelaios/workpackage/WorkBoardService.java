@@ -1,6 +1,9 @@
 package cn.sifangguan.hotelaios.workpackage;
 
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -23,11 +26,14 @@ public class WorkBoardService {
     private final WorkPackageService work;
     private final NamedParameterJdbcTemplate jdbc;
     private final AccessPolicy access;
+    private final ObjectMapper json;
 
-    public WorkBoardService(WorkPackageService work, NamedParameterJdbcTemplate jdbc, AccessPolicy access) {
+    public WorkBoardService(WorkPackageService work, NamedParameterJdbcTemplate jdbc, AccessPolicy access,
+                            ObjectMapper json) {
         this.work = work;
         this.jdbc = jdbc;
         this.access = access;
+        this.json = json;
     }
 
     // The four exclusive states are separate from the late-submission flag.
@@ -74,6 +80,20 @@ public class WorkBoardService {
     public Map<String, Object> board(boolean mine, UUID orgUnitId, UUID departmentId, UUID assignmentId,
                                      LocalDate from, LocalDate to, String status, String queue,
                                      boolean lateOnly, int page, int size) {
+        return board(mine, orgUnitId, departmentId, assignmentId, from, to, status, queue,
+                lateOnly, page, size, "ALL");
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> board(boolean mine, UUID orgUnitId, UUID departmentId, UUID assignmentId,
+                                     LocalDate from, LocalDate to, String status, String queue,
+                                     boolean lateOnly, int page, int size, String section) {
+        section = section == null ? "ALL" : section;
+        if (!Set.of("ALL", "SUMMARY", "ITEMS").contains(section)) {
+            throw badRequest("不支持的工作看板读取范围");
+        }
+        boolean includeSummary = !section.equals("ITEMS");
+        boolean includeItems = !section.equals("SUMMARY");
         if (mine) access.requireAnyPermission("work-record.read", "work-record.submit", "work.submit");
         else access.requireAnyPermission("work-record.team-read", "work-record.review");
         // Prepare the tenant context and reject unauthorized organization filters before resolving dates.
@@ -135,7 +155,8 @@ public class WorkBoardService {
             params.addValue("boardAssignment", assignmentId);
             scopeFilter += " and position_assignment_id = :boardAssignment";
         }
-        String classified = "with source as (" + query.sql() + "), classified as (select source.*, "
+        // Keep effective review rules from being expanded into each filter, sort and aggregate.
+        String classified = "with source as materialized (" + query.sql() + "), classified as materialized (select source.*, "
                 + STATE_SQL + " as board_status, "
                 + "(not item_required or coalesce(execution_policy ->> 'repeatableDailyRecords', 'false') = 'true') as optional_record, "
                 + "(item_required and coalesce(execution_policy ->> 'registrationMode', '') <> 'WHEN_OCCURRED' and coalesce(valid_submitted_at > due_at, false)) as is_late "
@@ -163,46 +184,73 @@ public class WorkBoardService {
                 + " and (:boardStatus = 'ALL' or board_status = :boardStatus)"
                 + " and (not :lateOnly or is_late)";
         // Aggregation happens over the entire authorized scope before list pagination.
-        String summarySql = classified
-                + aggregate("period", period) + " union all "
-                + aggregate("today", "business_date = :today") + " union all "
-                + aggregate("month", "business_date between :monthStart and :today") + " union all "
-                + aggregate("reviewQueue", review) + " union all "
-                + aggregate("carryover", carryover) + " union all "
-                + aggregate("spotCheckQueue", spotCheck) + " union all "
-                + aggregate("repairQueue", repair) + " union all "
-                + "select 'filtered' as dimension, null::text as group_id, null::text as group_name, "
-                + COUNTS + " from classified" + selected + " union all "
-                + groupAggregate("hotel", "hotel_org_unit_id", "hotel_name", period) + " union all "
-                + groupAggregate("department", "department_org_unit_id", "coalesce(department_name, '直属岗位')", period) + " union all "
-                + groupAggregate("employee", "position_assignment_id", "employee_name || ' · ' || position_name", period);
-        List<Map<String, Object>> aggregates = jdbc.queryForList(summarySql, params);
+        List<String> metrics = new ArrayList<>();
+        if (includeSummary) {
+            metrics.add(aggregate("period", period));
+            metrics.add(aggregate("today", "business_date = :today"));
+            metrics.add(aggregate("month", "business_date between :monthStart and :today"));
+            metrics.add(aggregate("reviewQueue", review));
+            metrics.add(aggregate("carryover", carryover));
+            metrics.add(aggregate("spotCheckQueue", spotCheck));
+            metrics.add(aggregate("repairQueue", repair));
+            metrics.add(groupAggregate("hotel", "hotel_org_unit_id", "hotel_name", period));
+            metrics.add(groupAggregate("department", "department_org_unit_id", "coalesce(department_name, '直属岗位')", period));
+            metrics.add(groupAggregate("employee", "position_assignment_id", "employee_name || ' · ' || position_name", period));
+        }
+        if (includeItems) {
+            metrics.add("select 'filtered' as dimension, null::text as group_id, null::text as group_name, "
+                    + COUNTS + " from classified" + selected);
+        }
+        List<String> reads = new ArrayList<>();
+        reads.add("select 'metric' as result_section, to_jsonb(metric) as payload from ("
+                + String.join(" union all ", metrics) + ") metric");
+        if (includeItems) {
+            reads.add(listSection("items", selected,
+                    "case board_status when 'REVIEW' then 0 when 'OVERDUE' then 1 else 2 end, "
+                            + "latest_submitted_at desc nulls last, due_at, id",
+                    "limit :pageSize offset :pageOffset"));
+        }
+        if (includeSummary) {
+            reads.add(listSection("recentSubmissions", " where latest_submitted_at between :boardRecentSince and :now",
+                    "latest_submitted_at desc, id", "limit 5"));
+            reads.add(listSection("upcomingItems", " where " + period + " and not optional_record and board_status='PENDING'",
+                    "due_at, id", "limit 3"));
+        }
+        // All result sections reuse one authorized snapshot, including full-scope counts before pagination.
+        List<Map<String, Object>> rows = jdbc.queryForList(classified + String.join(" union all ", reads), params);
         Map<String, Object> result = new LinkedHashMap<>();
         List<Map<String, Object>> groups = new ArrayList<>();
-        for (Map<String, Object> aggregate : aggregates) {
-            String dimension = (String) aggregate.remove("dimension");
-            addRates(aggregate);
-            if (Set.of("hotel", "department", "employee").contains(dimension)) {
-                aggregate.put("dimension", dimension);
-                groups.add(aggregate);
-            } else result.put(dimension, aggregate);
+        for (Map<String, Object> row : rows) {
+            String resultSection = (String) row.get("result_section");
+            try {
+                if (resultSection.equals("metric")) {
+                    Map<String, Object> metric = json.readValue(row.get("payload").toString(), new TypeReference<>() {});
+                    String dimension = (String) metric.remove("dimension");
+                    addRates(metric);
+                    if (Set.of("hotel", "department", "employee").contains(dimension)) {
+                        metric.put("dimension", dimension);
+                        groups.add(metric);
+                    } else result.put(dimension, metric);
+                } else {
+                    result.put(resultSection, json.readValue(row.get("payload").toString(), new TypeReference<List<Map<String, Object>>>() {}));
+                }
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException("工作看板数据读取失败", e);
+            }
         }
-        result.put("groups", groups);
-        result.put("items", jdbc.queryForList(classified + "select * from classified" + selected
-                + " order by case board_status when 'REVIEW' then 0 when 'OVERDUE' then 1 else 2 end, "
-                + "latest_submitted_at desc nulls last, due_at, id limit :pageSize offset :pageOffset", params));
-        result.put("recentSubmissions", jdbc.queryForList(classified + "select * from classified where "
-                + "latest_submitted_at between :boardRecentSince and :now"
-                + " order by latest_submitted_at desc, id limit 5", params));
-        result.put("upcomingItems", jdbc.queryForList(classified + "select * from classified where "
-                + period + " and not optional_record and board_status='PENDING'"
-                + " order by due_at, id limit 3", params));
+        if (includeSummary) result.put("groups", groups);
         result.put("businessDate", today);
         result.put("fromDate", from);
         result.put("toDate", to);
         result.put("page", page);
         result.put("size", size);
         return result;
+    }
+
+    private static String listSection(String name, String condition, String order, String pagination) {
+        return "select '" + name + "' as result_section, coalesce(jsonb_agg(to_jsonb(entry) order by "
+                + order + "), '[]'::jsonb) as payload from (select * from classified" + condition
+                + " order by " + order + " " + pagination + ") entry";
     }
 
     private static String aggregate(String name, String condition) {

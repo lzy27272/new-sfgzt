@@ -75,6 +75,10 @@ export function boardQuery(params: RouteParams, today = localBusinessDate()) {
     lateOnly: params.lateOnly === 'true' || params.status === 'LATE_SUBMITTED',
     page: /^\d+$/.test(params.page ?? '') ? Math.min(Number(params.page), 1_000_000) : 0 }
 }
+export function boardSummaryQuery(params: RouteParams, today?: string) {
+  const { from, to, orgUnitId, departmentId, assignmentId } = boardQuery(params, today)
+  return { from, to, orgUnitId, departmentId, assignmentId }
+}
 export function withBoardParams(params: RouteParams, patch: NavigationParams): NavigationParams {
   return { ...params, expectationId: undefined, page: undefined, ...patch }
 }

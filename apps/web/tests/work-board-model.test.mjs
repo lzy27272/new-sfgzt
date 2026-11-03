@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { dateRange, boardQuery, validDate, rate, isLateSubmitted, withBoardParams, selectTeamRecordId, personalWorkLabel } from '../src/features/workbench/workBoardModel.ts'
+import { dateRange, boardQuery, boardSummaryQuery, validDate, rate, isLateSubmitted, withBoardParams, selectTeamRecordId, personalWorkLabel } from '../src/features/workbench/workBoardModel.ts'
 import { currentAssignment, groupPersonnel, personnelScope } from '../src/features/organization/personnelDirectoryModel.ts'
 
 test('personal board distinguishes own shared and delegated items without expanding visibility', () => {
@@ -30,6 +30,17 @@ test('drilldown preserves dates and organization but clears stale page/detail', 
     ...params, page: undefined, expectationId: undefined, status: 'REVIEW', departmentId: 'department',
   })
   assert.equal(boardQuery({ status: 'LATE_SUBMITTED' }).lateOnly, true)
+})
+
+test('queue, status and pagination reuse date statistics but never another scope or date', () => {
+  const params = { from: '2026-11-03', hotelId: 'hotel-a', departmentId: 'department', assignmentId: 'employee' }
+  const summary = boardSummaryQuery(params)
+  assert.deepEqual(boardSummaryQuery({ ...params, queue: 'SPOT_CHECK', status: 'COMPLETED', lateOnly: 'true', page: '3' }), summary)
+  assert.notDeepEqual(boardSummaryQuery({ ...params, hotelId: 'hotel-b' }), summary)
+  assert.notDeepEqual(boardSummaryQuery({ ...params, departmentId: 'other-department' }), summary)
+  assert.notDeepEqual(boardSummaryQuery({ ...params, assignmentId: 'other-employee' }), summary)
+  assert.notDeepEqual(boardSummaryQuery({ ...params, from: '2026-11-02' }), summary)
+  assert.equal(summary.orgUnitId, 'hotel-a')
 })
 test('late submission is based on first successful submission and zero denominator is not 100%', () => {
   assert.equal(rate(null), '—')

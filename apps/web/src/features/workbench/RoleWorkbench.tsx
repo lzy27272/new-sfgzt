@@ -57,7 +57,7 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   const executive = executiveKeys.has(presentationKey)
   const [creatingTask, setCreatingTask] = useState(false)
   const dateParams = useMemo(() => Object.fromEntries(Object.entries(routeParams).filter(([key]) => ['dateMode', 'from', 'to'].includes(key))), [routeParams])
-  const allTeam = useWorkBoard(identity, 'team', dateParams, canReadTeam)
+  const allTeam = useWorkBoard(identity, 'team', dateParams, canReadTeam, true)
   const directory = useResource(identity.key + ':workbench-hotels:' + canReadOperations + ':' + canReadHotels, async () => {
     if (canReadOperations) { const result = await loadOperationsDashboard(identity); return { data: result.data.hotels as AccessibleHotel[], source: result.source } }
     if (canReadHotels) { const result = await loadAccessibleHotels(identity); return { data: result.data.hotels, source: result.source } }
@@ -73,9 +73,9 @@ export function RoleWorkbench({ identity, permissions, presentationKey, executiv
   const selectedHotel = hotels.find(hotel => hotel.id === routeParams.hotelId)
     ?? (!executive && hotels.length === 1 ? hotels[0] : undefined)
   const selectedParams = { ...dateParams, ...(selectedHotel ? { hotelId: selectedHotel.id } : {}) }
-  const hotelTeam = useWorkBoard(identity, 'team', selectedParams, canReadTeam && Boolean(selectedHotel))
+  const hotelTeam = useWorkBoard(identity, 'team', selectedParams, canReadTeam && Boolean(selectedHotel), true)
   const team = selectedHotel ? hotelTeam : allTeam
-  const own = useWorkBoard(identity, 'my', dateParams, canReadOwn)
+  const own = useWorkBoard(identity, 'my', dateParams, canReadOwn, true)
   const tasks = useResource(identity.key + ':workbench-tasks:' + canReadTasks,
     () => canReadTasks ? loadTasks(identity, { view: identity.businessActorAssignmentId ? 'mine' : 'team' })
       : Promise.resolve({ data: [], source: 'api' as const }), [])

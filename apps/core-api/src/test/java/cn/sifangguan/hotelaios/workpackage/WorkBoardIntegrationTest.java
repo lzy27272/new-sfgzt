@@ -2,6 +2,7 @@ package cn.sifangguan.hotelaios.workpackage;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -546,16 +547,18 @@ class WorkBoardIntegrationTest {
         assertThat(empty.path("period").path("expected").asInt()).isZero();
         assertThat(empty.path("period").path("completed_rate").isNull()
                 || empty.path("period").path("completed_rate").isMissingNode()).isTrue();
-        for (String query : new String[]{"?from=2026-09-20&to=2026-09-01", "?from=2024-01-01&to=2026-01-01", "?size=201", "?status=HACK"}) {
+        for (String query : new String[]{"?from=2026-09-20&to=2026-09-01", "?from=2024-01-01&to=2026-01-01", "?size=201", "?status=HACK", "?section=HACK"}) {
             mvc.perform(get("/api/v1/team/work-board" + query).header("X-Tenant-Id", TENANT).header("X-Actor-Id", CEO))
                     .andExpect(status().isBadRequest());
         }
     }
 
     @Test void organizationScopeCannotBeExpandedByHotelFilter() throws Exception {
-        mvc.perform(get("/api/v1/team/work-board?orgUnitId=" + OTHER_HOTEL)
-                        .header("X-Tenant-Id", TENANT).header("X-Actor-Id", MANAGER).header("X-Assignment-Id", ASSIGNMENT))
-                .andExpect(status().isForbidden());
+        for (String section : List.of("ALL", "SUMMARY", "ITEMS")) {
+            mvc.perform(get("/api/v1/team/work-board?orgUnitId=" + OTHER_HOTEL + "&section=" + section)
+                            .header("X-Tenant-Id", TENANT).header("X-Actor-Id", MANAGER).header("X-Assignment-Id", ASSIGNMENT))
+                    .andExpect(status().isForbidden());
+        }
         mvc.perform(get("/api/v1/my/work-board")
                         .header("X-Tenant-Id", TENANT).header("X-Actor-Id", MANAGER).header("X-Assignment-Id", ASSIGNMENT))
                 .andExpect(status().isOk());
@@ -619,10 +622,15 @@ class WorkBoardIntegrationTest {
                 from employee_position_assignment where id=?::uuid
                 """, otherAssignment, ASSIGNMENT);
         jdbc.update("update work_expectation set position_assignment_id=? where id=?", otherAssignment, otherWork);
-        JsonNode result = json.readTree(mvc.perform(get("/api/v1/my/work-board?from=" + day + "&to=" + day)
-                .header("X-Tenant-Id", TENANT).header("X-Actor-Id", MANAGER).header("X-Assignment-Id", ASSIGNMENT))
-                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assertThat(result.path("items").findValuesAsText("id")).contains(ownWork.toString()).doesNotContain(otherWork.toString());
+        for (String section : List.of("ALL", "SUMMARY", "ITEMS")) {
+            JsonNode result = json.readTree(mvc.perform(get("/api/v1/my/work-board?from=" + day + "&to=" + day + "&section=" + section)
+                    .header("X-Tenant-Id", TENANT).header("X-Actor-Id", MANAGER).header("X-Assignment-Id", ASSIGNMENT))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            if (!section.equals("SUMMARY")) {
+                assertThat(result.path("items").findValuesAsText("id")).contains(ownWork.toString()).doesNotContain(otherWork.toString());
+            }
+            assertThat(result.path("groups").findValuesAsText("group_id")).doesNotContain(otherAssignment.toString());
+        }
     }
 
     @Test void exemptFailureWithdrawsOriginalDayOnceAndResubmissionNeedsManualApproval() throws Exception {
@@ -652,7 +660,7 @@ class WorkBoardIntegrationTest {
                 Map.of("outcome","REJECTED","reason","现场抽查不合格","expectedVersion",0),200);
         assertThat(getBoard("?from="+day+"&to="+day).path("period").path("completed").asInt()).isZero();
         assertThat(getBoard("?queue=REPAIR&size=200").path("items").findValuesAsText("id")).contains(work.toString());
-        assertThat(getBoard("?queue=SPOT_CHECK&size=200").path("items").findValuesAsText("id")).doesNotContain(work.toString());
+        assertThat(getBoard("?queue=SPOT_CHECK&size=200&section=ITEMS").path("items").findValuesAsText("id")).doesNotContain(work.toString());
         workCommand("/api/v1/work-data/records/"+record+"/actions/review",MANAGER,ASSIGNMENT,
                 Map.of("outcome","REJECTED","reason","现场抽查不合格","expectedVersion",0),400);
         assertThat(jdbc.queryForObject("select count(*) from audit_log where resource_id=? and action='WORK_RECORD_SPOT_CHECK_FAILED'",Integer.class,record)).isOne();
@@ -768,7 +776,7 @@ class WorkBoardIntegrationTest {
         assertThat(jdbc.queryForObject("select to_jsonb(r)::text from work_record r where id=?",String.class,record)).isEqualTo(beforeRecord);
         assertThat(jdbc.queryForObject("select to_jsonb(x)::text from work_expectation x where id=?",String.class,work)).isEqualTo(beforeExpectation);
         assertThat(getBoard("?from="+day+"&to="+day).path("period")).isEqualTo(beforeMetric);
-        assertThat(getBoard("?queue=SPOT_CHECK&size=200").path("items").findValuesAsText("id")).doesNotContain(work.toString());
+        assertThat(getBoard("?queue=SPOT_CHECK&size=200&section=ITEMS").path("items").findValuesAsText("id")).doesNotContain(work.toString());
         assertThat(jdbc.queryForObject("select count(*) from work_record_spot_check where work_record_id=? and outcome='APPROVED'",Integer.class,record)).isOne();
         workCommand("/api/v1/work-data/records/"+record+"/actions/review",MANAGER,ASSIGNMENT,
                 Map.of("outcome","APPROVED","reason","现场抽查合格，保留原审批","expectedVersion",0),200);
@@ -799,6 +807,9 @@ class WorkBoardIntegrationTest {
         JsonNode last=getBoard("?queue=SPOT_CHECK&size=10&page=6"+scope);
         assertThat(last.path("items").size()).isEqualTo(5);
         assertThat(last.path("filtered").path("item_count").asInt()).isEqualTo(65);
+        JsonNode lastItems=getBoard("?queue=SPOT_CHECK&size=10&page=6&section=ITEMS"+scope);
+        assertThat(lastItems.path("items")).isEqualTo(last.path("items"));
+        assertThat(lastItems.path("filtered")).isEqualTo(last.path("filtered"));
         assertThat(getBoard("?queue=SPOT_CHECK&size=200&status=REVIEW"+scope).path("items").size()).isZero();
         JsonNode repair=getBoard("?queue=REPAIR&size=10"+scope);
         assertThat(repair.path("items").findValuesAsText("id")).containsExactly(failed.toString());
@@ -841,6 +852,71 @@ class WorkBoardIntegrationTest {
         assertThat(getBoard("?queue=SPOT_CHECK&size=200"+scope).path("items").findValuesAsText("id")).containsExactly(completed.toString());
         assertThat(getBoard("?queue=REPAIR&size=200"+scope).path("items").findValuesAsText("id")).containsExactly(failed.toString());
         assertThat(getBoard("?queue=REVIEW&size=200"+scope).path("items").size()).isZero();
+    }
+
+    @Test void independentSummaryAndItemsPreserveTheFullBoardAndHistoricalReviewRules() throws Exception {
+        LocalDate old = LocalDate.of(2024, 3, 19);
+        UUID assignment = isolatedAssignment();
+        UUID exempt = variantExpectation(old, "SUBMITTED", "DAY", false, "NONE", "BOARD_SECTION_EXEMPT", "{}",
+                "{\"requiresExceptionReview\":true}");
+        jdbc.update("update work_expectation set position_assignment_id=? where id=?", assignment, exempt);
+        record(exempt, old, "SUBMITTED", -1);
+        UUID exception = cloneExpectation(exempt, old, "SUBMITTED");
+        record(exception, old, "SUBMITTED", -1, MANAGER, "{\"issueFound\":true}", "灯具故障", null);
+        UUID failed = cloneExpectation(exempt, old, "FAILED");
+        record(failed, old, "REJECTED", -1);
+        UUID critical = variantExpectation(old, "SUBMITTED", "DAY", false, "NONE", "HKA_ITEM_ISSUE");
+        jdbc.update("update work_expectation set position_assignment_id=? where id=?", assignment, critical);
+        record(critical, old, "SUBMITTED", -1);
+        LocalDate today = LocalDate.parse(getBoard("").path("businessDate").asText());
+        UUID upcoming = expectation(today, "AVAILABLE", 2);
+        jdbc.update("update work_expectation set position_assignment_id=? where id=?", assignment, upcoming);
+        String scope = "&orgUnitId=" + HOTEL + "&assignmentId=" + assignment + "&from=" + today + "&to=" + today;
+
+        for (String queue : List.of("PERIOD", "SPOT_CHECK", "REVIEW", "REPAIR")) {
+            String query = "?queue=" + queue + scope;
+            JsonNode all = getBoard(query);
+            JsonNode summary = getBoard(query + "&section=SUMMARY");
+            JsonNode items = getBoard(query + "&section=ITEMS");
+            assertThat(summary.has("items")).isFalse();
+            assertThat(summary.has("filtered")).isFalse();
+            for (String field : List.of("period", "today", "month", "groups", "spotCheckQueue", "recentSubmissions", "upcomingItems")) {
+                assertThat(items.has(field)).as(field + " is supplied only by the summary").isFalse();
+            }
+            ObjectNode combined = ((ObjectNode) summary).deepCopy();
+            combined.setAll((ObjectNode) items);
+            assertThat(combined).as("split sections preserve the " + queue + " board").isEqualTo(all);
+            assertThat(summary.path("period").path("expected").asInt()).isOne();
+            assertThat(summary.path("period").path("pending").asInt()).isOne();
+            assertThat(summary.path("spotCheckQueue").path("item_count").asInt()).isOne();
+            assertThat(summary.path("reviewQueue").path("item_count").asInt()).isEqualTo(2);
+            assertThat(summary.path("repairQueue").path("item_count").asInt()).isOne();
+            assertThat(summary.path("recentSubmissions").findValuesAsText("id"))
+                    .contains(exempt.toString(), exception.toString(), failed.toString(), critical.toString());
+            assertThat(summary.path("upcomingItems").findValuesAsText("id")).containsExactly(upcoming.toString());
+            String expected = switch (queue) {
+                case "SPOT_CHECK" -> exempt.toString();
+                case "REPAIR" -> failed.toString();
+                case "PERIOD" -> upcoming.toString();
+                default -> null;
+            };
+            if (expected != null) assertThat(items.path("items").findValuesAsText("id")).containsExactly(expected);
+            else assertThat(items.path("items").findValuesAsText("id")).containsExactlyInAnyOrder(exception.toString(), critical.toString());
+            if (queue.equals("SPOT_CHECK")) {
+                JsonNode row = items.path("items").get(0);
+                assertThat(UUID.fromString(row.path("id").asText())).isEqualTo(exempt);
+                assertThat(row.path("row_version").isIntegralNumber()).isTrue();
+                for (String field : List.of("due_at", "available_at", "latest_submitted_at")) {
+                    assertThat(OffsetDateTime.parse(row.path(field).asText())).as(field).isNotNull();
+                }
+                assertThat(row.path("execution_policy").isObject()).isTrue();
+                assertThat(row.path("submission_policy").isObject()).isTrue();
+                assertThat(row.path("execution_policy").path("requiresExceptionReview").asBoolean()).isTrue();
+            }
+        }
+        JsonNode filtered = getBoard("?queue=SPOT_CHECK" + scope + "&section=ITEMS&status=REVIEW");
+        assertThat(filtered.path("items")).isEmpty();
+        assertThat(filtered.path("filtered").path("item_count").asInt()).isZero();
     }
 
     @Test void explicitExceptionRoutesForManualReviewButDeclaredNormalDoesNot() throws Exception {

@@ -1261,15 +1261,16 @@ function MyWork({ identity, routeParams, go }: { identity: RoleContext; routePar
     <header className="wb-page-heading"><div><h1>我的工作</h1><p>当前任职：{identity.label} · {identity.orgName}。切换岗位不会混入其他任职。</p></div>
       <button className="secondary" onClick={() => go('workbench', withBoardParams(routeParams, { status: undefined, queue: undefined }))}>返回工作台</button></header>
     <WorkDateToolbar params={routeParams} businessDate={resource.data.businessDate} onChange={change} />
-    <article className="wb-panel"><WorkStatusCards metric={resource.data.period} loading={resource.loading || Boolean(resource.error)}
+    <article className="wb-panel"><WorkStatusCards metric={resource.data.period} loading={resource.summaryLoading || Boolean(resource.summaryError)}
       onSelect={status => change({ status, queue: undefined })} selected={resource.query.status} />
-      {!resource.loading && !resource.error && <CompletionRates metric={resource.data.period} />}</article>
-    {!resource.loading && !resource.error && <WorkQueueAlerts data={resource.data} onOpen={change} />}
+      {resource.summaryError && <p className="inline-error" role="alert">统计读取失败：{resource.summaryError}<button onClick={resource.reloadSummary}>重新加载统计</button></p>}
+      {!resource.summaryLoading && !resource.summaryError && <CompletionRates metric={resource.data.period} />}</article>
+    {!resource.summaryLoading && !resource.summaryError && <WorkQueueAlerts data={resource.data} onOpen={change} />}
     {openError && <div className="inline-error" role="alert">{openError}</div>}
     {opening && <p role="status">正在打开工作详情…</p>}
     {delegationNotice && <div className="inline-success" role="status">{delegationNotice}</div>}
-    <WorkBoardList data={resource.data} loading={resource.loading} error={resource.error} params={routeParams}
-      onChange={change} own assignmentId={identity.businessActorAssignmentId} onOpen={item => go('my-work', { ...routeParams, expectationId: item.id })} onRetry={resource.reload} />
+    <WorkBoardList data={resource.data} loading={resource.itemsLoading} error={resource.itemsError} params={routeParams}
+      onChange={change} own assignmentId={identity.businessActorAssignmentId} onOpen={item => go('my-work', { ...routeParams, expectationId: item.id })} onRetry={resource.reloadItems} />
     {editing && <WorkRecordDialog key={identity.key + ':' + editing.id} item={editing} identity={identity}
       onClose={() => go('my-work', { ...routeParams, expectationId: undefined })} onSaved={resource.reload} onDelegated={setDelegationNotice} />}
   </section>

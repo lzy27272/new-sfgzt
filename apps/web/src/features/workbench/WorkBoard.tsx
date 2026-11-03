@@ -1,24 +1,37 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { NavigationParams, RoleContext, RouteParams, WorkExpectation } from '../../domain'
 import { useResource } from '../../useResource'
 import { loadWorkBoard } from './workBoardApi'
 import {
-  boardLabels, boardQuery, dateRange, emptyBoard, isLateSubmitted, localBusinessDate, personalWorkLabel, rate, validDate,
+  boardLabels, boardQuery, boardSummaryQuery, dateRange, emptyBoard, isLateSubmitted, localBusinessDate, personalWorkLabel, rate, validDate,
   type BoardMetric, type BoardStatus, type DateMode, type WorkBoard,
 } from './workBoardModel'
 import './workBoard.css'
 
-export function useWorkBoard(identity: RoleContext, scope: 'my' | 'team', params: RouteParams, enabled = true) {
-  const [serverDate, setServerDate] = useState<string>()
+export function useWorkBoard(identity: RoleContext, scope: 'my' | 'team', params: RouteParams, enabled = true, summaryOnly = false) {
+  const [serverDay, setServerDay] = useState<{ identity: string; date: string }>()
+  const serverDate = serverDay?.identity === identity.key ? serverDay.date : undefined
   const query = boardQuery(params, serverDate)
-  const key = JSON.stringify(query)
-  const resource = useResource(identity.key + ':work-board:' + scope + ':' + enabled + ':' + key,
-    () => enabled ? loadWorkBoard(identity, scope, params, serverDate)
-      : Promise.resolve({ data: emptyBoard, source: 'api' as const }), emptyBoard, 60_000, true)
+  const prefix = identity.key + ':work-board:' + scope + ':' + enabled
+  const summaryKey = JSON.stringify(boardSummaryQuery(params, serverDate))
+  const summary = useResource(prefix + ':summary:' + summaryKey,
+    signal => enabled ? loadWorkBoard(identity, scope, params, serverDate, { section: 'SUMMARY', signal })
+      : Promise.resolve({ data: emptyBoard, source: 'api' as const }), emptyBoard, enabled ? 60_000 : 0, true, { cancellable: true })
+  const itemsEnabled = enabled && !summaryOnly
+  const items = useResource(prefix + ':items:' + itemsEnabled + ':' + JSON.stringify(query),
+    signal => itemsEnabled ? loadWorkBoard(identity, scope, params, serverDate, { section: 'ITEMS', signal })
+      : Promise.resolve({ data: emptyBoard, source: 'api' as const }), emptyBoard, itemsEnabled ? 60_000 : 0, true, { cancellable: true })
+  const businessDate = summary.data.businessDate || items.data.businessDate
   useEffect(() => {
-    if (resource.data.businessDate) setServerDate(resource.data.businessDate)
-  }, [resource.data.businessDate])
-  return { ...resource, query }
+    if (businessDate) setServerDay({ identity: identity.key, date: businessDate })
+  }, [businessDate, identity.key])
+  const reload = useCallback(async () => { await Promise.all([summary.reload(), items.reload()]) }, [summary.reload, items.reload])
+  const data = { ...summary.data, businessDate, fromDate: query.from, toDate: query.to,
+    items: items.data.items, filtered: items.data.filtered, page: query.page, size: items.data.size }
+  return { data, query, source: summary.source, loading: summary.loading || (itemsEnabled && items.loading),
+    error: summary.error || (itemsEnabled ? items.error : undefined), reload,
+    summaryLoading: summary.loading, summaryError: summary.error, reloadSummary: summary.reload,
+    itemsLoading: itemsEnabled && items.loading, itemsError: itemsEnabled ? items.error : undefined, reloadItems: items.reload }
 }
 
 export function WorkDateToolbar({ params, businessDate, onChange }: {
@@ -131,7 +144,7 @@ export function WorkBoardList({ data, loading, error, params, onChange, onOpen, 
       <button className={!query.lateOnly ? 'active' : ''} onClick={() => onChange({ status: 'OVERDUE', lateOnly: undefined })}>仍未提交</button>
       <button className={query.lateOnly ? 'active' : ''} onClick={() => onChange({ status: 'ALL', lateOnly: 'true' })}>已补交</button>
     </div>}
-    {loading ? <p className="wb-empty" role="status">正在读取工作与统计…</p>
+    {loading ? <p className="wb-empty" role="status">正在读取工作列表…</p>
       : error ? <p className="inline-error" role="alert">{error}<button onClick={onRetry}>重新加载</button></p>
       : !data.items.length ? <p className="wb-empty">当前日期和筛选范围内没有工作记录。</p>
       : <div className="wb-table-scroll" role="region" tabIndex={0} aria-label="数据表，可左右滚动"><table className="wb-work-table">

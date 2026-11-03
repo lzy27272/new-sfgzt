@@ -16,8 +16,9 @@ export function RoleDailyWorkflow({ identity, role, params, permissions, dailyRe
   dailyReportsAvailable: boolean; go: AppNavigate; onSaved: () => Promise<void>
 }) {
   const queryKey = JSON.stringify(params)
-  const resource = useResource(identity.key + ':daily-workflow:' + queryKey, () => loadDailyWorkflowItems(page =>
-    loadWorkBoard(identity, 'my', { ...params, page: String(page), status: 'ALL', queue: 'PERIOD' })), [] as WorkExpectation[], 60_000, true)
+  const resource = useResource(identity.key + ':daily-workflow:' + queryKey, signal => loadDailyWorkflowItems(page =>
+    loadWorkBoard(identity, 'my', { ...params, page: String(page), status: 'ALL', queue: 'PERIOD' }, undefined, { section: 'ITEMS', signal })),
+  [] as WorkExpectation[], 60_000, true, { cancellable: true })
   const [selected, setSelected] = useState<DailyWorkflowGroup>('start')
   const [editing, setEditing] = useState<WorkExpectation>()
   const [opening, setOpening] = useState<string>()
