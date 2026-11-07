@@ -56,6 +56,7 @@ const legacyViews: readonly ViewId[] = [
   'account-self-service',
   'hotel-dashboard',
   'operations-dashboard',
+  'operations-work',
   'work-packages',
   'my-work',
   'team-work',

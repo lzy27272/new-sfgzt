@@ -27,7 +27,8 @@ const centers = buildNavigationCenters(navigation, '')
 const modules = new Map(centers.flatMap((center) => center.items.map((item) => [item.id, item] as const)))
 const supplementalModules: Record<string, { label: string; description: string }> = {
   'ui.module.all-functions': { label: '移动端全部功能与我的', description: '移动端入口，不是桌面的独立业务中心。' },
-  'ui.module.work-plans': { label: '周/月工作计划（预留）', description: '保留现有配置；当前版本尚无员工端工作计划入口，勾选不会生成可用页面。' },
+  'ui.module.work-plans': { label: '周/月工作计划', description: '运营部工作内的计划功能；同时需要运营部工作菜单、计划操作权限与有效负责门店。' },
+  'ui.module.operations-work': { label: '运营部工作', description: '运营日清、周/月计划和月度统计；具体工作与数据范围由任职、模板及负责门店共同限定。' },
   'ui.module.hotel-dashboard': { label: '原门店驾驶舱（兼容）', description: '旧入口已合并到工作总览；保留历史配置，不在新菜单重复显示。' },
   'ui.module.operations-dashboard': { label: '原区域多门店（兼容）', description: '旧入口已合并到工作总览；此项不启用被冻结的区域经理岗位。' },
 }

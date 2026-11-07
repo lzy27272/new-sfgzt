@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiCommand, apiRequest, authMode, changePassword, clearAccessToken, demoFallbackEnabled, establishFederatedSession, hasAccessToken, login, logout } from './api/client'
-import { allowsGuestServiceAlbumUpload, evidenceCaptureSourceMatches, focusedWorkFields, isOccurrenceEntry, workPolicyValue } from './app/workEntryPolicy'
+import { allowsGuestServiceAlbumUpload, evidenceCaptureSourceMatches, evidenceRequirementLabel, focusedWorkFields, isOccurrenceEntry, workPolicyValue } from './app/workEntryPolicy'
 import { consumeLogoutEntry } from './app/logoutEntry'
 import { useScopedResource } from './shared/useScopedResource'
 import { IcpFooter } from './shared/IcpFooter'
@@ -137,6 +137,7 @@ const WecomUserBindingAdministration = lazy(() => import('./features/wecom/Wecom
 const WecomDirectoryOnboardingAdministration = lazy(() => import('./features/wecom/WecomDirectoryOnboardingAdministration').then((module) => ({ default: module.WecomDirectoryOnboardingAdministration })))
 const DataRetentionAdministration = lazy(() => import('./features/dataRetention/DataRetentionAdministration').then((module) => ({ default: module.DataRetentionAdministration })))
 const AiDataFeature = lazy(() => import('./features/aiData/AiDataFeature'))
+const OperationsWorkFeature = lazy(() => import('./features/operations/OperationsWorkspace').then(module => ({ default: module.OperationsWorkspace })))
 const StoreResourceFeature = lazy(() => import('./features/storeResources/StoreResourceRoutes').then((module) => ({ default: module.StoreResourceRoutes })))
 const AcademyFeature = lazy(() => import('./features/academy/AcademyRoutes'))
 const FinanceFeature = lazy(() => import('./features/finance/FinanceRoutes'))
@@ -428,6 +429,7 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
     (signal) => usageSupported && item.orgUnitId ? loadUsageCatalogue(identity, item.orgUnitId, signal, { businessDate: item.businessDate, itemCode: item.itemCode }) : Promise.resolve(undefined), undefined)
   const required = (item.formSchema?.required ?? []).filter((key) => key in properties)
   const policy = item.submissionPolicy ?? { completionStatementRequired: false, exceptionStatementRequired: false, nextActionRequired: false, attachmentRequired: false, maxAttachments: 10, maxFileSizeBytes: 20 * 1024 * 1024, allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf', 'docx', 'xlsx'], evidenceRequirements: [] }
+  const evidenceLabel = (requirement: SubmissionPolicy['evidenceRequirements'][number]) => evidenceRequirementLabel(requirement, item.businessDate)
   const applicabilityConditionField = typeof item.applicabilityPolicy?.conditionField === 'string'
     ? item.applicabilityPolicy.conditionField
     : item.applicabilityPolicy?.condition === 'HAS_SPECIAL_ARRIVAL_REQUIREMENT'
@@ -927,13 +929,13 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
         const values = instanceValues(requirement)
         const normalizedValues = values.map(normalizedInstanceKey)
         if ((requirement.requiredInstances ?? 0) > 0 && normalizedValues.some((value) => !value)) {
-          throw new Error(`${requirement.label}需填写 ${requirement.requiredInstances} 个${requirement.instanceLabel ?? '编号'}。`)
+          throw new Error(`${evidenceLabel(requirement)}需填写 ${requirement.requiredInstances} 个${requirement.instanceLabel ?? '编号'}。`)
         }
         if ((requirement.requiredInstances ?? 0) === 0 && normalizedValues.some((value) => !value)) {
-          throw new Error(`${requirement.label}中的${requirementInstanceLabel(requirement)}不能为空。`)
+          throw new Error(`${evidenceLabel(requirement)}中的${requirementInstanceLabel(requirement)}不能为空。`)
         }
         if (new Set(normalizedValues).size !== normalizedValues.length) {
-          throw new Error(`${requirement.label}中的${requirementInstanceLabel(requirement)}不能重复。`)
+          throw new Error(`${evidenceLabel(requirement)}中的${requirementInstanceLabel(requirement)}不能重复。`)
         }
         for (const value of normalizedValues) {
           const stored = existing?.status === 'DRAFT'
@@ -945,7 +947,7 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
             && evidenceCaptureSourceMatches(entry.captureSource, requirement.captureSource)
             && normalizedInstanceKey(entry.evidenceInstanceKey ?? '') === value).length
           if (stored + pending < minimumPerInstance) {
-            throw new Error(`${requirement.label}·${value}至少需要 ${minimumPerInstance} 张现场照片。`)
+            throw new Error(`${evidenceLabel(requirement)}·${value}至少需要 ${minimumPerInstance} 张现场照片。`)
           }
         }
         continue
@@ -957,7 +959,7 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
       const pending = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode
         && evidenceCaptureSourceMatches(entry.captureSource, requirement.captureSource)).length
       const minimum = requirementMinimum(requirement)
-      if (stored + pending < minimum) throw new Error(`${requirement.label}至少需要 ${minimum} 张${allowsGuestServiceAlbumUpload(item.itemCode, requirement) ? '照片，可从相册选择后上传' : '现场照片'}。`)
+      if (stored + pending < minimum) throw new Error(`${evidenceLabel(requirement)}至少需要 ${minimum} ${requirement.captureSource === 'FILE_PICKER' ? '份截图或文件，可选择已有文件上传' : allowsGuestServiceAlbumUpload(item.itemCode, requirement) ? '张照片，可从相册选择后上传' : '张现场照片'}。`)
     }
     if (forSubmission && itemSubmissionApplicable !== false && policy.attachmentRequired && totalAttachments === 0) throw new Error('该岗位工作要求必须上传附件证据。')
   }
@@ -1149,7 +1151,7 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
         {usageCatalogue.data?.enabled && !loadingRecord && !conflictingLocalForm && <WorkUsageFields catalogue={usageCatalogue.data} value={payload.inventoryQuantities} disabled={!!saving || validatingAttachments} onChange={(value) => setPayload((current) => ({ ...current, inventoryQuantities: value }))} onRefresh={() => void usageCatalogue.reload()} />}
         {usageCatalogue.data && !usageCatalogue.data.enabled && <p className="inline-warning">本店尚未启用耗用审核联动，下方文字数量只作为工作记录保存，不自动扣库存。请联系管理员在“日清耗用审核”配置审核人。</p>}
       </section>}
-      <details className={issueEditor ? 'issue-supplements' : 'work-record-supplements'} open={!issueEditor || !!conflictingLocalForm || !!attachments.length}><summary hidden={!issueEditor}>补充记录与附件{policy.attachmentRequired ? '（必填）' : '（可选）'}</summary><div className="supplement-fields"><div className="form-context"><strong>{item.formName ?? '岗位工作记录'}</strong><small>{item.formCode ?? '结构化表单'} · {policy.attachmentCountUnlimited ? `每个房号照片数量不限，整单安全上限 ${policy.maxAttachments} 个附件` : `最多 ${policy.maxAttachments} 个附件`} · 单文件 ≤ {Math.round(policy.maxFileSizeBytes / 1024 / 1024)}MB</small></div>
+      <details className={issueEditor ? 'issue-supplements' : 'work-record-supplements'} open={!issueEditor || !!conflictingLocalForm || !!attachments.length}><summary hidden={!issueEditor}>补充记录与附件{policy.attachmentRequired ? '（必填）' : '（可选）'}</summary><div className="supplement-fields"><div className="form-context"><strong>{item.formName ?? '岗位工作记录'}</strong><small>{item.formCode ?? '结构化表单'} · {policy.attachmentCountUnlimited ? item.executionPolicy?.operationsDaily ? `按证据点补充截图与文件，整单安全上限 ${policy.maxAttachments} 个附件` : `每个房号照片数量不限，整单安全上限 ${policy.maxAttachments} 个附件` : `最多 ${policy.maxAttachments} 个附件`} · 单文件 ≤ {Math.round(policy.maxFileSizeBytes / 1024 / 1024)}MB</small></div>
       {item.delegateAssignmentId && <div className="inline-warning">本事项已转交给 {item.delegatedEmployeeName ?? '指定员工'}{item.ownerResting ? '，原执行人今日休息' : ''}。</div>}
       {isOwner && item.executionPolicy?.delegationAllowed && !viewOnly && <section className="action-box"><label>转交本项工作<select value={delegateAssignmentId} onChange={(event) => setDelegateAssignmentId(event.target.value)}><option value="">请选择同店员工</option>{candidates.map((candidate) => <option value={candidate.assignmentId} key={candidate.assignmentId}>{candidate.employeeName} · {candidate.positionName}</option>)}</select></label>{item.executionPolicy.oneClickRestTransfer && <label className="checkbox-line"><input type="checkbox" checked={ownerResting} onChange={(event) => setOwnerResting(event.target.checked)} />本人今日休息，将当日后续工作一键转交</label>}<label>转交说明<input value={delegationReason} onChange={(event) => setDelegationReason(event.target.value)} placeholder="选填" /></label><div className="button-row"><button className="secondary" disabled={delegating || !delegateAssignmentId} onClick={() => void saveDelegation()}>{delegating ? '处理中…' : ownerResting ? '确认一键转交' : '确认转交'}</button>{item.delegateAssignmentId && <button className="secondary" disabled={delegating} onClick={() => void revokeDelegation()}>撤销转交</button>}</div></section>}
       {loadingRecord && <div className="state-card"><div className="spinner" /><strong>正在读取已提交记录</strong></div>}
@@ -1167,7 +1169,9 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
         {(policy.exceptionStatementRequired || !properties.issueSummary || !!exception || !!existing?.exceptionStatement) && <label>{policy.exceptionStatementRequired ? '需协同事项 *' : '异常或需协同事项（选填）'}<textarea rows={3} value={exception} onChange={(event) => setException(event.target.value)} /><small>仅填写实际异常或需协同事项，普通统计请填工作结果说明。{item.reviewMode === 'NONE' && '有异常时转人工审核。'}</small></label>}
         {policy.nextActionRequired && <label>下一步行动 *<textarea rows={2} value={nextAction} onChange={(event) => setNextAction(event.target.value)} /></label>}
         {!!activeRequirements.length && <section className="camera-evidence">
-          <div><strong>{guestServiceAlbumUpload ? '服务照片' : '现场证据'}</strong><small>{guestServiceAlbumUpload
+          <div><strong>{item.executionPolicy?.operationsDaily ? '运营截图与文件' : guestServiceAlbumUpload ? '服务照片' : '现场证据'}</strong><small>{item.executionPolicy?.operationsDaily
+            ? '按平台、轮次或库存日期分别上传截图与报表，保留原始比例；上传时间不等于平台数据时间，不要求实时拍照。'
+            : guestServiceAlbumUpload
             ? '可从相册选择之前拍摄的照片，不要求实时拍摄；也可直接拍照。可先保存草稿，之后补齐照片再提交。相册照片会标明上传来源，不作为现场拍摄凭证。'
             : <>照片可横拍或竖拍，系统会校正手机照片方向并按实际比例展示；上传后由服务端加盖门店、可信时间和证据编号水印{hasInstanceRequirements ? '；按房号、设施或设备逐项留证，不得混用编号' : `；楼层公区按本店 ${item.guestRoomFloorCount ?? 1} 层计算`}</>}</small></div>
           {activeRequirements.map((requirement) => {
@@ -1179,7 +1183,7 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
               const storeConfigured = requirementUsesStoreConfiguration(requirement)
               const configuredValues = instanceValues(requirement)
               return <section className="room-evidence-group" key={requirement.checkpointCode}>
-                <header><strong>{requirement.label}</strong><small>{storeConfigured ? `门店后台已配置 ${configuredValues.length} 个${instanceLabel}` : fixedCount > 0 ? `需填写 ${fixedCount} 个${instanceLabel}` : `逐项填写${instanceLabel}`}，每项至少 {minimumPerInstance} 份证据且编号不可重复</small>{!storeConfigured && fixedCount === 0 && <button type="button" className="secondary" onClick={() => addInstanceValue(requirement)}>+ 添加{instanceLabel}</button>}</header>
+                <header><strong>{evidenceLabel(requirement)}</strong><small>{storeConfigured ? `门店后台已配置 ${configuredValues.length} 个${instanceLabel}` : fixedCount > 0 ? `需填写 ${fixedCount} 个${instanceLabel}` : `逐项填写${instanceLabel}`}，每项至少 {minimumPerInstance} 份证据且编号不可重复</small>{!storeConfigured && fixedCount === 0 && <button type="button" className="secondary" onClick={() => addInstanceValue(requirement)}>+ 添加{instanceLabel}</button>}</header>
                 {!configuredValues.length && fixedCount === 0 && <div className="inline-warning">门店后台尚未配置该证据点的{instanceLabel}清单，请联系管理员完成配置后再提交。</div>}
                 <div className="room-evidence-grid">{configuredValues.map((instanceValue, instanceIndex) => {
                   const instanceKey = normalizedInstanceKey(instanceValue)
@@ -1195,20 +1199,20 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
             }
             const minimum = requirementMinimum(requirement)
             const count = attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode).length + (existing?.status === 'DRAFT' ? existing.attachments.filter((entry) => entry.checkpointCode === requirement.checkpointCode).length : 0)
-            const allowsAlbumUpload = allowsGuestServiceAlbumUpload(item.itemCode, requirement)
+            const allowsAlbumUpload = requirement.captureSource === 'FILE_PICKER' || allowsGuestServiceAlbumUpload(item.itemCode, requirement)
             const checkpointClassName = count >= minimum ? 'camera-checkpoint completed' : 'camera-checkpoint'
             return <div className="camera-grid" key={requirement.checkpointCode}>
               {requirementAllowsImages(requirement) && allowsAlbumUpload && <label className={checkpointClassName}>
-                <span>{requirement.label} · 相册<small>{count}/{minimum} 份，可稍后补齐</small></span>
+                <span>{evidenceLabel(requirement)} · {item.executionPolicy?.operationsDaily ? '截图' : '相册'}<small>{count}/{minimum} 份，可稍后补齐</small></span>
                 <input type="file" accept="image/jpeg,image/png" multiple disabled={validatingAttachments || !!saving} onChange={(event) => {
                   const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const, checkpointCode: requirement.checkpointCode }))
                   void appendValidatedAttachments(selected)
                   event.currentTarget.value = ''
                 }} />
-                <b>{validatingAttachments ? '校验中…' : count >= minimum ? '继续选择照片' : '选择已有照片'}</b>
+                <b>{validatingAttachments ? '校验中…' : count >= minimum ? '继续选择图片' : item.executionPolicy?.operationsDaily ? '选择截图' : '选择已有照片'}</b>
               </label>}
               {requirementAllowsImages(requirement) && (!allowsAlbumUpload || requirement.captureSource !== 'FILE_PICKER') && <label className={checkpointClassName}>
-                <span>{requirement.label}{allowsAlbumUpload ? ' · 拍照' : ''}<small>{count}/{minimum} 份{requirement.recommendedMaximum ? `，建议不超过 ${requirement.recommendedMaximum}` : ''}</small></span>
+                <span>{evidenceLabel(requirement)}{allowsAlbumUpload ? ' · 拍照' : ''}<small>{count}/{minimum} 份{requirement.recommendedMaximum ? `，建议不超过 ${requirement.recommendedMaximum}` : ''}</small></span>
                 <input type="file" accept="image/jpeg,image/png" capture="environment" multiple disabled={validatingAttachments || !!saving} onChange={(event) => {
                   const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'CAMERA' as const, checkpointCode: requirement.checkpointCode, capturedAtClient: new Date().toISOString() }))
                   void appendValidatedAttachments(selected)
@@ -1216,7 +1220,7 @@ export function WorkRecordDialog({ item, identity, onClose, onSaved, onDelegated
                 }} />
                 <b>{validatingAttachments ? '校验中…' : allowsAlbumUpload ? '直接拍照（可选）' : count >= minimum ? '已满足，可继续上传' : '拍照上传'}</b>
               </label>}
-              {requirementAllowsDocuments(requirement) && <label className={checkpointClassName}><span>{requirement.label}文件<small>支持该证据点允许的文档格式</small></span><input type="file" accept={requirementDocumentAccept(requirement)} multiple disabled={validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const, checkpointCode: requirement.checkpointCode })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><b>选择文件</b></label>}
+              {requirementAllowsDocuments(requirement) && <label className={checkpointClassName}><span>{evidenceLabel(requirement)}文件<small>支持该证据点允许的文档格式</small></span><input type="file" accept={requirementDocumentAccept(requirement)} multiple disabled={validatingAttachments || !!saving} onChange={(event) => { const selected = Array.from(event.target.files ?? []).map((file) => ({ file, captureSource: 'FILE_PICKER' as const, checkpointCode: requirement.checkpointCode })); void appendValidatedAttachments(selected); event.currentTarget.value = '' }} /><b>选择文件</b></label>}
             </div>
           })}
         </section>}
@@ -2053,6 +2057,7 @@ function AuthenticatedApp({ onLogout }: { onLogout?: () => void }) {
       case 'account-self-service': legacyPage = <AccountSelfService roleLabel={activeIdentity.label} orgName={activeIdentity.orgName} onChangePassword={authMode !== 'dev-header' ? () => setChangingPassword(true) : undefined} onLogout={authMode !== 'dev-header' ? onLogout : undefined} />; break
       case 'hotel-dashboard': legacyPage = <HotelDashboardPage identity={activeIdentity} routeParams={routeParams} go={navigate} />; break
       case 'operations-dashboard': legacyPage = <OperationsDashboardPage identity={activeIdentity} />; break
+      case 'operations-work': legacyPage = <OperationsWorkFeature key={activeIdentity.key} identity={activeIdentity} permissions={activePermissions} params={routeParams} go={navigate} />; break
       case 'work-packages': legacyPage = <WorkPackageCenter identity={activeIdentity} permissions={activePermissions} />; break
       case 'my-work': legacyPage = <MyWork identity={activeIdentity} routeParams={routeParams} go={navigate} />; break
       case 'team-work': legacyPage = <TeamWork identity={activeIdentity} permissions={activePermissions} routeParams={routeParams} go={navigate} />; break

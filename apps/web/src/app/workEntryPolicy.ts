@@ -24,6 +24,14 @@ export function allowsGuestServiceAlbumUpload(
     && (!requirement.captureSource || ['FILE_PICKER', 'CAMERA_OR_FILE'].includes(requirement.captureSource))
 }
 
+export function evidenceRequirementLabel(requirement: { label: string; dateOffsetDays?: number }, businessDate: string): string {
+  if (requirement.dateOffsetDays === undefined || !Number.isInteger(requirement.dateOffsetDays) || !/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) return requirement.label
+  const date = new Date(`${businessDate}T12:00:00Z`)
+  if (!Number.isFinite(date.getTime())) return requirement.label
+  date.setUTCDate(date.getUTCDate() + requirement.dateOffsetDays)
+  return `${date.toISOString().slice(0, 10)} · ${requirement.label}`
+}
+
 export function evidenceCaptureSourceMatches(actual: string | undefined, required?: string): boolean {
   if (!required) return true
   if (required === 'CAMERA_OR_FILE') return actual === 'CAMERA' || actual === 'FILE_PICKER'

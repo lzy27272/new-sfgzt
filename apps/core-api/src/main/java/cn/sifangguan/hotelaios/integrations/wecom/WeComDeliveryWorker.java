@@ -184,7 +184,10 @@ public class WeComDeliveryWorker {
                             or (n.source_type='FINANCE_CLOSE_BANK' and exists(select 1 from fcl_bank_explanation c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
                             or (n.source_type='FINANCE_ARCHIVE_REQUEST' and exists(select 1 from fac_request c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='PENDING' and c.applicant_id<>n.recipient_account_id))
                             or (n.source_type='FINANCE_ACCRUAL_POLICY' and exists(select 1 from far_policy c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
-                             or (n.source_type = 'TASK' and task.id is not null)
+                             or (n.source_type = 'WORK_PLAN' and
+                    """ + operationsPlanEligibilitySql() + """
+                            )
+                            or (n.source_type = 'TASK' and task.id is not null)
                            or (n.source_type = 'LOST_PROPERTY' and exists (
                                select 1 from lost_property_case lp
                                join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
@@ -354,7 +357,10 @@ public class WeComDeliveryWorker {
                             or (n.source_type='FINANCE_CLOSE_BANK' and exists(select 1 from fcl_bank_explanation c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
                             or (n.source_type='FINANCE_ARCHIVE_REQUEST' and exists(select 1 from fac_request c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='PENDING' and c.applicant_id<>n.recipient_account_id))
                             or (n.source_type='FINANCE_ACCRUAL_POLICY' and exists(select 1 from far_policy c where c.tenant_id=n.tenant_id and c.id=n.source_id and c.status='DRAFT' and c.reviewer_id=n.recipient_account_id and c.created_by<>n.recipient_account_id))
-                             or (n.source_type = 'TASK' and task.id is not null)
+                             or (n.source_type = 'WORK_PLAN' and
+                    """ + operationsPlanEligibilitySql() + """
+                            )
+                            or (n.source_type = 'TASK' and task.id is not null)
                            or (n.source_type = 'LOST_PROPERTY' and exists (
                                select 1 from lost_property_case lp
                                join employee_position_assignment la on la.tenant_id=lp.tenant_id and la.id=lp.recipient_assignment_id
@@ -507,6 +513,7 @@ public class WeComDeliveryWorker {
             // Keep review reminders usable without widening that security boundary here; the
             // reviewer lands on the authenticated workbench and can open 团队工作 from there.
             case "WORK_RECORD" -> "#/workbench";
+            case "WORK_PLAN" -> "#/operations-work?tab=plans&planId=" + sourceId;
             case "PROCUREMENT" -> "#/procurement?orderId=" + sourceId;
             case "FINANCE" -> "#/finance?tab="+("FINANCE_RETURNED".equals(notificationType)?"mine":"FINANCE_PAYMENT_PENDING".equals(notificationType)?"all":"review")+"&id="+sourceId;
             case "FINANCE_OPERATION" -> "#/finance?tab=operations&screen=documents&documentId="+sourceId;
@@ -531,6 +538,47 @@ public class WeComDeliveryWorker {
             case "LOST_PROPERTY" -> "#/lost-properties?id=" + sourceId;
             default -> throw new IllegalArgumentException("Unsupported WeCom notification source type");
         };
+    }
+
+    private static String operationsPlanEligibilitySql() {
+        return """
+            exists(select 1 from management_work_plan op
+              join management_work_plan_revision revision on revision.tenant_id=op.tenant_id and revision.id=op.current_revision_id
+              join employee_position_assignment owner on owner.tenant_id=op.tenant_id and owner.id=op.owner_assignment_id
+              join employee owner_employee on owner_employee.tenant_id=owner.tenant_id and owner_employee.id=owner.employee_id
+              join employee_position_assignment recipient on recipient.tenant_id=op.tenant_id and recipient.id=n.recipient_assignment_id
+              join employee recipient_employee on recipient_employee.tenant_id=recipient.tenant_id and recipient_employee.id=recipient.employee_id
+              join user_account recipient_account on recipient_account.tenant_id=recipient_employee.tenant_id and recipient_account.id=recipient_employee.account_id
+              join position_definition recipient_position on recipient_position.tenant_id=recipient.tenant_id and recipient_position.id=recipient.position_id
+              where op.tenant_id=n.tenant_id and op.id=n.source_id and op.operations_plan
+                and owner.status='ACTIVE' and owner.valid_from<=current_date and (owner.valid_to is null or owner.valid_to>=current_date)
+                and owner_employee.employment_status='ACTIVE' and owner_employee.deleted_at is null
+                and recipient_employee.account_id=n.recipient_account_id and recipient.status='ACTIVE'
+                and recipient.valid_from<=current_date and (recipient.valid_to is null or recipient.valid_to>=current_date)
+                and recipient_employee.employment_status='ACTIVE' and recipient_employee.deleted_at is null and recipient_account.status='ACTIVE'
+                and recipient_position.status='ACTIVE' and recipient_position.deleted_at is null and recipient_position.permanently_deleted_at is null
+                and ((recipient.id=owner.id and op.status in ('DRAFT','REJECTED') and n.notification_type='OPERATIONS_PLAN_REMINDER')
+                  or (owner_employee.id<>recipient_employee.id and owner_employee.account_id is distinct from recipient_employee.account_id
+                    and ((op.status='PENDING_APPROVAL' and n.notification_type='OPERATIONS_PLAN_REVIEW_PENDING'
+                      and n.idempotency_key='operations-plan:submit:'||revision.id::text)
+                      or (op.status in ('DRAFT','REJECTED') and n.notification_type='OPERATIONS_PLAN_OVERDUE'))
+                    and (owner.manager_assignment_id=recipient.id or exists(select 1 from position_assignment_reporting_relation rel
+                      where rel.tenant_id=owner.tenant_id and rel.subordinate_assignment_id=owner.id and rel.leader_assignment_id=recipient.id
+                        and rel.valid_from<=current_date and (rel.valid_to is null or rel.valid_to>=current_date)))
+                    and exists(select 1 from position_function_profile profile
+                      join position_function_profile_version version on version.tenant_id=profile.tenant_id and version.profile_id=profile.id
+                      join position_function_profile_permission permission_link on permission_link.tenant_id=version.tenant_id and permission_link.profile_version_id=version.id
+                      join permission permission on permission.id=permission_link.permission_id and permission.code='work-plan.review'
+                      where profile.tenant_id=recipient.tenant_id and profile.position_id=recipient.position_id and profile.scope_type='GROUP'
+                        and version.lifecycle_status='PUBLISHED' and version.version_no=(select max(latest.version_no) from position_function_profile_version latest
+                          where latest.tenant_id=profile.tenant_id and latest.profile_id=profile.id and latest.lifecycle_status='PUBLISHED')
+                        and not exists(select 1 from jsonb_array_elements_text(revision.operations_payload->'hotelIds') snapshot(hotel)
+                          where not(version.authorization_scope_type='TENANT'
+                            or (version.authorization_scope_type='ORG_TREE' and exists(select 1 from org_unit_closure tree where tree.tenant_id=recipient.tenant_id and tree.ancestor_id=recipient.org_unit_id and tree.descendant_id=snapshot.hotel::uuid))
+                            or (version.authorization_scope_type='ORG_UNIT' and recipient.org_unit_id=snapshot.hotel::uuid)
+                            or (version.authorization_scope_type='ASSIGNED_HOTELS' and exists(select 1 from employee_assignment_hotel_scope portfolio where portfolio.tenant_id=recipient.tenant_id and portfolio.assignment_id=recipient.id and portfolio.hotel_org_unit_id=snapshot.hotel::uuid)))))))
+            )
+            """;
     }
 
     static boolean useGroupChat(String sourceType, String chatId) {

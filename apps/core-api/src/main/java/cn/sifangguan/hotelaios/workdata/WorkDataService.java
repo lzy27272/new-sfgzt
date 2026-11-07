@@ -254,7 +254,7 @@ public class WorkDataService {
         accessPolicy.requirePermission("work-record.submit");
         UUID targetOrgUnitId = request.targetOrgUnitId() == null ? request.orgUnitId() : request.targetOrgUnitId();
         requireTargetOrgScopeOrAssignmentMembership(principal, targetOrgUnitId,
-                request.positionAssignmentId(), request.businessDate());
+                request.positionAssignmentId(), request.businessDate(),request.workExpectationId(),request.formVersionId());
         authorizeAssignmentSubmission(principal, request.positionAssignmentId(), request.orgUnitId());
         validateAssignmentAndForm(principal, request);
         usageService.lockDay(targetOrgUnitId, request.employeeId(), request.businessDate());
@@ -572,6 +572,9 @@ public class WorkDataService {
     }
 
     private void validateAssignmentAndForm(TenantPrincipal principal, WorkDataModels.SubmitWorkRecord request) {
+        UUID target = request.targetOrgUnitId()==null ? request.orgUnitId() : request.targetOrgUnitId();
+        boolean assignedOperations = assignedOperationsExpectation(principal,request.workExpectationId(),
+                request.positionAssignmentId(),target,request.businessDate(),request.formVersionId());
         Integer validAssignment = jdbc.queryForObject("""
                 select count(*) from employee_position_assignment a
                 join form_version fv on fv.tenant_id = a.tenant_id and fv.id = :formVersionId
@@ -579,13 +582,13 @@ public class WorkDataService {
                 where a.tenant_id = :tenantId and a.id = :assignmentId and a.employee_id = :employeeId
                   and a.org_unit_id = :orgUnitId and a.status = 'ACTIVE'
                   and a.valid_from <= :businessDate and (a.valid_to is null or a.valid_to >= :businessDate)
-                  and exists (
+                  and (:assignedOperations or exists (
                     select 1
                     from org_unit_closure target_scope
                     where target_scope.tenant_id = a.tenant_id
                       and target_scope.ancestor_id = :targetOrgUnitId
                       and target_scope.descendant_id = a.org_unit_id
-                  )
+                  ))
                   and fv.lifecycle_status = 'PUBLISHED'
                   and (f.position_id is null or f.position_id = a.position_id or :linkedExpectation = true)
                 """, base(principal)
@@ -596,6 +599,7 @@ public class WorkDataService {
                 .addValue("targetOrgUnitId", request.targetOrgUnitId() == null
                         ? request.orgUnitId() : request.targetOrgUnitId())
                 .addValue("linkedExpectation", request.workExpectationId() != null)
+                .addValue("assignedOperations", assignedOperations)
                 .addValue("businessDate", request.businessDate()), Integer.class);
         if (validAssignment == null || validAssignment != 1) {
             throw new IllegalArgumentException("任职、岗位、组织与已发布表单不匹配");
@@ -606,11 +610,15 @@ public class WorkDataService {
             TenantPrincipal principal,
             UUID targetOrgUnitId,
             UUID assignmentId,
-            java.time.LocalDate businessDate
+            java.time.LocalDate businessDate,
+            UUID expectationId,
+            UUID formVersionId
     ) {
         if (principal.hasTenantScope() || principal.orgScopes().contains(targetOrgUnitId)) {
             return;
         }
+        if (principal.assignmentIds().contains(assignmentId) && assignedOperationsExpectation(
+                principal,expectationId,assignmentId,targetOrgUnitId,businessDate,formVersionId)) return;
         Boolean belongsToTarget = jdbc.queryForObject("""
                 select exists (
                   select 1
@@ -632,6 +640,26 @@ public class WorkDataService {
         if (!Boolean.TRUE.equals(belongsToTarget)) {
             throw new AccessDeniedException("目标组织不在当前任职所属门店范围内");
         }
+    }
+
+    /** An exact generated duty preserves its hotel responsibility when headquarters portfolios change. */
+    private boolean assignedOperationsExpectation(TenantPrincipal principal,UUID expectationId,UUID assignmentId,
+            UUID target,java.time.LocalDate date,UUID formVersionId) {
+        if (expectationId==null) return false;
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                select exists(select 1 from work_expectation x
+                  join work_package_item i on i.tenant_id=x.tenant_id and i.id=x.work_package_item_id
+                  join work_package_allocation allocation on allocation.tenant_id=x.tenant_id
+                    and allocation.id=x.work_package_allocation_id and allocation.position_assignment_id=x.position_assignment_id
+                    and allocation.target_org_unit_id=x.target_org_unit_id
+                    and allocation.work_package_version_id=i.work_package_version_id
+                  where x.tenant_id=:tenantId and x.id=:expectation and x.position_assignment_id=:assignment
+                    and x.target_org_unit_id=:target and x.business_date=:day and i.form_version_id=:form
+                    and coalesce(i.execution_policy->>'operationsDaily','false')='true'
+                    and x.status not in ('CANCELLED','WAIVED') and allocation.valid_from<=x.business_date
+                    and (allocation.valid_to is null or allocation.valid_to>=x.business_date))
+                """,base(principal).addValue("expectation",expectationId).addValue("assignment",assignmentId)
+                .addValue("target",target).addValue("day",date).addValue("form",formVersionId),Boolean.class));
     }
 
     private boolean validateSubmissionPolicyForRecord(TenantPrincipal principal, UUID recordId, java.time.LocalDate businessDate) {
@@ -1435,13 +1463,19 @@ public class WorkDataService {
                   on delegation.tenant_id = x.tenant_id
                  and delegation.work_expectation_id = x.id and delegation.status = 'ACTIVE'
                 where x.tenant_id = :tenantId and x.id = :expectationId
-                  and exists (
+                  and (exists (
                     select 1
                     from org_unit_closure execution_scope
                     where execution_scope.tenant_id = x.tenant_id
                       and execution_scope.ancestor_id = x.target_org_unit_id
                       and execution_scope.descendant_id = candidate.org_unit_id
-                  )
+                  ) or (x.position_assignment_id=candidate.id
+                    and coalesce(i.execution_policy->>'operationsDaily','false')='true'
+                    and exists(select 1 from work_package_allocation allocation
+                      where allocation.tenant_id=x.tenant_id and allocation.id=x.work_package_allocation_id
+                        and allocation.position_assignment_id=candidate.id and allocation.target_org_unit_id=x.target_org_unit_id
+                        and allocation.work_package_version_id=i.work_package_version_id
+                        and allocation.valid_from<=x.business_date and (allocation.valid_to is null or allocation.valid_to>=x.business_date))))
                   and (
                     (delegation.id is not null and delegation.delegate_assignment_id = candidate.id)
                     or (delegation.id is null and (

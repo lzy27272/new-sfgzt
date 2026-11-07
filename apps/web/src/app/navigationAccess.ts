@@ -6,6 +6,7 @@ export const navigation: Array<{ id: AppRouteId; sectionId?: string; label: stri
   { id: 'workbench', label: '角色工作台', icon: '⌂' },
   { id: 'hotel-dashboard', label: '门店工作台', icon: '▤', permissions: ['dashboard.hotel'] },
   { id: 'operations-dashboard', label: '多门店工作台', icon: '▥', permissions: ['dashboard.operations'] },
+  { id: 'operations-work', label: '运营部工作', icon: '', permissions: ['work-record.read', 'work-record.submit', 'work-plan.read', 'work-plan.submit', 'work-plan.team-read', 'work-plan.review'] },
   { id: 'investments', label: '投资测算', icon: '¥', group: '投资决策', permissions: [permissionCodes.investment.read] },
   { id: 'work-packages', label: '岗位工作模板', icon: '▦', group: '标准与工作', permissions: ['work-package.read', 'work-package.manage', 'standard.read'] },
   { id: 'my-work', label: '我的工作', icon: '✓', permissions: ['work-record.read', 'work-record.submit', 'work.submit'] },

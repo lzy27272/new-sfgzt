@@ -130,6 +130,13 @@ export function safeTaskDeepLink(returnTo: string | undefined): string {
     if(target.hash || [...target.searchParams.keys()].length!==2 || tabs.length!==1 || tabs[0]!=='mine' || ids.length!==1 || !TASK_ID_PATTERN.test(ids[0])) throw new Error('企微学院目标参数无效，系统已拒绝跳转。')
     return '#/academy?tab=mine&id='+ids[0]
   }
+  if (target.pathname === '/operations-work') {
+    const ids = target.searchParams.getAll('planId'), tabs = target.searchParams.getAll('tab')
+    if (target.hash || [...target.searchParams.keys()].length !== 2 || tabs.length !== 1 || tabs[0] !== 'plans' || ids.length !== 1 || !TASK_ID_PATTERN.test(ids[0])) {
+      throw new Error('企微工作计划目标参数无效，系统已拒绝跳转。')
+    }
+    return `#/operations-work?tab=plans&planId=${ids[0]}`
+  }
   if (target.pathname === '/workbench') {
     if (target.search || target.hash) {
       throw new Error('企微工作台目标包含非预期参数，系统已拒绝跳转。')

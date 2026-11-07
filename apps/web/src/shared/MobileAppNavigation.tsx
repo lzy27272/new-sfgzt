@@ -101,7 +101,7 @@ export function AllFunctionsPage({
         <h2>{group.label}</h2>
         <div className="all-function-list">
           {group.items.map((item) => <button type="button" key={item.id} onClick={() => go(resolveTarget(item.id), item.params)}>
-            <i aria-hidden="true">{item.icon}</i><span>{item.label}</span><b aria-hidden="true">›</b>
+            <i aria-hidden="true">{item.id === 'operations-work' ? <TabIcon icon="operations" /> : item.icon}</i><span>{item.label}</span><b aria-hidden="true">›</b>
           </button>)}
         </div>
       </section>)}

@@ -6,6 +6,7 @@ export type ViewId =
   | 'account-self-service'
   | 'hotel-dashboard'
   | 'operations-dashboard'
+  | 'operations-work'
   | 'work-packages'
   | 'my-work'
   | 'team-work'
@@ -50,7 +51,7 @@ export type IdentityAssignment = {
   primary: boolean
   assignmentType: string
   permissionCodes?: string[]
-  authorizationScopeType?: 'SELF' | 'ORG_UNIT' | 'ORG_TREE' | 'TENANT'
+  authorizationScopeType?: 'SELF' | 'ORG_UNIT' | 'ORG_TREE' | 'ASSIGNED_HOTELS' | 'TENANT'
 }
 
 export type IdentitySnapshot = {
@@ -146,6 +147,7 @@ export type WorkExpectation = {
   reportPolicy?: Record<string, unknown>
   applicabilityPolicy?: Record<string, unknown>
   executionPolicy?: {
+    operationsDaily?: boolean
     managerCycle?: boolean
     sharedPerOrg?: boolean
     allowedPositionCodes?: string[]
@@ -238,6 +240,7 @@ export type EvidenceRequirement = {
   unlimited?: boolean
   allowReference?: boolean
   requiredWhen?: { field: string; equals: unknown }
+  dateOffsetDays?: number
 }
 
 export type DelegationCandidate = {

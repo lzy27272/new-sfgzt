@@ -47,6 +47,7 @@ public class OperationalDailyAllocationService {
 
     /** Recover only initial gaps: never reactivate revoked/expired administrator allocations. */
     public void ensureInitialAllocations(TenantPrincipal principal, LocalDate businessDate) {
+        ensureInitialOperationsAllocations(principal, businessDate);
         List<UUID> missing = jdbc.queryForList("""
                 select a.id from employee_position_assignment a
                 join employee e on e.tenant_id = a.tenant_id and e.id = a.employee_id
@@ -214,6 +215,92 @@ public class OperationalDailyAllocationService {
                               allocated_by = excluded.allocated_by, updated_at = now()
                 """, params);
         ensureSupervisorReport(principal, assignmentId, effectiveDate);
+        reconcileOperations(principal, assignmentId, effectiveDate);
+    }
+
+    /** Missing provisioning is recoverable; an explicit revoked allocation is not. */
+    private void ensureInitialOperationsAllocations(TenantPrincipal principal, LocalDate date) {
+        List<UUID> missing = jdbc.queryForList("""
+                select distinct a.id from employee_position_assignment a
+                join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id
+                join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                join user_account account on account.tenant_id=e.tenant_id and account.id=e.account_id
+                join employee_assignment_hotel_scope scope on scope.tenant_id=a.tenant_id and scope.assignment_id=a.id
+                join org_unit hotel on hotel.tenant_id=scope.tenant_id and hotel.id=scope.hotel_org_unit_id
+                join work_package_definition d on d.tenant_id=a.tenant_id and d.position_id=p.id
+                  and d.code='WP-OPERATIONS-'||p.code||'-DAILY' and d.status='ACTIVE'
+                where a.tenant_id=:tenantId and a.status='ACTIVE' and a.valid_from<=:date
+                  and (a.valid_to is null or a.valid_to>=:date) and p.status='ACTIVE'
+                  and p.code in ('OPERATIONS_DIRECTOR','OPERATIONS_MANAGER')
+                  and p.deleted_at is null and p.permanently_deleted_at is null
+                  and e.employment_status='ACTIVE' and e.deleted_at is null and account.status='ACTIVE'
+                  and hotel.unit_type='HOTEL' and hotel.status='ACTIVE'
+                  and exists(select 1 from work_package_version v where v.tenant_id=d.tenant_id
+                    and v.work_package_definition_id=d.id and v.lifecycle_status='PUBLISHED'
+                    and v.effective_from::date<=:date and (v.effective_to is null or v.effective_to::date>=:date))
+                  and not exists(select 1 from work_package_allocation old
+                    join work_package_version ov on ov.tenant_id=old.tenant_id and ov.id=old.work_package_version_id
+                    where old.tenant_id=a.tenant_id and old.position_assignment_id=a.id
+                      and old.target_org_unit_id=hotel.id and ov.work_package_definition_id=d.id)
+                """,base(principal).addValue("date",date),UUID.class);
+        for (UUID id : missing) reconcileOperations(principal,id,date,true);
+    }
+
+    private void reconcileOperations(TenantPrincipal principal, UUID assignmentId, LocalDate date) {
+        reconcileOperations(principal,assignmentId,date,false);
+    }
+
+    private void reconcileOperations(TenantPrincipal principal, UUID assignmentId, LocalDate date, boolean initial) {
+        var params=base(principal).addValue("assignmentId",assignmentId).addValue("date",date)
+                .addValue("previousDate",date.minusDays(1)).addValue("actorId",principal.actorId())
+                .addValue("initial",initial).addValue("lockKey",principal.tenantId()+":operational-allocation:"+assignmentId);
+        jdbc.queryForObject("select pg_advisory_xact_lock(hashtextextended(:lockKey,0))",params,(rs,row)->true);
+        jdbc.update("""
+                update work_package_allocation allocation
+                set status=case when allocation.valid_from>=:date then 'REVOKED' else allocation.status end,
+                    valid_to=case when allocation.valid_from<:date then :previousDate else allocation.valid_to end,
+                    updated_at=now()
+                from work_package_version v join work_package_definition d
+                  on d.tenant_id=v.tenant_id and d.id=v.work_package_definition_id
+                where allocation.tenant_id=:tenantId and allocation.position_assignment_id=:assignmentId
+                  and allocation.work_package_version_id=v.id and allocation.allocation_source='SYSTEM'
+                  and not :initial and allocation.status='ACTIVE' and d.code in (
+                    'WP-OPERATIONS-OPERATIONS_DIRECTOR-DAILY','WP-OPERATIONS-OPERATIONS_MANAGER-DAILY')
+                  and (allocation.valid_to is null or allocation.valid_to>=:date)
+                """,params);
+        jdbc.update("""
+                insert into work_package_allocation
+                  (tenant_id,work_package_version_id,position_assignment_id,target_org_unit_id,
+                   allocation_source,valid_from,valid_to,status,allocated_by)
+                select a.tenant_id,v.id,a.id,hotel.id,'SYSTEM',
+                       greatest(:date,a.valid_from,v.effective_from::date),a.valid_to,'ACTIVE',:actorId
+                from employee_position_assignment a
+                join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                join user_account account on account.tenant_id=e.tenant_id and account.id=e.account_id
+                join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id
+                join employee_assignment_hotel_scope scope on scope.tenant_id=a.tenant_id and scope.assignment_id=a.id
+                join org_unit hotel on hotel.tenant_id=scope.tenant_id and hotel.id=scope.hotel_org_unit_id
+                join work_package_definition d on d.tenant_id=a.tenant_id and d.position_id=p.id
+                  and d.code='WP-OPERATIONS-'||p.code||'-DAILY' and d.status='ACTIVE'
+                join lateral (select version.* from work_package_version version
+                  where version.tenant_id=d.tenant_id and version.work_package_definition_id=d.id
+                    and version.lifecycle_status='PUBLISHED'
+                    and (version.effective_to is null or version.effective_to::date>=greatest(:date,a.valid_from,version.effective_from::date))
+                  order by (version.effective_from::date<=greatest(:date,a.valid_from)) desc,
+                    version.effective_from,version.version_no desc limit 1) v on true
+                where a.tenant_id=:tenantId and a.id=:assignmentId and a.status='ACTIVE'
+                  and p.code in ('OPERATIONS_DIRECTOR','OPERATIONS_MANAGER') and p.status='ACTIVE'
+                  and p.deleted_at is null and p.permanently_deleted_at is null
+                  and e.employment_status='ACTIVE' and e.deleted_at is null and account.status='ACTIVE'
+                  and hotel.unit_type='HOTEL' and hotel.status='ACTIVE'
+                  and (a.valid_to is null or a.valid_to>=greatest(:date,a.valid_from,v.effective_from::date))
+                  and (not :initial or not exists(select 1 from work_package_allocation old
+                    join work_package_version ov on ov.tenant_id=old.tenant_id and ov.id=old.work_package_version_id
+                    where old.tenant_id=a.tenant_id and old.position_assignment_id=a.id
+                      and old.target_org_unit_id=hotel.id and ov.work_package_definition_id=d.id))
+                on conflict(tenant_id,work_package_version_id,position_assignment_id,target_org_unit_id,valid_from)
+                do update set status='ACTIVE',valid_to=excluded.valid_to,allocated_by=excluded.allocated_by,updated_at=now()
+                """,params);
     }
 
     /** An explicit supervisor assignment owns its work, independent of the assistant's coverage mode. */

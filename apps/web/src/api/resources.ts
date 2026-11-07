@@ -237,6 +237,7 @@ export function normalizeExpectation(item: JsonObject): WorkExpectation {
           mediaTypes: asList<string>(requirement.mediaTypes),
           allowedKinds: asList<string>(requirement.allowedKinds) as Array<'IMAGE' | 'DOCUMENT' | 'PDF' | 'WORD' | 'EXCEL'>,
           minimum: value(requirement, 'minimum') === undefined ? undefined : number(requirement, ['minimum']),
+          dateOffsetDays: value(requirement, 'dateOffsetDays') === undefined ? undefined : number(requirement, ['dateOffsetDays']),
           recommendedMaximum: value(requirement, 'recommendedMaximum') === undefined ? undefined : number(requirement, ['recommendedMaximum']),
           minimumPerHotelFloor: value(requirement, 'minimumPerHotelFloor') === undefined ? undefined : number(requirement, ['minimumPerHotelFloor']),
           recommendedMaximumPerHotelFloor: value(requirement, 'recommendedMaximumPerHotelFloor') === undefined ? undefined : number(requirement, ['recommendedMaximumPerHotelFloor']),

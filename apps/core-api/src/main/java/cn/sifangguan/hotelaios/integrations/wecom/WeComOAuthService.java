@@ -151,6 +151,13 @@ public class WeComOAuthService {
         if (uri.isAbsolute() || uri.getRawFragment() != null) {
             throw new IllegalArgumentException("WeCom returnTo must target an allowed work item");
         }
+        if ("/operations-work".equals(uri.getPath())) {
+            var query=UriComponentsBuilder.fromUri(uri).build().getQueryParams();
+            if (!query.keySet().equals(Set.of("tab","planId")) || query.values().stream().anyMatch(v->v.size()!=1)
+                    || !"plans".equals(query.getFirst("tab")))
+                throw new IllegalArgumentException("运营计划入口必须包含一个planId和plans页签");
+            UUID.fromString(query.getFirst("planId"));return value;
+        }
         if ("/academy".equals(uri.getPath())) {
             var query=UriComponentsBuilder.fromUri(uri).build().getQueryParams();
             if(!query.keySet().equals(Set.of("tab","id")) || query.get("tab").size()!=1

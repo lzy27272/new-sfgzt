@@ -9,6 +9,7 @@ import cn.sifangguan.hotelaios.shared.db.TenantDatabaseContext;
 import cn.sifangguan.hotelaios.shared.events.TenantSystemAccountResolver;
 import cn.sifangguan.hotelaios.shared.security.AccessDeniedException;
 import cn.sifangguan.hotelaios.shared.security.AccessPolicy;
+import cn.sifangguan.hotelaios.shared.security.WorkReviewPolicy;
 import cn.sifangguan.hotelaios.workdata.AttachmentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -32,7 +33,8 @@ public class TaskService {
     private enum CreationSource {
         MANUAL,
         RULE_ENGINE,
-        TASK_CANDIDATE
+        TASK_CANDIDATE,
+        WORK_PLAN
     }
 
     private static final Map<String, Map<String, String>> TRANSITIONS = Map.of(
@@ -246,6 +248,80 @@ public class TaskService {
             }
         }
         return detailResult(principal, id);
+    }
+
+    /** Plan approval authorizes this exact hotel responsibility, including headquarters assignees. */
+    @Transactional
+    public UUID createFromWorkPlan(TaskModels.CreateTask request, String idempotencyKey) {
+        accessPolicy.requireAnyPermission("task.create", "task.assign");
+        accessPolicy.requirePermission("task.dispatch");
+        TenantPrincipal principal = prepare();
+        UUID creator = accessPolicy.requireBusinessActorAssignment(request.creatorAssignmentId());
+        accessPolicy.requirePermission("work-plan.review");
+        accessPolicy.requirePermission("task.review");
+        accessPolicy.requireOrgScope(request.orgUnitId());
+        if (!creator.equals(request.reviewerAssignmentId())) throw new AccessDeniedException("计划任务由审批任职负责验收");
+        JsonNode provenance=request.sourceSnapshot();
+        if (provenance==null || !provenance.hasNonNull("planId") || !provenance.hasNonNull("revisionId") || !provenance.hasNonNull("actionId"))
+            throw new IllegalArgumentException("计划任务缺少已审批来源");
+        var proof=jdbc.queryForList("""
+                select p.owner_assignment_id from management_work_plan p
+                join management_work_plan_item i on i.tenant_id=p.tenant_id and i.revision_id=p.current_revision_id
+                join management_work_plan_review review on review.tenant_id=i.tenant_id and review.revision_id=i.revision_id
+                  and review.action='APPROVE' and review.reviewer_assignment_id=:reviewer
+                join management_work_plan_item_decision decision on decision.tenant_id=review.tenant_id
+                  and decision.review_id=review.id and decision.item_id=i.id and decision.content_decision='ACCEPT'
+                where p.tenant_id=:tenantId and p.id=:plan and p.current_revision_id=:revision and p.operations_plan
+                  and p.status='PENDING_APPROVAL' and i.action_id=:action and i.hotel_id=:hotel
+                  and i.target_assignment_id=:assignee and i.title=:title and i.due_at=:due
+                  and i.acceptance_criteria=:criteria
+                """,base(principal).addValue("reviewer",creator).addValue("plan",UUID.fromString(provenance.get("planId").asText()))
+                .addValue("revision",UUID.fromString(provenance.get("revisionId").asText()))
+                .addValue("action",UUID.fromString(provenance.get("actionId").asText())).addValue("hotel",request.orgUnitId())
+                .addValue("assignee",request.assigneeAssignmentId()).addValue("title",request.title()).addValue("due",request.dueAt())
+                .addValue("criteria",provenance.path("acceptanceCriteria").asText()));
+        if (proof.size()!=1 || !new WorkReviewPolicy(jdbc).canManage(principal,(UUID)proof.getFirst().get("owner_assignment_id"),request.orgUnitId()))
+            throw new AccessDeniedException("计划任务来源未获有效上级审批或任务字段不匹配");
+        UUID owner=(UUID)proof.getFirst().get("owner_assignment_id");
+        Boolean within=jdbc.queryForObject("""
+                select exists(select 1 from employee_position_assignment a where a.tenant_id=:tenantId and a.id=:assignee
+                  and (a.id=:owner or a.manager_assignment_id=:owner or exists(select 1 from position_assignment_reporting_relation r
+                    where r.tenant_id=a.tenant_id and r.subordinate_assignment_id=a.id and r.leader_assignment_id=:owner
+                      and r.valid_from<=current_date and (r.valid_to is null or r.valid_to>=current_date))))
+                """,base(principal).addValue("assignee",request.assigneeAssignmentId()).addValue("owner",owner),Boolean.class);
+        if (!Boolean.TRUE.equals(within)) throw new AccessDeniedException("行动负责人不是计划本人或有效直属下级");
+        Boolean eligible = jdbc.queryForObject("""
+                select exists(select 1 from employee_position_assignment a
+                  join employee e on e.tenant_id=a.tenant_id and e.id=a.employee_id
+                  join user_account u on u.tenant_id=e.tenant_id and u.id=e.account_id and u.status='ACTIVE'
+                  join position_definition p on p.tenant_id=a.tenant_id and p.id=a.position_id and p.status='ACTIVE'
+                  join employee_position_assignment reviewer on reviewer.tenant_id=a.tenant_id and reviewer.id=:reviewer
+                  join employee reviewer_employee on reviewer_employee.tenant_id=reviewer.tenant_id and reviewer_employee.id=reviewer.employee_id
+                  where a.tenant_id=:tenantId and a.id=:assignee and a.status='ACTIVE'
+                    and a.valid_from<=current_date and (a.valid_to is null or a.valid_to>=current_date)
+                    and e.employment_status='ACTIVE' and e.deleted_at is null and p.deleted_at is null and p.permanently_deleted_at is null
+                    and reviewer.status='ACTIVE' and reviewer.valid_from<=current_date
+                    and (reviewer.valid_to is null or reviewer.valid_to>=current_date)
+                    and reviewer_employee.account_id=:actor and reviewer_employee.employment_status='ACTIVE'
+                    and e.id<>reviewer_employee.id and e.account_id is distinct from :actor
+                    and (exists(select 1 from employee_assignment_hotel_scope s where s.tenant_id=a.tenant_id
+                      and s.assignment_id=a.id and s.hotel_org_unit_id=:hotel)
+                    or exists(select 1 from org_unit_closure c where c.tenant_id=a.tenant_id
+                      and c.ancestor_id=:hotel and c.descendant_id=a.org_unit_id)))
+                """,base(principal).addValue("reviewer",creator).addValue("assignee",request.assigneeAssignmentId())
+                .addValue("actor",principal.actorId()).addValue("hotel",request.orgUnitId()),Boolean.class);
+        if (!Boolean.TRUE.equals(eligible)) throw new AccessDeniedException("计划任务责任任职无效、超出负责门店或存在自审");
+        TaskModels.RuleTaskSpec spec = new TaskModels.RuleTaskSpec(null,null,request.orgUnitId(),
+                request.assigneeAssignmentId(),creator,null,null,request.title(),request.description(),
+                request.priority(),request.dueAt(),request.sourceSnapshot());
+        UUID id = createTask(spec,idempotencyKey,CreationSource.WORK_PLAN);
+        jdbc.update("update management_task set creation_source='WORK_PLAN',created_by_assignment_id=:creator where tenant_id=:tenantId and id=:id",
+                base(principal).addValue("creator",creator).addValue("id",id));
+        Map<String,Object> row=taskRow(principal,id,true);
+        if ("PROPOSED".equals(row.get("lifecycle_status"))) transition(id,"DISPATCH",idempotencyKey+":dispatch",
+                new TaskModels.Command(((Number)row.get("row_version")).longValue(),creator,
+                        JsonNodeFactory.instance.objectNode().put("source","WORK_PLAN")),true,null);
+        return id;
     }
 
     @Transactional
@@ -706,7 +782,7 @@ public class TaskService {
         if (spec.assigneeAssignmentId().equals(spec.reviewerAssignmentId())) {
             throw new IllegalArgumentException("任务责任人与验收人不得为同一任职");
         }
-        if (source != CreationSource.MANUAL || principal.hasTenantScope()) {
+        if (source != CreationSource.WORK_PLAN && (source != CreationSource.MANUAL || principal.hasTenantScope())) {
             requireAssignment(principal, spec.assigneeAssignmentId());
             requireAssignment(principal, spec.reviewerAssignmentId());
         }

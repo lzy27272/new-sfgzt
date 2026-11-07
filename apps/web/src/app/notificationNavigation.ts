@@ -19,6 +19,11 @@ export function resolveNotificationNavigation(
   const sourceType = normalized(notification.sourceType)
   const sourceId = notification.sourceId?.trim()
   const has = (...required: string[]) => grantedPermissions.includes('*') || required.some((permission) => grantedPermissions.includes(permission))
+  if (sourceType === 'WORK_PLAN') {
+    return sourceId && has('work-plan.read', 'work-plan.submit', 'work-plan.team-read', 'work-plan.review')
+      ? { view: 'operations-work', params: { tab: 'plans', planId: sourceId }, actionLabel: type.includes('SUBMITTED') || type.includes('REVIEW') ? '查看待审批计划' : '查看工作计划' }
+      : undefined
+  }
   if (sourceType === 'FINANCE' && sourceId && has('finance.submit', 'finance.review', 'finance.read', 'finance.pay')) {
     return { view: 'finance', params: { tab: type.includes('RETURN') ? 'mine' : type.includes('PAYMENT') || type.includes('APPROVED') ? 'all' : 'review', id: sourceId }, actionLabel: '办理财务单据' }
   }

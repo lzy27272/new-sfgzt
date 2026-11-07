@@ -7,6 +7,7 @@ export type RolePresentationKey =
   | 'ASSISTANT_MANAGER'
   | 'HOTEL_MANAGER'
   | 'REGIONAL_OPERATIONS'
+  | 'OPERATIONS'
   | 'HR'
   | 'HR_ADMINISTRATION_SUPERVISOR'
   | 'HR_ADMINISTRATION'
@@ -31,6 +32,7 @@ export type MobilePresentationTarget =
   | 'daily-operations'
   | 'hotel-dashboard'
   | 'operations-dashboard'
+  | 'operations-work'
   | 'work-packages'
   | 'rules'
   | 'organization'
@@ -161,6 +163,12 @@ const POLICIES: Readonly<Record<RolePresentationKey, RolePresentationPolicy>> = 
     ),
     mobileTabs: tabs('日运营', 'daily-operations'),
   }),
+  OPERATIONS: Object.freeze({
+    key: 'OPERATIONS', knownRole: true,
+    focus: '本人负责门店的运营日清、周月计划、执行任务和工作完成率',
+    desktopModuleIds: modules('workbench', 'operations-work', 'my-work', 'tasks', 'notifications', 'all-functions'),
+    mobileTabs: tabs('运营工作', 'operations-work', '工作', 'my-work'),
+  }),
   HR: Object.freeze({
     key: 'HR',
     knownRole: true,
@@ -272,6 +280,7 @@ const ROLE_ALIASES: Readonly<Record<Exclude<RolePresentationKey, 'GENERIC'>, rea
   REGIONAL_OPERATIONS: Object.freeze([
     'OTA_OPERATION_MANAGER', 'ota-operation-manager', 'OTA运营经理',
   ]),
+  OPERATIONS: Object.freeze(['OPERATIONS_DIRECTOR', 'OPERATIONS_MANAGER', '运营总监', '运营经理']),
   HR: Object.freeze([
     'HR_KPI_ADMIN', 'hr-kpi-admin', '行政人事KPI管理员',
   ]),

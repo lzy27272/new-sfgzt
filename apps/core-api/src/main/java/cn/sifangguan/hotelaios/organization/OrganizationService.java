@@ -1457,6 +1457,7 @@ public class OrganizationService {
         Set<UUID> responsibleHotelIds = validateResponsibleHotels(
                 principal, positionId, scopeType, request.responsibleHotelIds(), null);
         replaceAssignmentHotelScope(principal, assignmentId, responsibleHotelIds);
+        reconcileOperationalDailyAllocation(principal, assignmentId);
         auditWriter.record("POSITION_ASSIGNMENT_HOTEL_SCOPE_UPDATED", "POSITION_ASSIGNMENT", assignmentId,
                 "{\"responsibleHotelCount\":" + responsibleHotelIds.size() + "}");
         return Map.of("assignmentId", assignmentId,

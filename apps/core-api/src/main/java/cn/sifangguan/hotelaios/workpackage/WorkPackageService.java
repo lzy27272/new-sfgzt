@@ -939,6 +939,22 @@ public class WorkPackageService {
             boolean mineOnly, int page, int size, boolean currentAssignmentOnly,
             LocalDate boardScanFrom, LocalDate boardScanTo, boolean teamOnly
     ) {
+        return expectationQuery(status, positionAssignmentId, targetOrgUnitId, businessDate,
+                fromBusinessDate, toBusinessDate, mineOnly, page, size, currentAssignmentOnly,
+                boardScanFrom, boardScanTo, teamOnly, null);
+    }
+
+    ExpectationQuery completionExpectationQuery(UUID subjectAssignment, UUID hotelId) {
+        return expectationQuery(null, null, hotelId, null, null, null,
+                false, 0, 200, false, null, null, false, subjectAssignment);
+    }
+
+    private ExpectationQuery expectationQuery(
+            String status, UUID positionAssignmentId, UUID targetOrgUnitId,
+            LocalDate businessDate, LocalDate fromBusinessDate, LocalDate toBusinessDate,
+            boolean mineOnly, int page, int size, boolean currentAssignmentOnly,
+            LocalDate boardScanFrom, LocalDate boardScanTo, boolean teamOnly, UUID completionAssignment
+    ) {
         TenantPrincipal principal = prepare();
         accessPolicy.requireAnyPermission(
                 "work-package.read", "work-record.read", "work-record.review", "work-record.team-read");
@@ -1041,6 +1057,25 @@ public class WorkPackageService {
         String filters = predicates.isEmpty() ? "" : " and " + String.join(" and ", predicates);
         WorkVisibilityPolicy.Scope workScope = workVisibility.scope(principal, params);
         String visibility = " and " + (teamOnly ? workScope.summary("x") : workScope.expectation("x", !mineOnly));
+        String responsibilityJoin = "";
+        String completionColumns = "";
+        if (completionAssignment != null) {
+            // Freeze submitted obligations to the actual executor even after a delegation is revoked.
+            // A shared execution grant alone does not create another employee's obligation.
+            String responsible = "coalesce(submitted_executor.position_assignment_id,delegation.delegate_assignment_id,x.position_assignment_id)";
+            params.addValue("completionAssignment", completionAssignment);
+            visibility = " and " + workScope.summaryForResponsibility("x", responsible)
+                    + " and " + responsible + "=:completionAssignment";
+            responsibilityJoin = """
+                    left join lateral (
+                        select submitted.id,submitted.position_assignment_id,submitted.submitted_at from work_record submitted
+                        where submitted.tenant_id=x.tenant_id and submitted.work_expectation_id=x.id
+                          and submitted.submitted_at is not null and submitted.status in ('SUBMITTED','APPROVED','REJECTED')
+                        order by submitted.attempt_no desc,submitted.created_at desc,submitted.id desc limit 1
+                    ) submitted_executor on true
+                    """;
+            completionColumns = ", submitted_executor.id as completion_record_id, submitted_executor.submitted_at as completion_submitted_at ";
+        }
         return new ExpectationQuery("""
                 select x.id, x.business_date, x.period_key, x.available_at, x.due_at, x.status,
                        x.row_version, x.waiver_allowed,
@@ -1078,6 +1113,7 @@ public class WorkPackageService {
                        case when latest_record.submitted_at is not null
                             then latest_record.position_name end as actual_executor_position_name,
                        first_record.submitted_at as first_submitted_at
+                """ + completionColumns + """
                 from work_expectation x
                 join work_package_item i on i.tenant_id = x.tenant_id and i.id = x.work_package_item_id
                 join work_package_version v on v.tenant_id = i.tenant_id and v.id = i.work_package_version_id
@@ -1122,6 +1158,7 @@ public class WorkPackageService {
                 left join employee delegated_employee
                   on delegated_employee.tenant_id = delegated_assignment.tenant_id
                  and delegated_employee.id = delegated_assignment.employee_id
+                """ + responsibilityJoin + """
                 left join lateral (
                     select w.id, w.status, w.attempt_no, w.submitted_at, w.position_assignment_id,
                            actual_employee.id as employee_id,

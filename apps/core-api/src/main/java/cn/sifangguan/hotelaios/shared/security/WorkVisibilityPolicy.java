@@ -23,19 +23,20 @@ public class WorkVisibilityPolicy {
             Set.of("GENERAL_MANAGER", "ASSISTANT_GENERAL_MANAGER"));
     private static final Set<String> GROUP_TEAM = union(HOTEL_MANAGEMENT, Set.of(
             "GROUP_VICE_PRESIDENT", "HR_ADMINISTRATION_SUPERVISOR", "HR_ADMINISTRATION",
-            "OTA_OPERATION_MANAGER", "OTA_OPERATION_ASSISTANT"));
+            "OTA_OPERATION_MANAGER", "OTA_OPERATION_ASSISTANT", "OPERATIONS_DIRECTOR", "OPERATIONS_MANAGER"));
     // Compatibility for built-in positions without configured reporting links.
     // Custom positions require explicit reporting links; names/legacy levels grant nothing.
-    private static final Map<String, Set<String>> SUBORDINATE_ROLES = Map.of(
-            "GROUP_CHAIRMAN", union(GROUP_TEAM, Set.of("CEO")),
-            "CEO", GROUP_TEAM,
-            "GROUP_VICE_PRESIDENT", HOTEL_MANAGEMENT,
-            "GENERAL_MANAGER", union(HOTEL_TEAM, Set.of("ASSISTANT_GENERAL_MANAGER")),
-            "ASSISTANT_GENERAL_MANAGER", HOTEL_TEAM,
-            "FRONT_OFFICE_SUPERVISOR", FRONT,
-            "HOUSEKEEPING_SUPERVISOR", HOUSEKEEPING,
-            "OTA_OPERATION_MANAGER", Set.of("OTA_OPERATION_ASSISTANT"),
-            "HR_ADMINISTRATION_SUPERVISOR", Set.of("HR_ADMINISTRATION"));
+    private static final Map<String, Set<String>> SUBORDINATE_ROLES = Map.ofEntries(
+            Map.entry("GROUP_CHAIRMAN", union(GROUP_TEAM, Set.of("CEO"))),
+            Map.entry("CEO", GROUP_TEAM),
+            Map.entry("GROUP_VICE_PRESIDENT", HOTEL_MANAGEMENT),
+            Map.entry("GENERAL_MANAGER", union(HOTEL_TEAM, Set.of("ASSISTANT_GENERAL_MANAGER"))),
+            Map.entry("ASSISTANT_GENERAL_MANAGER", HOTEL_TEAM),
+            Map.entry("FRONT_OFFICE_SUPERVISOR", FRONT),
+            Map.entry("HOUSEKEEPING_SUPERVISOR", HOUSEKEEPING),
+            Map.entry("OTA_OPERATION_MANAGER", Set.of("OTA_OPERATION_ASSISTANT")),
+            Map.entry("OPERATIONS_DIRECTOR", Set.of("OPERATIONS_MANAGER", "OTA_OPERATION_ASSISTANT")),
+            Map.entry("HR_ADMINISTRATION_SUPERVISOR", Set.of("HR_ADMINISTRATION")));
 
     private final NamedParameterJdbcTemplate jdbc;
 
@@ -287,8 +288,13 @@ public class WorkVisibilityPolicy {
 
         /** Statistics include only owned work and authorized subordinates, not shared owners. */
         public String summary(String alias) {
-            return "(" + own(alias + ".position_assignment_id") + " or "
-                    + managed(alias + ".target_org_unit_id", alias + ".position_assignment_id") + ")";
+            return summaryForResponsibility(alias, alias + ".position_assignment_id");
+        }
+
+        /** Monthly obligations follow the persisted submitter or effective delegation, never permission to assist. */
+        public String summaryForResponsibility(String alias, String assignmentExpression) {
+            return "(" + own(assignmentExpression) + " or "
+                    + managed(alias + ".target_org_unit_id", assignmentExpression) + ")";
         }
 
         public String personal(String alias) { return own(alias + ".position_assignment_id"); }
