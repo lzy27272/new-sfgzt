@@ -1,0 +1,25 @@
+name: Raw retention backup release
+on:
+  push:
+    branches: [codex/raw-retention-7d]
+permissions:
+  contents: read
+jobs:
+  verify-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backup encryption, retention and restore regression
+        run: |
+          python3 -m unittest discover -s infra/production/backup/tests -p 'test*.py'
+          bash -n infra/production/backup/backup-postgres.sh
+      - name: Package operations scripts
+        run: |
+          mkdir artifact
+          tar -czf artifact/raw-retention-backup-${{ github.sha }}.tar.gz infra/production/backup/backup-postgres.sh infra/production/backup/core-state-snapshots.py infra/production/backup/publish-backup-manifest.py
+          sha256sum artifact/*.tar.gz > artifact/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-retention-backup-${{ github.sha }}
+          path: artifact/
+          retention-days: 14

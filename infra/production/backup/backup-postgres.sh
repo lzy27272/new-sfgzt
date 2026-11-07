@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 # Despite the historical filename, this is the complete production backup job:
-# PostgreSQL, recoverable OTA/PMS state, 90-day encrypted raw evidence, and the
+# PostgreSQL, recoverable OTA/PMS state, validated seven-day raw evidence, and the
 # read-only export consumed by the registered Windows backup device.
 
 db_root=/var/backups/hotel-ai-os/postgres
@@ -33,7 +33,7 @@ export_root=/srv/sfg-backup-export
 export_data=${export_root}/data
 export_group=sfg-backup-pull
 manifest_tool=/usr/local/lib/hotel-ai-os/publish-backup-manifest.py
-raw_retention_days=90
+raw_retention_days=7
 timestamp="$(date '+%Y%m%dT%H%M%S%z')"
 month_key="$(date '+%Y%m')"
 year_key="$(date '+%Y')"
@@ -371,13 +371,10 @@ for raw_day_dir in "${stage_raw}"/????-??-??; do
 done
 
 "${snapshot_tool}" prune --state-root "${state_root}" --database-root "${db_root}" --key "${backup_key}"
-"${snapshot_tool}" prune-raw --raw-root "${raw_backup_root}" --keep "${raw_retention_days}"
-
-if [[ -d ${source_raw} ]]; then
-  find "${source_raw}" -xdev -type f -name '*.enc' \
-    -mtime "+${raw_retention_days}" -delete
-  find "${source_raw}" -xdev -depth -type d -empty -delete
-fi
+# Source cleanup is exclusively owned by the database-validated worker. Keep
+# the current encrypted revision for every retained day, including held days.
+"${snapshot_tool}" prune-raw-current --raw-root "${raw_backup_root}" \
+  --source "${stage_raw}" --before "${backup_today}"
 
 install -d -m 0755 -o root -g root "${export_root}"
 for directory in \

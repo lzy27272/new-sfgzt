@@ -194,7 +194,8 @@ def main() -> None:
         "retention": {
             "database": {"daily": 30, "monthly": 12, "yearly": 3},
             "sifangguanOtaState": {"daily": 30, "monthly": 12, "yearly": 3},
-            "rawEvidenceDays": 90,
+            "rawEvidenceDays": 7,
+            "rawEvidenceExceptions": "unvalidated, unresolved and held evidence retained",
         },
         "receiptPath": receipt_relative,
         "entries": entries,

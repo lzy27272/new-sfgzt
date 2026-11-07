@@ -789,6 +789,67 @@ def prune_raw_dates(root, keep=90):
     return {"retainedSourceDates": len(retained), "retainedArtifacts": len(rows)-removed, "removed": removed}
 
 
+def prune_raw_current(root, source, before):
+    """Keep only the verified current package of each retained source day.
+
+    The source contains unexpired, failed, unknown and held evidence. Never
+    prune by archive age or count: a held day can be arbitrarily old.
+    """
+    root, source = Path(root), Path(source)
+    dt.date.fromisoformat(before)
+    for directory in (root, source):
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("Unsafe raw snapshot root")
+    retained = set()
+    for day in source.iterdir():
+        if day.is_symlink() or not day.is_dir() or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}",day.name):
+            raise ValueError("Unmanaged source entry blocks raw pruning")
+        dt.date.fromisoformat(day.name)
+        if day.name >= before:
+            continue
+        files = list(day.iterdir())
+        for path in files:
+            regular(path)
+            if not re.fullmatch(r"[0-9a-f]{64}[.]json[.]enc",path.name):
+                raise ValueError("Unmanaged raw source file")
+        if not files:
+            continue
+        marker = regular(root / (".analytics-raw-"+day.name+".source.sha256"))
+        fields = marker.read_text(encoding="ascii").split()
+        if len(fields)!=2 or not HEX.fullmatch(fields[0]):
+            raise ValueError("Missing current raw revision")
+        match = RAW_NAME.fullmatch(fields[1])
+        if not match or match[1]!=day.name or not match[2]:
+            raise ValueError("Invalid current raw revision")
+        # Same NUL-separated GNU find/sort fingerprint as the capture script.
+        find = subprocess.run(['find',str(day),'-xdev','-type','f','-name','*.enc',
+            '-printf','%P\\0%s\\0%T@\\0'],check=True,capture_output=True).stdout
+        ordered = subprocess.run(['sort','-z'],input=find,check=True,capture_output=True).stdout
+        fingerprint=hashlib.sha256(ordered).hexdigest()
+        if fingerprint != fields[0]:
+            raise ValueError("Source changed after raw capture")
+        if checked(root/fields[1])["sha256"] != match[2]:
+            raise ValueError("Current raw package checksum mismatch")
+        retained.add(fields[1])
+    rows=[]
+    for path in root.glob('*.enc'):
+        match=RAW_NAME.fullmatch(path.name)
+        if not match or (match[2] and checked(path)['sha256']!=match[2]):
+            raise ValueError('Invalid raw archive blocks pruning')
+        checked(path)
+        # Do not touch a concurrent/current-day package.
+        if match[1] >= before:
+            retained.add(path.name)
+        rows.append(path)
+    # No mutation until all current packages and source fingerprints pass.
+    for path in rows:
+        if path.name not in retained:
+            path.unlink()
+            Path(str(path)+'.sha256').unlink()
+            Path(str(path)+'.source.sha256').unlink(missing_ok=True)
+    return {'retainedArtifacts':len(retained),'removed':len(rows)-len(retained)}
+
+
 def commit_raw_revision(root, temporary, day, fingerprint):
     root, temporary = Path(root), Path(temporary)
     dt.date.fromisoformat(day)
@@ -819,6 +880,10 @@ def main():
     raw_retention = commands.add_parser("prune-raw")
     raw_retention.add_argument("--raw-root", type=Path, required=True)
     raw_retention.add_argument("--keep", type=int, default=90)
+    current_raw = commands.add_parser("prune-raw-current")
+    current_raw.add_argument("--raw-root", type=Path, required=True)
+    current_raw.add_argument("--source", type=Path, required=True)
+    current_raw.add_argument("--before", required=True)
     raw_commit = commands.add_parser("commit-raw")
     raw_commit.add_argument("--raw-root", type=Path, required=True)
     raw_commit.add_argument("--source-temporary", type=Path, required=True)
@@ -868,6 +933,8 @@ def main():
         result = commit_raw_revision(a.raw_root, a.source_temporary, a.day, a.fingerprint)
     elif a.action == "prune-raw":
         result = prune_raw_dates(a.raw_root, a.keep)
+    elif a.action == "prune-raw-current":
+        result = prune_raw_current(a.raw_root, a.source, a.before)
     elif a.action == "capacity":
         measurement = json.loads(regular(a.measurements).read_text(encoding="ascii")) if a.measurements else None
         result = check_capacity(a.state_root, a.database_root, a.stage_root, a.export_root, a.state_bytes, a.database_bytes, a.raw_backup_root, a.raw_bytes, measurement)
