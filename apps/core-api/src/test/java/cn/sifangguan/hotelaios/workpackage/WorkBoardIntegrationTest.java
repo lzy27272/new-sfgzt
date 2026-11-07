@@ -868,7 +868,7 @@ class WorkBoardIntegrationTest {
         UUID critical = variantExpectation(old, "SUBMITTED", "DAY", false, "NONE", "HKA_ITEM_ISSUE");
         jdbc.update("update work_expectation set position_assignment_id=? where id=?", assignment, critical);
         record(critical, old, "SUBMITTED", -1);
-        LocalDate today = LocalDate.parse(getBoard("").path("businessDate").asText());
+        LocalDate today = LocalDate.parse(getBoard("?orgUnitId=" + HOTEL).path("businessDate").asText());
         UUID upcoming = expectation(today, "AVAILABLE", 2);
         jdbc.update("update work_expectation set position_assignment_id=? where id=?", assignment, upcoming);
         String scope = "&orgUnitId=" + HOTEL + "&assignmentId=" + assignment + "&from=" + today + "&to=" + today;

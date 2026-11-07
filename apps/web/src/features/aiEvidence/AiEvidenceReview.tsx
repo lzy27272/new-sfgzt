@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { RoleContext } from '../../domain'
+import type { RoleContext, WorkExpectation } from '../../domain'
 import { apiRequest } from '../../api/client'
 import { useScopedResource } from '../../shared/useScopedResource'
 import { criterionNames, errorText, failureText, latestChecks, statusText } from './model'
@@ -7,6 +7,7 @@ import type { Check, ReviewContext } from './model'
 import { EvidencePhoto } from './EvidencePhoto'
 import { AiRuleReference } from './AiRuleReference'
 import { AiManagerBackfill } from './AiManagerBackfill'
+import { AiEvidenceStart } from './AiEvidenceStart'
 export { EvidencePhoto } from './EvidencePhoto'
 import './aiEvidence.css'
 
@@ -18,8 +19,9 @@ type RecordProps = {
 export function AiEvidenceRecord(props: RecordProps) {
   return <EvidenceRecord key={`${props.identity.key}:${props.recordId}`} {...props} />
 }
-function EvidenceRecord({ identity, recordId, review = false, canDecide = true, selectedId, onChanged }: RecordProps) {
+function EvidenceRecord({ identity, recordId, review: requestedReview = false, canDecide = true, selectedId, onChanged }: RecordProps) {
   const resource = useScopedResource(`ai-evidence:${identity.key}:${recordId}`, signal => apiRequest<ReviewContext>(`/ai-evidence/records/${recordId}`, identity, { signal }), emptyContext, 8000)
+  const review = requestedReview && !resource.data.canSubmit
   const [subject, setSubject] = useState('')
   const [chosen, setChosen] = useState<string[]>([])
   const [selected, setSelected] = useState<string>()
@@ -70,7 +72,7 @@ function EvidenceRecord({ identity, recordId, review = false, canDecide = true, 
     {resource.loading && <p role="status">正在读取检查记录…</p>}
     {!!resource.error && <p className="ai-error" role="alert">{errorText(resource.error)}<button type="button" className="secondary" onClick={() => void resource.reload()}>重试</button></p>}
     {error && <p className="ai-error" role="alert">{error}</p>}{message && <p className="ai-success" role="status">{message}</p>}
-    {review && <AiManagerBackfill key={`${identity.key}:${recordId}`} identity={identity} recordId={recordId} checks={resource.data.checks} onChanged={() => { void resource.reload(); onChanged?.() }} />}
+    {review && !resource.loading && !resource.error && <AiManagerBackfill key={`${identity.key}:${recordId}`} identity={identity} recordId={recordId} checks={resource.data.checks} onChanged={() => { void resource.reload(); onChanged?.() }} />}
     <div className={resource.data.participantScope && !review ? 'ai-participant-layout' : ''}>
     {resource.data.participantScope && !review && <aside className="ai-participant-list"><h3>本店可参与员工</h3><p className="ai-muted">选择本次参与人员，逐人关联照片；不重复生成个人工作任务。</p>
       <label>搜索姓名或岗位<input aria-label="搜索检查人员" value={peopleQuery} onChange={event => setPeopleQuery(event.target.value)} placeholder="搜索姓名或岗位" /></label>
@@ -118,16 +120,18 @@ function EvidenceRecord({ identity, recordId, review = false, canDecide = true, 
   </section>
 }
 
-export function AiEvidenceTeam({ identity, hotelId, permissions, onClose }: { identity: RoleContext; hotelId?: string; permissions: string[]; onClose: () => void }) {
+export function AiEvidenceTeam({ identity, hotelId, permissions, onClose, onOpenWork }: { identity: RoleContext; hotelId?: string; permissions: string[]; onClose: () => void; onOpenWork: (item: WorkExpectation) => void }) {
   const [filter, setFilter] = useState('PENDING')
+  const [starting, setStarting] = useState(false)
   const [selected, setSelected] = useState<string>()
   const resource = useScopedResource<Check[]>(`ai-team:${identity.key}:${hotelId ?? ''}:${filter}`, signal => apiRequest(`/ai-evidence/team?${new URLSearchParams({ ...(hotelId ? { hotelId } : {}), ...(filter ? { state: filter } : {}) })}`, identity, { signal }), [], 15000)
   const current = resource.data.find(row => row.id === selected) ?? resource.data[0]
-  return <section className="ai-page"><header className="ai-heading"><div><h1>仪容仪表复核</h1><p className="ai-muted">仅查看当前任职授权的门店与人员；影子结果不改变正式考核。</p></div><button className="secondary" onClick={onClose}>返回团队工作</button></header>
+  return <section className="ai-page"><header className="ai-heading"><div><h1>仪容仪表复核</h1><p className="ai-muted">查看已发起的检查；首次检查请先选择原工作。仅查看当前任职授权的门店与人员，AI 建议不改变正式考核。</p></div><div className="ai-actions"><button type="button" className="primary" aria-expanded={starting} onClick={() => setStarting(value => !value)}>{starting ? '收起原工作选择' : '选择工作并发起 AI 检查'}</button><button className="secondary" onClick={onClose}>返回团队工作</button></div></header>
+    {starting && <AiEvidenceStart key={`${identity.key}:${hotelId ?? ''}`} identity={identity} hotelId={hotelId} onOpenWork={onOpenWork} />}
     <label className="ai-filter">处理状态<select value={filter} aria-label="AI复核状态筛选" onChange={e => { setFilter(e.target.value); setSelected(undefined) }}><option value="PENDING">待人工复核</option><option value="">全部处理记录</option><option value="RETAKE">需要补拍</option><option value="PASS">人工确认符合</option><option value="OVERTURNED">误判已撤销</option></select></label>
     {!!resource.error && <p className="ai-error" role="alert">{errorText(resource.error)}<button className="secondary" onClick={() => void resource.reload()}>重新加载</button></p>}
-    <div className="ai-review-layout"><section className="ai-card ai-queue"><h2>待复核记录</h2>{resource.loading && <p role="status">正在读取…</p>}{!resource.loading && !resource.data.length && <p className="ai-empty">当前范围没有对应检查记录。</p>}{resource.data.map(row => <button type="button" className={`ai-queue-row ${current?.id === row.id ? 'selected' : ''}`} key={row.id} onClick={() => setSelected(row.id)}><span><strong>{row.subject_name}</strong><small>{row.position_name} · {row.hotel_name}</small></span><span className="ai-pill">{statusText[row.result.overall ?? row.state] ?? '待核对'}</span><small>{time(row.created_at)}</small></button>)}</section>
-      {current ? <AiEvidenceRecord key={current.work_record_id} identity={identity} recordId={current.work_record_id} selectedId={current.id} review canDecide={permissions.includes('work-record.review') || permissions.includes('*')} onChanged={() => void resource.reload()} /> : <section className="ai-card ai-empty">选择记录，对照证据查看AI观察和人工结论。</section>}
+    <div className="ai-review-layout"><section className="ai-card ai-queue"><h2>检查记录</h2>{resource.loading && <p role="status">正在读取…</p>}{!resource.loading && !resource.error && !resource.data.length && <p className="ai-empty">当前筛选下没有 AI 检查记录。首次检查可点击上方“选择工作并发起 AI 检查”；原工作仍保留在团队工作中。</p>}{resource.data.map(row => <button type="button" className={`ai-queue-row ${current?.id === row.id ? 'selected' : ''}`} key={row.id} onClick={() => setSelected(row.id)}><span><strong>{row.subject_name}</strong><small>{row.position_name} · {row.hotel_name}</small></span><span className="ai-pill">{statusText[row.result.overall ?? row.state] ?? '待核对'}</span><small>{time(row.created_at)}</small></button>)}</section>
+      {current ? <AiEvidenceRecord key={current.work_record_id} identity={identity} recordId={current.work_record_id} selectedId={current.id} review canDecide={permissions.includes('work-record.review') || permissions.includes('*')} onChanged={() => void resource.reload()} /> : <section className="ai-card ai-empty">先从原工作选择员工和对应照片发起检查，生成建议后可在此查看和人工复核。</section>}
     </div>
   </section>
 }
