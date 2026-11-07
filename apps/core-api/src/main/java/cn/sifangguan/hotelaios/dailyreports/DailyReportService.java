@@ -579,7 +579,7 @@ public class DailyReportService {
             accessPolicy.requirePermission("daily-report.review");
         }
         accessPolicy.requireOrgScope(report.orgUnitId());
-        verifyReviewerAssignment(principal, request.reviewerAssignmentId(), report.orgUnitId(), report.positionAssignmentId());
+        verifyReviewerAssignment(principal, request.reviewerAssignmentId(), report.orgUnitId(), report.positionAssignmentId(), reportId, true);
         if (principal.actorId().equals(report.createdByAccountId())
                 || principal.actorId().equals(revision.submittedByAccountId())) {
             throw new AccessDeniedException("日报提交人不能审核自己的日报");
@@ -935,7 +935,7 @@ public class DailyReportService {
         try {
             accessPolicy.requirePermission("CORRECTION".equals(revision.get("revisionType")) ? "daily-report.revision-review" : "daily-report.review");
             accessPolicy.requireOrgScope((UUID) report.get("orgUnitId"));
-            verifyReviewerAssignment(principal, principal.businessActorAssignmentId(), (UUID) report.get("orgUnitId"), (UUID) report.get("positionAssignmentId"));
+            verifyReviewerAssignment(principal, principal.businessActorAssignmentId(), (UUID) report.get("orgUnitId"), (UUID) report.get("positionAssignmentId"), (UUID) report.get("id"), false);
             return Map.of("canReview", true, "reason", "");
         } catch (AccessDeniedException | cn.sifangguan.hotelaios.shared.security.BusinessIdentityException denied) {
             return Map.of("canReview", false, "reason", denied.getMessage());
@@ -1253,9 +1253,11 @@ public class DailyReportService {
         }
     }
 
-    private void verifyReviewerAssignment(TenantPrincipal principal, UUID assignmentId, UUID reportOrgUnitId, UUID executorId) {
+    private void verifyReviewerAssignment(TenantPrincipal principal, UUID assignmentId, UUID reportOrgUnitId,
+                                          UUID executorId, UUID reportId, boolean lock) {
         accessPolicy.requireActiveAssignment(assignmentId);
         accessPolicy.requireBusinessActorAssignment(assignmentId);
+        if (workVisibility.canReviewUsageReportGroup(principal, reportId, lock)) return;
         if (new WorkReviewPolicy(jdbc).canManage(principal, executorId, reportOrgUnitId)) return;
         if (principal.hasRole("GROUP_VICE_PRESIDENT") || principal.hasRole("GENERAL_MANAGER"))
             throw new AccessDeniedException("该日报不属于当前任职负责的门店及下属范围");

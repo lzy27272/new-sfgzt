@@ -2,9 +2,10 @@ import { useState } from 'react'
 import type { RoleContext } from '../../domain'
 import type { AppNavigate } from '../../app/routeConfig'
 import { reviewWorkRecord } from '../../api/resources'
+import { ApiError } from '../../api/client'
 import { AsyncState } from '../../shared/AsyncState'
 import { useScopedResource } from '../../shared/useScopedResource'
-import { correctWorkUsage, loadUsageCatalogue, loadUsageConfig, loadUsageReviewers, loadWorkUsages, reverseWorkUsage, saveUsageConfig, usageStatus, usageSummary, usageValidation } from './workUsage'
+import { configuredUsageReviewers, correctWorkUsage, loadUsageCatalogue, loadUsageConfig, loadUsageReviewers, loadWorkUsages, reverseWorkUsage, saveUsageConfig, usageStatus, usageSummary, usageValidation } from './workUsage'
 import type { UsageCatalogue, UsageConfig, UsageDetail, UsageInput, UsageRow } from './workUsage'
 import { WorkUsageFields } from './WorkUsageFields'
 import { UsageQuickListConfig } from './UsageQuickListConfig'
@@ -27,19 +28,40 @@ export function WorkUsagePanel({ identity, hotelId, canConfigure, canReverse, go
   const config = useScopedResource<UsageConfig | undefined>(`${identity.key}:${hotelId}:usage-config`, (signal) => loadUsageConfig(identity, hotelId, signal), undefined)
   const reviewers = useScopedResource(`${identity.key}:${hotelId}:usage-reviewers:${canConfigure}`, (signal) => canConfigure ? loadUsageReviewers(identity, hotelId, signal) : Promise.resolve([]), [])
   const records = useScopedResource(`${identity.key}:${hotelId}:work-usage:${filter}`, (signal) => loadWorkUsages(identity, hotelId, filter, signal), [])
-  const [selectedReviewer, setSelectedReviewer] = useState<string>()
-  const reviewerId = selectedReviewer ?? config.data?.reviewerAssignmentId ?? ''
+  const scope = `${identity.key}:${hotelId}`
+  const [selection, setSelection] = useState<{ scope: string; ids: string[]; expectedVersion: number }>()
+  const configuredReviewers = config.data ? configuredUsageReviewers(config.data) : []
+  const selected = selection?.scope === scope ? selection : undefined
+  const reviewerIds = selected?.ids ?? configuredReviewers.map(person => person.assignmentId)
+  const reviewerOptions = [...reviewers.data, ...configuredReviewers.filter(person => !reviewers.data.some(option => option.assignmentId === person.assignmentId))
+    .map(person => ({ assignmentId: person.assignmentId, employeeName: person.reviewerName, positionName: person.reviewerPositionName }))]
   const command = async (run: () => Promise<unknown>, notice: string) => {
     if (busy) return
     setBusy(true); setError(undefined); setMessage(undefined)
     try { await run(); setConfirmation(undefined); setMessage(notice); await Promise.all([config.reload(), records.reload(), onStockChanged()]) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : '操作失败，请刷新核对后重试。') }
+    catch (reason) {
+      setError(reason instanceof Error ? reason.message : '操作失败，请刷新核对后重试。')
+      if (reason instanceof ApiError && reason.status === 409) {
+        setConfirmation(undefined)
+        await Promise.all([config.reload(), records.reload()])
+      }
+    }
     finally { setBusy(false) }
   }
-  return <section className={styles.panel}><header><div><h2>日清耗用审核</h2><p>员工填报 → 门店指定人员复核 → 耗品和清洁用品扣库；与工作记录复核一次完成。</p></div><button type="button" className="secondary" disabled={busy} onClick={() => void Promise.all([records.reload(), config.reload(), reviewers.reload()])}>刷新审核列表</button></header>
+  return <section className={styles.panel}><header><div><h2>日清耗用审核</h2><p>员工填报 → 门店指定人员复核 → 耗品和清洁用品扣库；与工作记录复核一次完成。</p></div><button type="button" className="secondary" disabled={busy} onClick={() => { setSelection(undefined); setConfirmation(undefined); void Promise.all([records.reload(), config.reload(), reviewers.reload()]) }}>刷新审核列表</button></header>
     <AsyncState loading={config.loading} error={config.error} onRetry={config.reload} />
-    {config.data && <section className={styles.usageForm}><h3>本店耗用审核人</h3><p>{config.data.enabled ? `${config.data.reviewerName} · ${config.data.reviewerPositionName}` : '尚未启用：原有文字填报不自动扣库。配置审核人后，新提交的耗用工作必须按清单填写。'}</p>{config.data.enabled && !config.data.reviewerAvailable && <p className={styles.error}>当前审核人已失效，请重新选择有效人员。</p>}
-      {canConfigure && <><p>可按门店选择客房主管、店助或店长等有权限的人员。更换后，未审核记录也交给新审核人，原分配及操作历史保留。</p><div className={styles.actions}><label>审核人员<select aria-label="耗用审核人员" disabled={busy || reviewers.loading} value={reviewerId} onChange={(event) => setSelectedReviewer(event.target.value)}><option value="">请选择</option>{config.data.reviewerAssignmentId && !reviewers.data.some((person) => person.assignmentId === config.data?.reviewerAssignmentId) && <option value={config.data.reviewerAssignmentId}>原审核人（已失效或无权限）</option>}{reviewers.data.map((person) => <option key={person.assignmentId} value={person.assignmentId}>{person.employeeName} · {person.positionName}</option>)}</select></label><button type="button" className="primary" disabled={busy || !reviewers.data.some((person) => person.assignmentId === reviewerId)} onClick={() => void command(() => saveUsageConfig(identity, hotelId, reviewerId, config.data!.rowVersion), '耗用审核配置已保存，未审核记录已按新配置流转。')}>保存审核配置</button></div><AsyncState loading={reviewers.loading} error={reviewers.error} onRetry={reviewers.reload} />{!reviewers.loading && !reviewers.error && !reviewers.data.length && <p>没有可选人员。请先配置本店有效任职，并授予工作复核、门店库存查看及模块权限。</p>}</>}
+    {config.data && <section className={styles.usageForm}><h3>本店耗用审核人</h3>{config.data.enabled ? <ul>{configuredReviewers.map(person => <li key={person.assignmentId}>{person.reviewerName} · {person.reviewerPositionName} · {person.available ? '有效' : '已失效或无权限'}</li>)}</ul> : <p>尚未启用：原有文字填报不自动扣库。配置审核人后，新提交的耗用工作必须按清单填写。</p>}{config.data.enabled && !config.data.reviewerAvailable && <p className={styles.error}>当前审核人均已失效，请重新选择有效人员。</p>}
+      <p>配置的有效审核人任选一人处理，通过或退回后其他人无需重复审核。</p>
+      {canConfigure && <><p>可勾选本店多个有权限的任职，岗位名称不会自动授予审核权。更换后，未审核记录按新配置流转，原分配及操作历史保留。</p>
+        <fieldset disabled={busy || reviewers.loading || Boolean(reviewers.error) || config.loading}><legend>耗用审核人员（可多选）</legend>{reviewerOptions.map(person => {
+          const available = reviewers.data.some(option => option.assignmentId === person.assignmentId)
+          return <label className={styles.checkbox} key={person.assignmentId}><input type="checkbox" checked={reviewerIds.includes(person.assignmentId)} disabled={!available && !reviewerIds.includes(person.assignmentId)} onChange={event => setSelection({ scope, expectedVersion: selected?.expectedVersion ?? config.data!.rowVersion,
+            ids: event.target.checked ? [...reviewerIds, person.assignmentId] : reviewerIds.filter(id => id !== person.assignmentId) })} />{person.employeeName} · {person.positionName}{!available && '（已失效或无权限，请取消勾选）'}</label>
+        })}</fieldset>
+        <div className={styles.actions}><button type="button" className="primary" disabled={busy || config.loading || Boolean(config.error) || reviewers.loading || Boolean(reviewers.error) || !reviewerIds.length || reviewerIds.some(id => !reviewers.data.some(person => person.assignmentId === id))} onClick={() => void command(async () => {
+          await saveUsageConfig(identity, hotelId, reviewerIds, selected?.expectedVersion ?? config.data!.rowVersion)
+          setSelection(undefined)
+        }, '耗用审核配置已保存，任一配置人员处理后其他人无需重复审核。')}>保存审核配置</button></div><AsyncState loading={reviewers.loading} error={reviewers.error} onRetry={reviewers.reload} />{!reviewers.loading && !reviewers.error && !reviewers.data.length && <p>没有可选人员。请先配置本店有效任职，并授予工作复核及耗用审核权限。</p>}</>}
     </section>}
     {canConfigure && <UsageQuickListConfig identity={identity} hotelId={hotelId} />}
     <label>审核状态<select aria-label="耗用审核状态" value={filter} disabled={busy} onChange={(event) => { setFilter(event.target.value); setConfirmation(undefined) }}>{['PENDING', 'APPROVED', 'REJECTED', 'REVERSED', 'ALL'].map((status) => <option key={status} value={status}>{status === 'ALL' ? '全部状态' : usageStatus(status)}</option>)}</select></label><small>显示所选状态最近100条记录，历史记录不删除。</small>

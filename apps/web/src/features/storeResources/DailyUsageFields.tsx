@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { StoreItemPicker } from './StoreItemPicker'
 import { WorkUsageFields } from './WorkUsageFields'
 import { dailyUsageValue, emptyUsageLine, readDailyUsage, usageGroups, type DailyUsageInput } from './dailyUsage'
-import { usageInput, type UsageCatalogue } from './workUsage'
+import { usageInput, usageReviewerSummary, type UsageCatalogue } from './workUsage'
 import { matchesItemScope, type ItemScopeFilter } from './itemSelection'
 import { UsageItemNavigator, UsageScopeNotice, useUsageQuantityNavigation } from './UsageItemNavigator'
 import styles from './dailyUsage.module.css'
@@ -52,7 +52,7 @@ export function DailyUsageFields({ catalogue, value, disabled, onChange, onRefre
     <button type="button" className={`secondary ${styles.add}`} disabled={input.lines.length >= 100} onClick={() => setPicking(true)}>＋ 添加其他物品</button>
     <button type="button" className={`link-button ${styles.refresh}`} onClick={onRefresh}>刷新物品清单（保留已填内容）</button>
     <label className={styles.confirm}><input type="checkbox" checked={input.remainingUnusedConfirmed} onChange={event => update({ remainingUnusedConfirmed: event.target.checked })} /><span>确认其余未填物品本日未使用<small>未勾选前，空白不视为零。</small></span></label>
-    <p className={styles.warning}>耗用由门店指定人员复核，通过后扣库。{catalogue.reviewerAvailable && catalogue.reviewerName && <small>审核人：{catalogue.reviewerName} · {catalogue.reviewerPositionName}</small>}</p><small>布草正常使用不扣减总库存。</small>
+    <p className={styles.warning}>耗用由门店指定人员复核，通过后扣库。{catalogue.reviewerAvailable && <small>审核人：{usageReviewerSummary(catalogue)}。任一有效审核人处理后，其他人无需重复审核。</small>}</p><small>布草正常使用不扣减总库存。</small>
     {picking && !disabled && !invalidDraft && <StoreItemPicker items={catalogue.items.filter(item => matchesItemScope(item, scope))} selectedIds={input.lines.map(line => line.itemId)} onClose={() => setPicking(false)} onConfirm={items => { update({ lines: [...input.lines, ...items.filter(item => !input.lines.some(line => line.itemId === item.id)).map(emptyUsageLine)], remainingUnusedConfirmed: false }); setPicking(false) }} />}
   </fieldset>
 }

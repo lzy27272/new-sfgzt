@@ -230,6 +230,152 @@ class StoreWorkUsageIntegrationTest {
         assertThat(jdbc.queryForObject("select reviewer_assignment_id_snapshot::text from store_work_usage where work_record_id=?::uuid",String.class,record)).isEqualTo(GMA);
     }
 
+    @Test void reviewEligibilityReadsUsageWithoutLocksAndExplainsNonReviewerDenial() throws Exception {
+        grantAssistantStockRead();
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        String record=submit(List.of(line(item,"2","支",0)),false,201).path("id").asText();
+        String endpoint="/api/v1/work-data/records/"+record+"/review-eligibility";
+        assertThat(call(get(endpoint),GM,null,200).path("canReview").asBoolean()).isTrue();
+        JsonNode denied=call(get(endpoint),AGM,null,200);
+        assertThat(denied.path("canReview").asBoolean()).isFalse();
+        assertThat(denied.path("reason").asText()).contains("审核人");
+        assertThat(call(get(endpoint),EMP,null,200).path("canReview").asBoolean()).isFalse();
+        balance(item,"10","20");
+        assertThat(movements(record)).isZero();
+    }
+
+    @Test void eitherConfiguredReviewerCanFinishPendingUsageAndTheOtherNeedNotReview() throws Exception {
+        grantAssistantStockRead();
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        String record=submit(List.of(line(item,"2","支",0)),false,201).path("id").asText();
+        JsonNode configuration=configureReviewers(List.of(GMA,AGMA));
+        assertThat(configuration.path("reviewer_available").asBoolean()).isTrue();
+        assertThat(configuration.path("reviewer_assignments").size()).isEqualTo(2);
+        for(String actor:List.of(GM,AGM))
+            assertThat(call(get("/api/v1/work-data/records/"+record+"/review-eligibility"),actor,null,200).path("canReview").asBoolean()).isTrue();
+        assertThat(jdbc.queryForObject("select count(distinct recipient_assignment_id) from notification where source_id=?::uuid and idempotency_key like 'usage-review:%'",Integer.class,record)).isEqualTo(2);
+        review(record,AGM,"APPROVED",0,200);
+        review(record,GM,"APPROVED",0,200);
+        for(String actor:List.of(GM,AGM))
+            assertThat(call(get("/api/v1/work-data/records/"+record+"/review-eligibility"),actor,null,200).path("canReview").asBoolean()).isFalse();
+        balance(item,"8","16");
+        assertThat(movements(record)).isOne();
+        assertThat(jdbc.queryForObject("select reviewed_by::text from store_work_usage where work_record_id=?::uuid",String.class,record)).isEqualTo(AGM);
+        assertThat(jdbc.queryForObject("select reviewer_assignment_id_snapshot::text from store_work_usage where work_record_id=?::uuid",String.class,record)).isEqualTo(GMA);
+    }
+
+    @Test void twoDifferentConfiguredReviewersApprovingConcurrentlyPostStockOnce() throws Exception {
+        grantAssistantStockRead();
+        configureReviewers(List.of(GMA,AGMA));
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        String record=submit(List.of(line(item,"2","支",0)),false,201).path("id").asText();
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var first=pool.submit(()->review(record,GM,"APPROVED",0,200));
+            var second=pool.submit(()->review(record,AGM,"APPROVED",0,200));
+            first.get(); second.get();
+        }
+        balance(item,"8","16");
+        assertThat(movements(record)).isOne();
+        assertThat(jdbc.queryForObject("select reviewed_by::text from store_work_usage where work_record_id=?::uuid",String.class,record)).isIn(GM,AGM);
+    }
+
+    @Test void anInactiveFirstReviewerDoesNotBlockTheOtherValidConfiguredReviewer() throws Exception {
+        grantAssistantStockRead();
+        configureReviewers(List.of(GMA,AGMA));
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        jdbc.update("update employee_position_assignment set status='INACTIVE' where id=?::uuid",GMA);
+        try {
+            JsonNode configuration=call(get("/api/v1/store-resources/hotels/"+H+"/usage-review-config"),ADMIN,null,200);
+            assertThat(configuration.path("reviewer_available").asBoolean()).isTrue();
+            assertThat(configuration.path("reviewer_assignments").findValues("available")).contains(mapper.getNodeFactory().booleanNode(false),mapper.getNodeFactory().booleanNode(true));
+            String record=submit(List.of(line(item,"2","支",0)),false,201).path("id").asText();
+            assertThat(jdbc.queryForObject("select reviewer_assignment_id_snapshot::text from store_work_usage where work_record_id=?::uuid",String.class,record)).isEqualTo(AGMA);
+            assertThat(call(get("/api/v1/work-data/records/"+record+"/review-eligibility"),AGM,null,200).path("canReview").asBoolean()).isTrue();
+            review(record,AGM,"APPROVED",0,200);
+            balance(item,"8","16");
+        } finally {
+            jdbc.update("update employee_position_assignment set status='ACTIVE' where id=?::uuid",GMA);
+        }
+    }
+
+    @Test void reviewGroupRejectsEmptyDuplicateUnauthorizedAndStaleConfigurations() throws Exception {
+        grantAssistantStockRead();
+        String endpoint="/api/v1/store-resources/hotels/"+H+"/usage-review-config";
+        long version=call(get(endpoint),ADMIN,null,200).path("row_version").asLong();
+        for(List<String> invalid:List.of(List.<String>of(),List.of(GMA,GMA),List.of(GMA,EA),List.of(GMA,UUID.randomUUID().toString())))
+            call(put(endpoint),ADMIN,Map.of("reviewerAssignmentIds",invalid,"expectedVersion",version),400);
+        call(put(endpoint),AGM,Map.of("reviewerAssignmentIds",List.of(GMA,AGMA),"expectedVersion",version),403);
+        call(put(endpoint),ADMIN,Map.of("reviewerAssignmentId",GMA,"reviewerAssignmentIds",List.of(AGMA),"expectedVersion",version),400);
+        call(put(endpoint),ADMIN,Map.of("reviewerAssignmentIds",List.of(GMA,AGMA),"expectedVersion",version),200);
+        call(put(endpoint),ADMIN,Map.of("reviewerAssignmentIds",List.of(AGMA),"expectedVersion",version),409);
+    }
+
+    private JsonNode configureReviewers(List<String> assignments) throws Exception {
+        String endpoint="/api/v1/store-resources/hotels/"+H+"/usage-review-config";
+        long version=call(get(endpoint),ADMIN,null,200).path("row_version").asLong(-1);
+        return call(put(endpoint),ADMIN,Map.of("reviewerAssignmentIds",assignments,"expectedVersion",version),200);
+    }
+
+    @Test void completedGroupReviewCannotBeReversedOrReplayedByARemovedMember() throws Exception {
+        grantAssistantStockRead();
+        configureReviewers(List.of(GMA,AGMA));
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        String record=submit(List.of(line(item,"2","支",0)),false,201).path("id").asText();
+        review(record,GM,"APPROVED",0,200);
+        review(record,AGM,"REJECTED",0,400);
+        configureReviewers(List.of(AGMA));
+        review(record,GM,"APPROVED",0,400);
+        review(record,AGM,"APPROVED",0,200);
+        balance(item,"8","16");
+        assertThat(movements(record)).isOne();
+        assertThat(jdbc.queryForObject("select reviewed_by::text from store_work_usage where work_record_id=?::uuid",String.class,record)).isEqualTo(GM);
+    }
+
+    @Test void aReviewGroupWithNoValidMembersBlocksSubmissionAndPreservesTheDraft() throws Exception {
+        grantAssistantStockRead();
+        configureReviewers(List.of(GMA,AGMA));
+        String item=item("CONSUMABLE","支","支",1,10,2);
+        String record=submit(List.of(line(item,"2","支",0)),true,201).path("id").asText();
+        jdbc.update("update employee_position_assignment set status='INACTIVE' where id in (?::uuid,?::uuid)",GMA,AGMA);
+        try {
+            JsonNode catalogue=call(get("/api/v1/store-resources/usage-catalog").param("orgUnitId",D),EMP,null,200);
+            assertThat(catalogue.path("reviewer_available").asBoolean()).isFalse();
+            call(post("/api/v1/work-data/records/"+record+"/actions/submit"),EMP,Map.of("expectedVersion",0),409);
+            assertThat(jdbc.queryForObject("select status from work_record where id=?::uuid",String.class,record)).isEqualTo("DRAFT");
+            assertThat(jdbc.queryForObject("select count(*) from store_work_usage where work_record_id=?::uuid",Integer.class,record)).isZero();
+            balance(item,"10","20");
+        } finally {
+            jdbc.update("update employee_position_assignment set status='ACTIVE' where id in (?::uuid,?::uuid)",GMA,AGMA);
+        }
+    }
+
+    @Test void aConfiguredAssistantCanReviewUsageWithoutGeneralInventoryReadAccess() throws Exception {
+        String sql="""
+                select grant_row.profile_version_id,grant_row.permission_id from position_function_profile_permission grant_row
+                join position_function_profile_version v on v.tenant_id=grant_row.tenant_id and v.id=grant_row.profile_version_id
+                join position_function_profile f on f.tenant_id=v.tenant_id and f.id=v.profile_id
+                join position_definition p on p.tenant_id=f.tenant_id and p.id=f.position_id
+                join permission on permission.id=grant_row.permission_id
+                where p.tenant_id=?::uuid and p.code='ASSISTANT_GENERAL_MANAGER'
+                  and permission.code in ('store-resource.read','ui.module.store-resources')
+                """;
+        var inventoryGrants=jdbc.queryForList(sql,T);
+        for(var grant:inventoryGrants)
+            jdbc.update("delete from position_function_profile_permission where tenant_id=?::uuid and profile_version_id=? and permission_id=?",T,grant.get("profile_version_id"),grant.get("permission_id"));
+        try {
+            configureReviewers(List.of(GMA,AGMA));
+            String item=item("CONSUMABLE","支","支",1,10,2);
+            String record=submit(List.of(line(item,"2","支",0)),false,201).path("id").asText();
+            assertThat(call(get("/api/v1/work-data/records/"+record+"/review-eligibility"),AGM,null,200).path("canReview").asBoolean()).isTrue();
+            call(get("/api/v1/store-resources/hotels/"+H+"/items"),AGM,null,403);
+            review(record,AGM,"APPROVED",0,200);
+            balance(item,"8","16");
+        } finally {
+            for(var grant:inventoryGrants)
+                jdbc.update("insert into position_function_profile_permission(tenant_id,profile_version_id,permission_id) values(?::uuid,?,?) on conflict do nothing",T,grant.get("profile_version_id"),grant.get("permission_id"));
+        }
+    }
+
     @Test void invalidQuantityDuplicateForeignItemAndStaleConfigAreRejected() throws Exception {
         String a=item("CONSUMABLE","支","支",1,10,2);
         submit(List.of(line(a,"1","支",9)),false,409);
@@ -242,6 +388,54 @@ class StoreWorkUsageIntegrationTest {
         assertThat(jdbc.queryForObject("select count(*) from work_record where work_expectation_id=?::uuid",Integer.class,expectation)).isZero();
         String none=call(post("/api/v1/work-data/records"),EMP,recordBody(Map.of("schemaVersion",1,"noUsage",true,"lines",List.of()),false),201).path("id").asText();
         review(none,GM,"APPROVED",0,200); assertThat(movements(none)).isZero();
+    }
+
+    @Test void explicitUsageReviewersCanReadAndReviewTheAssociatedHousekeepingReportOnly() throws Exception {
+        usageItemCode="HKA_DAILY_REPORT"; setup();
+        grantAssistantStockRead();
+        configureReviewers(List.of(GMA,AGMA));
+        LocalDate date=LocalDate.now().minusDays(20);
+        jdbc.update("update work_package_allocation set valid_from=? where id=(select work_package_allocation_id from work_expectation where id=?::uuid)",date,expectation);
+        jdbc.update("update work_expectation set business_date=? where id=?::uuid",date,expectation);
+        String workItem=jdbc.queryForObject("select work_package_item_id::text from work_expectation where id=?::uuid",String.class,expectation);
+        UUID revision=createUsageDailyReport(version,workItem,date);
+        String report=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,revision);
+        UUID previousManager=jdbc.queryForObject("select manager_assignment_id from employee_position_assignment where id=?::uuid",UUID.class,EA);
+        jdbc.update("update employee_position_assignment set manager_assignment_id=?::uuid where id=?::uuid",GMA,EA);
+        try {
+            String item=item("CONSUMABLE","支","支",1,10,2);
+            var before=call(get("/api/v1/daily-reports/"+report),EMP,null,200);
+            var saved=call(put("/api/v1/daily-reports/"+report+"/draft").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                    Map.of("revisionId",revision,"expectedVersion",before.path("rowVersion").asLong(),"items",List.of(),
+                            "inventoryQuantities",Map.of("schemaVersion",2,"remainingUnusedConfirmed",true,"lines",List.of(line(item,"2","支",0))),
+                            "roomCounts",Map.of("checkoutRooms",2,"stayoverRooms",1)),200);
+            var submitted=call(post("/api/v1/daily-reports/"+report+"/actions/submit").header("Idempotency-Key",UUID.randomUUID().toString()),EMP,
+                    Map.of("revisionId",revision,"expectedVersion",saved.path("rowVersion").asLong()),200);
+            jdbc.update("update daily_report set review_status='PENDING' where id=?::uuid",report);
+            String record=jdbc.queryForObject("select id::text from work_record where work_expectation_id=?::uuid",String.class,expectation);
+            for(String actor:List.of(GM,AGM)) {
+                assertThat(call(get("/api/v1/work-data/records/"+record+"/review-eligibility"),actor,null,200).path("canReview").asBoolean()).isTrue();
+                assertThat(call(get("/api/v1/daily-reports/"+report),actor,null,200).path("reviewEligibility").path("canReview").asBoolean()).isTrue();
+                assertThat(call(get("/api/v1/daily-reports/team").param("orgUnitId",H).param("businessDate",date.toString()),actor,null,200).toString()).contains(report);
+            }
+            UUID unrelatedRevision=createUsageDailyReport(version,workItem,date.plusDays(1));
+            String unrelated=jdbc.queryForObject("select report_id::text from daily_report_revision where id=?",String.class,unrelatedRevision);
+            call(get("/api/v1/daily-reports/"+unrelated),AGM,null,403);
+            var result=call(post("/api/v1/daily-reports/"+report+"/reviews").header("Idempotency-Key",UUID.randomUUID().toString()),AGM,
+                    Map.of("outcome","APPROVED","reviewerAssignmentId",AGMA,"expectedVersion",submitted.path("rowVersion").asLong()),200);
+            assertThat(result.path("reviewStatus").asText()).isEqualTo("APPROVED");
+            assertThat(call(get("/api/v1/daily-reports/"+report),GM,null,200).path("reviewEligibility").path("canReview").asBoolean()).isFalse();
+            call(post("/api/v1/daily-reports/"+report+"/reviews").header("Idempotency-Key",UUID.randomUUID().toString()),GM,
+                    Map.of("outcome","APPROVED","reviewerAssignmentId",GMA,"expectedVersion",submitted.path("rowVersion").asLong()),409);
+            assertThat(jdbc.queryForObject("select count(*) from daily_report_review where report_id=?::uuid",Integer.class,report)).isOne();
+            assertThat(jdbc.queryForObject("select status from store_work_usage where work_record_id=?::uuid",String.class,record)).isEqualTo("PENDING");
+            balance(item,"10","20");
+            review(record,GM,"APPROVED",0,200);
+            balance(item,"8","16");
+            assertThat(movements(record)).isOne();
+        } finally {
+            jdbc.update("update employee_position_assignment set manager_assignment_id=? where id=?::uuid",previousManager,EA);
+        }
     }
 
     @Test void snapshotSurvivesRatioEditsAndReversalReturnsOriginalCostExactly() throws Exception {
@@ -774,7 +968,7 @@ class StoreWorkUsageIntegrationTest {
         assertThat(position).isNotNull();
         JsonNode profile=position.path("profile");
         Set<String> codes=new LinkedHashSet<>(); profile.path("permissionCodes").forEach(code->codes.add(code.asText()));
-        codes.addAll(List.of("work-record.review","store-resource.read","ui.module.store-resources"));
+        codes.addAll(List.of("work-record.review","store-resource.read","ui.module.store-resources","store-resource.usage-review"));
         JsonNode draft=call(put("/api/v1/org/positions/"+positionId+"/profile/draft"),ADMIN,
                 Map.of("expectedProfileVersion",profile.path("draftRowVersion").asLong(),"permissionCodes",codes,
                         "authorizationScopeType",profile.path("authorizationScopeType").asText(),"wecomSelfSelectable",profile.path("wecomSelfSelectable").asBoolean()),200);

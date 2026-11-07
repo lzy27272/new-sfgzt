@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { UsageCatalogue, UsageInputLine } from './workUsage'
-import { usageInput, usageStatus, usageSummary } from './workUsage'
+import { usageInput, usageReviewerSummary, usageStatus, usageSummary } from './workUsage'
 import { baseQuantityPreview } from './unitConversion'
 import { appendUsageItems, matchesItemScope, type ItemScopeFilter } from './itemSelection'
 import { UsageItemNavigator, UsageScopeNotice, useUsageQuantityNavigation } from './UsageItemNavigator'
@@ -21,7 +21,7 @@ export function WorkUsageFields({ catalogue, value, disabled, onChange, onRefres
   if (issue) return <IssueUsageFields catalogue={catalogue} value={value} disabled={disabled} onChange={onChange} onRefresh={onRefresh} />
   if (catalogue.referenceUsage) return <section className={styles.usageForm} aria-label="已关联当日耗用"><h3>已关联当日物品使用登记</h3><p>{usageStatus(catalogue.referenceUsage.status)} · {usageSummary(catalogue.referenceUsage)}</p><p>日报引用同一份登记，不重复扣库存、计算成本。数量有误请由指定审核人退回或更正。</p><button type="button" className="secondary" disabled={disabled} onClick={onRefresh}>刷新关联数量</button></section>
   return <section className={styles.usageForm} aria-label={issue ? '物品领用登记' : '当日物品使用数量'}><h3>{issue ? '物品领用登记' : '当日物品使用数量'}</h3>
-    <p>{issue ? '领用不等于实际消耗，本次只登记领用明细，不作为经营成本。请在下班时另行填写实际使用数量。' : '审核人：' + (catalogue.reviewerName || '未配置') + ' · ' + (catalogue.reviewerPositionName || '') + '。耗品、清洁用品审核通过才扣库；布草正常使用不扣减总库存，不重复计洗涤费。'}</p>
+    <p>{issue ? '领用不等于实际消耗，本次只登记领用明细，不作为经营成本。请在下班时另行填写实际使用数量。' : '审核人：' + usageReviewerSummary(catalogue) + '。任一有效审核人处理后，其他人无需重复审核。耗品、清洁用品审核通过才扣库；布草正常使用不扣减总库存，不重复计洗涤费。'}</p>
     <p>物品与单位以后台配置为准。选好物品后只需填写数量，继续添加不会清空已填内容。</p>
     {!catalogue.reviewerAvailable && !issue && <div role="alert" className={styles.error}>审核人已失效，请联系管理员重新配置后提交。</div>}
     {invalidDraft && <div role="alert" className={styles.error}>旧草稿物品格式无法识别，已保留原内容。请联系管理员核对，不会自动清空。</div>}

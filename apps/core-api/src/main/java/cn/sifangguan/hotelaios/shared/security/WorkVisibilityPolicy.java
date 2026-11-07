@@ -108,7 +108,133 @@ public class WorkVisibilityPolicy {
             managed.removeAll(own);
         }
         params.addValue("workManagedIds", nonempty(managed));
-        return new Scope(administrator, principal.hasTenantScope(), !own.isEmpty(), !managed.isEmpty());
+        usageParameters(principal, params);
+        return new Scope(administrator, principal.hasTenantScope(), !own.isEmpty(), !managed.isEmpty(), usageReviewer(principal));
+    }
+
+    private static boolean usageReviewer(TenantPrincipal principal) {
+        return principal.businessActorAssignmentId() != null
+                && principal.assignmentIds().contains(principal.businessActorAssignmentId())
+                && principal.hasPermission("work-record.review") && (principal.hasPermission("store-resource.usage-review")
+                    || (principal.hasPermission("store-resource.read") && principal.hasPermission("ui.module.store-resources")));
+    }
+
+    private static MapSqlParameterSource usageParameters(TenantPrincipal principal, MapSqlParameterSource params) {
+        return params.addValue("workUsageActorId", principal.actorId())
+                .addValue("workUsageAssignmentId", principal.businessActorAssignmentId())
+                .addValue("workReadScopes", nonempty(principal.orgScopes()))
+                .addValue("workTenantScope", principal.hasTenantScope());
+    }
+
+    // Explicit review grants apply to these rows, never to the employee's other work.
+    private static String usageMember(String hotel) {
+        return """
+                exists (select 1 from store_usage_review_config usage_config
+                  join employee_position_assignment usage_reviewer on usage_reviewer.tenant_id=usage_config.tenant_id
+                    and usage_reviewer.id=:workUsageAssignmentId
+                  join employee reviewer_employee on reviewer_employee.tenant_id=usage_reviewer.tenant_id
+                    and reviewer_employee.id=usage_reviewer.employee_id and reviewer_employee.account_id=:workUsageActorId
+                  join user_account reviewer_account on reviewer_account.tenant_id=reviewer_employee.tenant_id
+                    and reviewer_account.id=reviewer_employee.account_id and reviewer_account.status='ACTIVE'
+                  join position_definition reviewer_position on reviewer_position.tenant_id=usage_reviewer.tenant_id
+                    and reviewer_position.id=usage_reviewer.position_id and reviewer_position.status='ACTIVE'
+                    and reviewer_position.deleted_at is null and reviewer_position.permanently_deleted_at is null
+                  join org_unit review_hotel on review_hotel.tenant_id=usage_config.tenant_id
+                    and review_hotel.id=usage_config.hotel_org_unit_id and review_hotel.unit_type='HOTEL' and review_hotel.status='ACTIVE'
+                  join org_unit_closure reviewer_hotel on reviewer_hotel.tenant_id=usage_reviewer.tenant_id
+                    and reviewer_hotel.descendant_id=usage_reviewer.org_unit_id and reviewer_hotel.ancestor_id=review_hotel.id
+                  where usage_config.tenant_id=:tenantId and usage_config.hotel_org_unit_id=%s
+                    and (:workTenantScope or review_hotel.id in (:workReadScopes))
+                    and usage_reviewer.status='ACTIVE' and usage_reviewer.valid_from<=current_date
+                    and (usage_reviewer.valid_to is null or usage_reviewer.valid_to>=current_date)
+                    and reviewer_employee.employment_status='ACTIVE' and reviewer_employee.deleted_at is null
+                    and (exists (select 1 from store_usage_review_config_member member
+                      where member.tenant_id=usage_config.tenant_id and member.hotel_org_unit_id=usage_config.hotel_org_unit_id
+                        and member.reviewer_assignment_id=usage_reviewer.id)
+                      or (usage_config.reviewer_assignment_id=usage_reviewer.id and not exists (
+                        select 1 from store_usage_review_config_member member
+                        where member.tenant_id=usage_config.tenant_id and member.hotel_org_unit_id=usage_config.hotel_org_unit_id))))
+                """.formatted(hotel);
+    }
+
+    private static String usageRecord(String alias) {
+        return """
+                exists (select 1 from store_work_usage assigned_usage
+                  join employee usage_employee on usage_employee.tenant_id=assigned_usage.tenant_id
+                    and usage_employee.id=%1$s.employee_id and usage_employee.account_id is distinct from :workUsageActorId
+                  join org_unit_closure usage_hotel on usage_hotel.tenant_id=assigned_usage.tenant_id
+                    and usage_hotel.ancestor_id=assigned_usage.hotel_org_unit_id and usage_hotel.descendant_id=%1$s.target_org_unit_id
+                  where assigned_usage.tenant_id=%1$s.tenant_id and assigned_usage.tenant_id=:tenantId
+                    and assigned_usage.work_record_id=%1$s.id and %1$s.submitted_by_account_id is distinct from :workUsageActorId
+                    and %2$s)
+                """.formatted(alias, usageMember("assigned_usage.hotel_org_unit_id"));
+    }
+
+    private static String usageReport(String alias) {
+        return """
+                exists (select 1 from work_expectation usage_expectation
+                  join work_package_item usage_item on usage_item.tenant_id=usage_expectation.tenant_id
+                    and usage_item.id=usage_expectation.work_package_item_id and usage_item.item_code='HKA_DAILY_REPORT'
+                  join work_package_version usage_version on usage_version.tenant_id=usage_item.tenant_id and usage_version.id=usage_item.work_package_version_id
+                  join work_package_version report_version on report_version.tenant_id=usage_version.tenant_id
+                    and report_version.id=%1$s.work_package_version_id
+                    and report_version.work_package_definition_id=usage_version.work_package_definition_id
+                  join employee_position_assignment report_owner on report_owner.tenant_id=usage_expectation.tenant_id
+                    and report_owner.id=%1$s.position_assignment_id and report_owner.employee_id=%1$s.employee_id
+                  join employee report_employee on report_employee.tenant_id=report_owner.tenant_id
+                    and report_employee.id=report_owner.employee_id and report_employee.account_id is distinct from :workUsageActorId
+                  join work_record report_work on report_work.tenant_id=usage_expectation.tenant_id
+                    and report_work.work_expectation_id=usage_expectation.id and report_work.work_package_item_id=usage_item.id
+                    and report_work.position_assignment_id=%1$s.position_assignment_id and report_work.employee_id=%1$s.employee_id
+                    and report_work.business_date=%1$s.business_date and report_work.submitted_by_account_id is distinct from :workUsageActorId
+                    and report_work.target_org_unit_id=usage_expectation.target_org_unit_id
+                    and (nullif(report_work.payload->>'dailyReportId','') is null or report_work.payload->>'dailyReportId'=%1$s.id::text)
+                  left join store_work_usage_report_link usage_link on usage_link.tenant_id=report_work.tenant_id and usage_link.work_record_id=report_work.id
+                  join store_work_usage report_usage on report_usage.tenant_id=report_work.tenant_id
+                    and report_usage.work_record_id=coalesce(usage_link.usage_record_id,report_work.id) and report_usage.hotel_org_unit_id=%1$s.hotel_org_unit_id
+                  join work_record original_usage on original_usage.tenant_id=report_usage.tenant_id and original_usage.id=report_usage.work_record_id
+                    and original_usage.employee_id=%1$s.employee_id and original_usage.business_date=%1$s.business_date
+                  join work_package_item original_usage_item on original_usage_item.tenant_id=original_usage.tenant_id
+                    and original_usage_item.id=original_usage.work_package_item_id and original_usage_item.item_code in ('HKA_USAGE_RETURN','HKA_DAILY_REPORT')
+                  join org_unit_closure original_usage_hotel on original_usage_hotel.tenant_id=report_usage.tenant_id
+                    and original_usage_hotel.ancestor_id=report_usage.hotel_org_unit_id and original_usage_hotel.descendant_id=original_usage.target_org_unit_id
+                  join org_unit_closure report_hotel on report_hotel.tenant_id=report_work.tenant_id
+                    and report_hotel.ancestor_id=report_usage.hotel_org_unit_id and report_hotel.descendant_id=report_work.target_org_unit_id
+                  where usage_expectation.tenant_id=%1$s.tenant_id and usage_expectation.tenant_id=:tenantId
+                    and usage_expectation.position_assignment_id=%1$s.position_assignment_id and usage_expectation.business_date=%1$s.business_date
+                    and usage_expectation.status not in ('CANCELLED','WAIVED')
+                    and not exists (select 1 from work_expectation other_expectation
+                      join work_package_item other_item on other_item.tenant_id=other_expectation.tenant_id
+                        and other_item.id=other_expectation.work_package_item_id and other_item.item_code='HKA_DAILY_REPORT'
+                      join work_package_version other_version on other_version.tenant_id=other_item.tenant_id and other_version.id=other_item.work_package_version_id
+                      where other_expectation.tenant_id=usage_expectation.tenant_id and other_expectation.id<>usage_expectation.id
+                        and other_expectation.position_assignment_id=usage_expectation.position_assignment_id
+                        and other_expectation.business_date=usage_expectation.business_date and other_expectation.status not in ('CANCELLED','WAIVED')
+                        and other_version.work_package_definition_id=report_version.work_package_definition_id)
+                    and %1$s.created_by_account_id is distinct from :workUsageActorId
+                    and not exists (select 1 from daily_report_revision current_revision where current_revision.tenant_id=%1$s.tenant_id
+                      and current_revision.id=%1$s.current_revision_id and current_revision.submitted_by_account_id=:workUsageActorId)
+                    and %2$s)
+                """.formatted(alias, usageMember("report_usage.hotel_org_unit_id"));
+    }
+
+    /** Caller retains the formal-report permission, self-review and revision-state checks. */
+    public boolean canReviewUsageReportGroup(TenantPrincipal principal, UUID reportId, boolean lock) {
+        if (!usageReviewer(principal)) return false;
+        MapSqlParameterSource params = usageParameters(principal, new MapSqlParameterSource("tenantId", principal.tenantId()))
+                .addValue("usageReportId", reportId);
+        if (lock && jdbc.queryForList("""
+                select review_config.hotel_org_unit_id from store_usage_review_config review_config
+                  join daily_report usage_report on usage_report.tenant_id=review_config.tenant_id
+                    and usage_report.hotel_org_unit_id=review_config.hotel_org_unit_id
+                where usage_report.tenant_id=:tenantId and usage_report.id=:usageReportId
+                  and (:workTenantScope or review_config.hotel_org_unit_id in (:workReadScopes))
+                for share of review_config
+                """, params, UUID.class).isEmpty()) return false;
+        // Read members after acquiring the parent lock so a waited-for replacement is visible.
+        return Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from daily_report usage_report"
+                + " where usage_report.tenant_id=:tenantId and usage_report.id=:usageReportId and "
+                + usageReport("usage_report") + ")", params, Boolean.class));
     }
 
     public void requireExpectation(TenantPrincipal principal, UUID expectationId) {
@@ -144,7 +270,10 @@ public class WorkVisibilityPolicy {
         if (!Boolean.TRUE.equals(allowed)) throw new AccessDeniedException("该日报不属于当前任职或授权下属范围");
     }
 
-    public record Scope(boolean administrator, boolean tenantScope, boolean hasOwn, boolean hasManaged) {
+    public record Scope(boolean administrator, boolean tenantScope, boolean hasOwn, boolean hasManaged, boolean usageReviewer) {
+        public Scope(boolean administrator, boolean tenantScope, boolean hasOwn, boolean hasManaged) {
+            this(administrator, tenantScope, hasOwn, hasManaged, false);
+        }
         private String own(String assignment) {
             return hasOwn ? assignment + " in (:workOwnIds)" : "false";
         }
@@ -166,11 +295,16 @@ public class WorkVisibilityPolicy {
 
         /** A shared work item never grants access to the owner's entire daily report. */
         public String report(String alias) {
-            return "(" + personal(alias) + " or " + managed(alias + ".org_unit_id", alias + ".position_assignment_id") + ")";
+            return "(" + personal(alias) + " or " + managed(alias + ".org_unit_id", alias + ".position_assignment_id")
+                    + (usageReviewer ? " or " + usageReport(alias) : "") + ")";
         }
 
         /** Shared/delegated access is confined to the single expectation, not that employee. */
         public String expectation(String alias, boolean includeTeam) {
+            return expectation(alias, includeTeam, true);
+        }
+
+        private String expectation(String alias, boolean includeTeam, boolean includeUsage) {
             String personal = own(alias + ".position_assignment_id");
             if (hasOwn) {
                 personal += " or exists (select 1 from work_expectation_delegation wd "
@@ -198,13 +332,16 @@ public class WorkVisibilityPolicy {
                         """.formatted(alias);
             }
             return "(" + personal + (includeTeam ? " or " + managed(
-                    alias + ".target_org_unit_id", alias + ".position_assignment_id") : "") + ")";
+                    alias + ".target_org_unit_id", alias + ".position_assignment_id") : "")
+                    + (includeTeam && includeUsage && usageReviewer ? " or exists(select 1 from work_record assigned_record where assigned_record.tenant_id="
+                        + alias + ".tenant_id and assigned_record.work_expectation_id=" + alias + ".id and " + usageRecord("assigned_record") + ")" : "") + ")";
         }
 
         public String record(String alias) {
             return "(" + summary(alias) + " or exists (select 1 from work_expectation linked_work "
                     + "where linked_work.tenant_id = " + alias + ".tenant_id and linked_work.id = "
-                    + alias + ".work_expectation_id and " + expectation("linked_work", true) + "))";
+                    + alias + ".work_expectation_id and " + expectation("linked_work", true, false) + ")"
+                    + (usageReviewer ? " or " + usageRecord(alias) : "") + ")";
         }
     }
 

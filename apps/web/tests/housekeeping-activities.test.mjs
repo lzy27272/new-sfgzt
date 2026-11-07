@@ -76,6 +76,6 @@ test('acknowledged draft save feedback survives editor reload and stays scoped t
   assert.match(page,/savedNotice\?\.scope === noticeScope/)
   assert.match(page,/role="status">\{savedNotice.text\}/)
   assert.ok(page.indexOf('setSavedNotice(notice ?')<page.indexOf('await resource.reload()'))
-  assert.match(source,/await onChanged\(action === 'save' \? '草稿已保存到服务器' : undefined\)/)
+  assert.match(source,/await onChanged\(\{ save: '草稿已保存到服务器'/)
   assert.doesNotMatch(source,/setDraftNotice\('草稿已保存到服务器'\)/)
 })

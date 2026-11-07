@@ -303,10 +303,11 @@ function resultId(result: unknown) {
   return String(row.id ?? row.taskId ?? row.evaluationId ?? nested?.id ?? nested?.taskId ?? nested?.evaluationId ?? '')
 }
 
-export function WorkRecordReviewActions({ status, eligibility, reason, busy, isDemo, onReason, onReview, preview, onPrepareSpotCheck, onCancelSpotCheck }: {
+export function WorkRecordReviewActions({ status, eligibility, reason, busy, isDemo, onReason, onReview, preview, onPrepareSpotCheck, onCancelSpotCheck, onRetryEligibility }: {
   status: string; eligibility: TeamWorkCase['reviewEligibility']; reason: string; busy?: string; isDemo: boolean
   onReason: (reason: string) => void; onReview: (outcome: 'APPROVED' | 'REJECTED') => void
   preview?: SpotCheckPreview; onPrepareSpotCheck?: () => void; onCancelSpotCheck?: () => void
+  onRetryEligibility?: () => void
 }) {
   const spotCheck = eligibility?.spotCheck === true
   const actionable = status === 'SUBMITTED' || (spotCheck && status === 'APPROVED')
@@ -316,7 +317,7 @@ export function WorkRecordReviewActions({ status, eligibility, reason, busy, isD
       ? '抽查不合格须填写原因；按原工作日期撤销一次有效完成，非固定扣分。整改后须人工复验通过才恢复；按需事件不扣必做完成率。'
       : '复核只判断记录是否完整，不替代标准评价和任务验收。'}</p>
     {actionable ? <>
-      {!eligibility?.canReview && <div className="inline-error">{eligibility?.reason || '正在确认审核权限'}</div>}
+      {!eligibility?.canReview && <div className="inline-error" role="alert">{eligibility?.reason || '正在确认审核权限'}{onRetryEligibility && <button type="button" className="link-button" disabled={Boolean(busy)} onClick={onRetryEligibility}>重新读取审核资格</button>}</div>}
       <label>{spotCheck ? '抽查不合格原因' : '复核意见'}<textarea rows={2} value={reason} disabled={disabled}
         onChange={event => onReason(event.target.value)} placeholder={spotCheck ? '请说明不合格事实及整改要求' : '退回时必须填写原因'} /></label>
       <div><button className="primary" disabled={disabled} onClick={() => onReview('APPROVED')}>{busy === 'review-APPROVED' ? '处理中…' : spotCheck ? '抽查合格' : '复核通过'}</button>
@@ -562,6 +563,7 @@ export function TeamWorkDrawer({ initial, requestedRecordId, identity, permissio
 
           {(allows('work-record.review') || reviewEligibility?.canReview) && <WorkRecordReviewActions status={record.status}
             eligibility={reviewEligibility} reason={reviewReason} busy={busy} isDemo={isDemo} onReason={setReviewReason} onReview={review}
+            onRetryEligibility={() => void resource.reload()}
             preview={spotPreview} onPrepareSpotCheck={() => void prepareSpotCheck()} onCancelSpotCheck={() => { previewRequest.current += 1; previewAbort.current?.abort(); setSpotPreview(undefined) }} />}
 
           {allows('evaluation.manual-review') && <section className="action-box" id="standard-evaluation-action"><h3>创建标准评价</h3><label>评价依据<select value={selectedStandard} onChange={(event) => setSelectedStandard(event.target.value)}><option value="">请选择已发布标准</option>{standards.map((standard) => <option value={standard.standardVersionId} key={standard.standardVersionId}>{standard.title}（第{standard.versionNo}版）</option>)}</select></label>{!standards.length && <div className="inline-warning">工作包条目尚未返回绑定标准，不能由页面猜测评价依据。</div>}<div><button className="primary" disabled={!!busy || !selectedStandard || isDemo} onClick={evaluate}>{busy === 'evaluation' ? '创建中…' : '按标准创建评价'}</button></div></section>}

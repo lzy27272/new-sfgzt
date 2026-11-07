@@ -731,6 +731,13 @@ public class PositionManagementService {
             }
         }
 
+        int greatestOtherVersion = jdbc.queryForObject("""
+                select coalesce(max(version_no),0) from position_function_profile_version
+                where tenant_id=:tenantId and profile_id=:profileId and id<>:draftId
+                """, base(principal).addValue("profileId", profile.id()).addValue("draftId", draft.id()), Integer.class);
+        // A release may publish a new version while preserving an administrator's older draft.
+        int publishedVersionNo = draft.versionNo() <= greatestOtherVersion
+                ? greatestOtherVersion + 1 : draft.versionNo();
         jdbc.update("""
                 update position_function_profile_version
                 set lifecycle_status = 'ARCHIVED', row_version = row_version + 1, updated_at = now()
@@ -739,18 +746,19 @@ public class PositionManagementService {
                 """, base(principal).addValue("profileId", profile.id()));
         int promoted = jdbc.update("""
                 update position_function_profile_version
-                set lifecycle_status = 'PUBLISHED', published_by = :actorId,
+                set lifecycle_status = 'PUBLISHED', version_no = :versionNo, published_by = :actorId,
                     published_at = now(), row_version = row_version + 1, updated_at = now()
                 where tenant_id = :tenantId and id = :draftId
                   and lifecycle_status = 'DRAFT' and row_version = :expectedVersion
                 """, base(principal)
                 .addValue("draftId", draft.id())
+                .addValue("versionNo", publishedVersionNo)
                 .addValue("actorId", principal.actorId())
                 .addValue("expectedVersion", request.expectedProfileVersion()));
         if (promoted != 1) throw stale();
 
         UUID nextDraftId = UUID.randomUUID();
-        int nextVersion = draft.versionNo() + 1;
+        int nextVersion = publishedVersionNo + 1;
         jdbc.update("""
                 insert into position_function_profile_version
                     (id, tenant_id, profile_id, version_no, lifecycle_status,
@@ -809,7 +817,8 @@ public class PositionManagementService {
         auditWriter.record("POSITION_PROFILE_PUBLISHED", "POSITION_PROFILE_VERSION", draft.id(), json(Map.of(
                 "positionId", positionId,
                 "hotelId", hotelId == null ? "GROUP" : hotelId.toString(),
-                "publishedVersion", draft.versionNo(),
+                "publishedVersion", publishedVersionNo,
+                "draftVersionBeforePublish", draft.versionNo(),
                 "permissionCount", selected.size(),
                 "authorizationScopeType", draft.authorizationScopeType(),
                 "wecomSelfSelectable", draft.wecomSelfSelectable(),
@@ -1575,6 +1584,10 @@ public class PositionManagementService {
 
         VersionLock published = versionByStatus(principal, profileId, "PUBLISHED", false);
         UUID draftId = UUID.randomUUID();
+        int nextVersion = jdbc.queryForObject("""
+                select coalesce(max(version_no),0)+1 from position_function_profile_version
+                where tenant_id=:tenantId and profile_id=:profileId
+                """, base(principal).addValue("profileId", profileId), Integer.class);
         jdbc.update("""
                 insert into position_function_profile_version
                     (id, tenant_id, profile_id, version_no, lifecycle_status,
@@ -1586,7 +1599,7 @@ public class PositionManagementService {
                 """, base(principal)
                 .addValue("id", draftId)
                 .addValue("profileId", profileId)
-                .addValue("versionNo", published.versionNo() + 1)
+                .addValue("versionNo", nextVersion)
                 .addValue("publishedId", published.id())
                 .addValue("baselineId", published.basedOnGroupVersionId())
                 .addValue("scope", published.authorizationScopeType())

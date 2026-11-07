@@ -1,4 +1,4 @@
-import { apiBlob, apiMutation, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
+import { ApiError, apiBlob, apiMutation, apiRequest, asList, demoFallbackEnabled, demoOnlyEnabled, type ApiIdentity } from './client'
 import { withRequestDeadline } from './requestDeadline'
 import { dashboardApiPaths } from '../app/dashboardContract'
 import { camelizeKeysDeep } from '../features/shared/featureApi'
@@ -580,7 +580,13 @@ export async function loadTeamWorkCase(identity: ApiIdentity, initial: WorkExpec
       const [attachments, eligibility] = await Promise.all([
         apiRequest<unknown>(`/work-data/records/${record.id}/attachments`, identity).catch(() => record.attachments),
         apiRequest<NonNullable<TeamWorkCase['reviewEligibility']>>(`/work-data/records/${record.id}/review-eligibility`, identity)
-          .catch(() => ({ canReview: false, reason: '暂时无法确认审核权限，请刷新重试' })),
+          .catch((error: unknown) => {
+            if (error instanceof ApiError && error.status === 401) throw error
+            return { canReview: false, reason: error instanceof ApiError && error.status >= 400 && error.status < 500
+              ? error.message : error instanceof ApiError
+                ? `审核资格服务暂不可用（HTTP ${error.status}），请刷新重试。`
+                : '审核资格读取失败，请检查网络后刷新重试。' }
+          }),
       ])
       record.attachments = asList<JsonObject>(attachments).map(normalizeAttachment)
       reviewEligibility = eligibility

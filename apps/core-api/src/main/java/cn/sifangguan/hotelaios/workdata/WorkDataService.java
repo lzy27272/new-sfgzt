@@ -427,15 +427,15 @@ public class WorkDataService {
         RecordAccess record = recordAccessForUpdate(principal, recordId);
         if (!isManagerCycle(principal, record.workPackageItemId())) accessPolicy.requirePermission("work-record.review");
         accessPolicy.requireOrgScope(record.targetOrgUnitId());
+        if (principal.actorId().equals(record.submittedByAccountId())) {
+            throw new AccessDeniedException("提交人不能复核自己的工作记录");
+        }
         if (usageService.isReviewRetry(recordId, request.outcome().trim().toUpperCase(Locale.ROOT), request.expectedVersion())) {
             return response("id", recordId, "status", record.status(), "rowVersion", request.expectedVersion() + 1);
         }
         boolean spotCheck = isExemptRecord(principal, record, recordId) && !usageService.hasUsage(recordId);
         if (!"SUBMITTED".equals(record.status()) && !(spotCheck && "APPROVED".equals(record.status()))) {
             throw new IllegalArgumentException("只有待复核记录或可抽查的免审工作可以复核");
-        }
-        if (principal.actorId().equals(record.submittedByAccountId())) {
-            throw new AccessDeniedException("提交人不能复核自己的工作记录");
         }
         if (usageService.hasUsage(recordId)) usageService.requireReviewer(recordId);
         else {
@@ -1768,7 +1768,7 @@ public class WorkDataService {
             accessPolicy.requireOrgScope(record.targetOrgUnitId());
             accessPolicy.requireAnyPermission("work-record.review", "manager-cycle.review");
             if (!isManagerCycle(principal, record.workPackageItemId())) accessPolicy.requirePermission("work-record.review");
-            if (usageService.hasUsage(recordId)) usageService.requireReviewer(recordId);
+            if (usageService.hasUsage(recordId)) return usageService.reviewEligibility(recordId);
             else {
                 requireConfiguredReviewer(principal, record);
                 if (hasExemptReviewConfiguration(principal, record)

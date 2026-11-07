@@ -32,7 +32,13 @@ public class StoreWorkUsageController {
 
     @PutMapping("/hotels/{hotelId}/usage-review-config")
     public Map<String, Object> configure(@PathVariable UUID hotelId, @Valid @RequestBody Configure request) {
-        return service.configure(hotelId, request.reviewerAssignmentId(), request.expectedVersion());
+        List<UUID> reviewers = request.reviewerAssignmentIds();
+        if (reviewers == null) reviewers = request.reviewerAssignmentId() == null
+                ? List.of() : List.of(request.reviewerAssignmentId());
+        else if (request.reviewerAssignmentId() != null
+                && (reviewers.isEmpty() || !request.reviewerAssignmentId().equals(reviewers.getFirst())))
+            throw new IllegalArgumentException("单人和多人审核配置不一致，请刷新后重试");
+        return service.configure(hotelId, reviewers, request.expectedVersion());
     }
 
     @GetMapping("/hotels/{hotelId}/work-usage")
@@ -46,7 +52,9 @@ public class StoreWorkUsageController {
         return service.reverse(hotelId, recordId, request.reason());
     }
 
-    public record Configure(@NotNull UUID reviewerAssignmentId, @Min(-1) long expectedVersion) { }
+    public record Configure(UUID reviewerAssignmentId,
+                            @Size(min=1,max=10) List<@NotNull UUID> reviewerAssignmentIds,
+                            @Min(-1) long expectedVersion) { }
     public record Reverse(@NotBlank @Size(max=1000) String reason) { }
 
     @GetMapping("/hotels/{hotelId}/usage-quick-list-positions")

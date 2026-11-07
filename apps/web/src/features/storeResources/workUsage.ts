@@ -2,7 +2,8 @@ import type { RoleContext, WorkExpectation } from '../../domain'
 import { featureApiMutation, featureApiRequest } from '../shared/featureApi'
 import { baseQuantityPreview } from './unitConversion'
 
-export type UsageConfig = { hotelOrgUnitId: string; enabled: boolean; rowVersion: number; reviewerAssignmentId?: string; reviewerName?: string; reviewerPositionName?: string; reviewerAvailable: boolean }
+export type UsageConfiguredReviewer = { assignmentId: string; reviewerName: string; reviewerPositionName: string; available: boolean }
+export type UsageConfig = { hotelOrgUnitId: string; enabled: boolean; rowVersion: number; reviewerAssignmentId?: string; reviewerName?: string; reviewerPositionName?: string; reviewerAvailable: boolean; reviewerAssignments?: UsageConfiguredReviewer[] }
 export type UsageScopeKind = 'POSITION' | 'DEPARTMENT' | 'SHARED'
 export type UsageItem = { id: string; name: string; sku?: string; category: string; specification: string; unit: string; issueUnit: string; issueFactor: number; rowVersion: number; usageScopeKind?: UsageScopeKind; applicableToAssignment?: boolean; issuedToday?: boolean; departmentIds?: string[]; usageScopeMode?: string }
 export type UsageQuickList = { positionId: string; rowVersion: number; configured: boolean; itemIds: string[] }
@@ -14,6 +15,15 @@ export type UsageCorrection = { id: string; revisionNo: number; noUsage: boolean
 export type UsageDetail = { workRecordId: string; status: string; noUsage: boolean; lines: UsageLine[]; reversalReason?: string; correctionVersion?: number; corrections?: UsageCorrection[]; referenced?: boolean }
 export type UsageRow = UsageDetail & { employeeName: string; workTitle: string; businessDate: string; recordVersion: number; workExpectationId?: string; canReview: boolean; canCorrect?: boolean; reviewReason?: string }
 export type UsageReviewer = { assignmentId: string; employeeName: string; positionName: string }
+
+export function configuredUsageReviewers(config: UsageConfig): UsageConfiguredReviewer[] {
+  return config.reviewerAssignments ?? (config.reviewerAssignmentId ? [{ assignmentId: config.reviewerAssignmentId,
+    reviewerName: config.reviewerName || '原审核人', reviewerPositionName: config.reviewerPositionName || '', available: config.reviewerAvailable }] : [])
+}
+export function usageReviewerSummary(config: UsageConfig) {
+  return configuredUsageReviewers(config).map(person => `${person.reviewerName} · ${person.reviewerPositionName}${person.available ? '' : '（已失效）'}`).join('、')
+    || (config.reviewerName ? `${config.reviewerName} · ${config.reviewerPositionName || ''}` : '未配置')
+}
 
 export function supportsWorkUsage(item: Pick<WorkExpectation, 'itemCode' | 'submissionPolicy'>) {
   return ['HKA_ITEM_ISSUE', 'NSA_ITEM_ISSUE', 'HKA_USAGE_RETURN', 'HKA_DAILY_REPORT', 'NSA_DAILY_HANDOVER'].includes(item.itemCode ?? '') || item.submissionPolicy?.inventoryUsage === true
@@ -57,7 +67,7 @@ export const saveUsageQuickList = (identity: RoleContext, hotelId: string, posit
 export const loadUsageCatalogue = (identity: RoleContext, orgUnitId: string, signal?: AbortSignal, context?: { businessDate: string; itemCode?: string }) => featureApiRequest<UsageCatalogue>(`/store-resources/usage-catalog?orgUnitId=${encodeURIComponent(orgUnitId)}${context ? `&businessDate=${encodeURIComponent(context.businessDate)}&itemCode=${encodeURIComponent(context.itemCode ?? '')}` : ''}`, identity, { signal })
 export const loadUsageConfig = (identity: RoleContext, hotelId: string, signal?: AbortSignal) => featureApiRequest<UsageConfig>(`${path(hotelId)}/usage-review-config`, identity, { signal })
 export const loadUsageReviewers = (identity: RoleContext, hotelId: string, signal?: AbortSignal) => featureApiRequest<UsageReviewer[]>(`${path(hotelId)}/usage-reviewers`, identity, { signal })
-export const saveUsageConfig = (identity: RoleContext, hotelId: string, reviewerAssignmentId: string, expectedVersion: number) => featureApiMutation<UsageConfig>(`${path(hotelId)}/usage-review-config`, identity, { method: 'PUT', body: { reviewerAssignmentId }, expectedVersion })
+export const saveUsageConfig = (identity: RoleContext, hotelId: string, reviewerAssignmentIds: string[] | string, expectedVersion: number) => featureApiMutation<UsageConfig>(`${path(hotelId)}/usage-review-config`, identity, { method: 'PUT', body: Array.isArray(reviewerAssignmentIds) ? { reviewerAssignmentIds } : { reviewerAssignmentId: reviewerAssignmentIds }, expectedVersion })
 export const loadWorkUsages = (identity: RoleContext, hotelId: string, status: string, signal?: AbortSignal) => featureApiRequest<UsageRow[]>(`${path(hotelId)}/work-usage?status=${encodeURIComponent(status)}`, identity, { signal })
 export const reverseWorkUsage = (identity: RoleContext, hotelId: string, recordId: string, reason: string) => featureApiMutation<UsageDetail>(`${path(hotelId)}/work-usage/${encodeURIComponent(recordId)}/reverse`, identity, { method: 'POST', body: { reason } })
 export const correctWorkUsage = (identity: RoleContext, hotelId: string, row: UsageRow, quantities: UsageInput, reason: string) => featureApiMutation<UsageDetail>(`${path(hotelId)}/work-usage/${encodeURIComponent(row.workRecordId)}/correct`, identity, { method: 'POST', body: { quantities, reason }, expectedVersion: row.correctionVersion ?? 0 })
