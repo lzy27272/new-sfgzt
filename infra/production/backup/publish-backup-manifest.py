@@ -155,7 +155,9 @@ def main() -> None:
             }
         )
 
-    required = {"hotel-ai-os", "sifangguan-ota", "analytics-raw"}
+    # Raw is optional after all validated responses expire; business recovery
+    # remains mandatory even when collection has stopped for more than a week.
+    required = {"hotel-ai-os", "sifangguan-ota"}
     present = {str(entry["category"]) for entry in entries}
     if not entries or not required.issubset(present):
         fail("manifest is missing a required backup category")

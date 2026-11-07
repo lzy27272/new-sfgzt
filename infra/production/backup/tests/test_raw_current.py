@@ -66,6 +66,12 @@ class RawCurrentTest(unittest.TestCase):
         self.assertTrue(current.exists())
         self.assertTrue(obsolete.exists())
 
+    def test_no_remaining_raw_does_not_keep_expired_archives(self):
+        expired=self.archive('2026-10-01',b'expired')
+        result=S.prune_raw_current(self.root,self.source,'2026-11-07')
+        self.assertEqual(result,{'retainedArtifacts':0,'removed':1})
+        self.assertFalse(expired.exists())
+
 
 if __name__=='__main__':
     unittest.main()
