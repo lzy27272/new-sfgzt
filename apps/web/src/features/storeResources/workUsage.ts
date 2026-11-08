@@ -2,8 +2,8 @@ import type { RoleContext, WorkExpectation } from '../../domain'
 import { featureApiMutation, featureApiRequest } from '../shared/featureApi'
 import { baseQuantityPreview } from './unitConversion'
 
-export type UsageConfiguredReviewer = { assignmentId: string; reviewerName: string; reviewerPositionName: string; available: boolean }
-export type UsageConfig = { hotelOrgUnitId: string; enabled: boolean; rowVersion: number; reviewerAssignmentId?: string; reviewerName?: string; reviewerPositionName?: string; reviewerAvailable: boolean; reviewerAssignments?: UsageConfiguredReviewer[] }
+export type UsageConfiguredReviewer = { assignmentId: string; reviewerName: string; reviewerPositionName: string; available: boolean; automatic?: boolean; explicit?: boolean }
+export type UsageConfig = { hotelOrgUnitId: string; enabled: boolean; rowVersion: number; reviewerAssignmentId?: string; reviewerName?: string; reviewerPositionName?: string; reviewerAvailable: boolean; reviewerAssignments?: UsageConfiguredReviewer[]; configured?: boolean; configuredReviewerAssignmentIds?: string[] }
 export type UsageScopeKind = 'POSITION' | 'DEPARTMENT' | 'SHARED'
 export type UsageItem = { id: string; name: string; sku?: string; category: string; specification: string; unit: string; issueUnit: string; issueFactor: number; rowVersion: number; usageScopeKind?: UsageScopeKind; applicableToAssignment?: boolean; issuedToday?: boolean; departmentIds?: string[]; usageScopeMode?: string }
 export type UsageQuickList = { positionId: string; rowVersion: number; configured: boolean; itemIds: string[] }
@@ -21,7 +21,7 @@ export function configuredUsageReviewers(config: UsageConfig): UsageConfiguredRe
     reviewerName: config.reviewerName || '原审核人', reviewerPositionName: config.reviewerPositionName || '', available: config.reviewerAvailable }] : [])
 }
 export function usageReviewerSummary(config: UsageConfig) {
-  return configuredUsageReviewers(config).map(person => `${person.reviewerName} · ${person.reviewerPositionName}${person.available ? '' : '（已失效）'}`).join('、')
+  return configuredUsageReviewers(config).map(person => `${person.reviewerName} · ${person.reviewerPositionName}${person.available ? person.automatic ? '（随任职自动生效）' : '' : '（已失效）'}`).join('、')
     || (config.reviewerName ? `${config.reviewerName} · ${config.reviewerPositionName || ''}` : '未配置')
 }
 

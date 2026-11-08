@@ -220,9 +220,14 @@ public class StoreWorkUsageService {
                 """, base(p).addValue("hotelId", hotelId));
         Map<String, Object> result = rows.isEmpty() ? new LinkedHashMap<>() : new LinkedHashMap<>(rows.getFirst());
         result.put("hotel_org_unit_id", hotelId);
-        result.put("enabled", !rows.isEmpty());
+        result.put("configured", !rows.isEmpty());
         result.putIfAbsent("row_version", -1L);
-        List<UUID> reviewerIds = currentReviewers(p, hotelId, false);
+        List<UUID> explicitIds = explicitReviewers(p, hotelId, false);
+        List<UUID> automaticIds = automaticReviewers(p, hotelId, false);
+        List<UUID> reviewerIds = new ArrayList<>(new LinkedHashSet<>(explicitIds));
+        for (UUID id : automaticIds) if (!reviewerIds.contains(id)) reviewerIds.add(id);
+        result.put("configured_reviewer_assignment_ids", explicitIds);
+        result.put("enabled", !rows.isEmpty() || !automaticIds.isEmpty());
         List<Map<String, Object>> reviewers = new ArrayList<>();
         if (!reviewerIds.isEmpty()) {
             for (Map<String, Object> reviewer : jdbc.queryForList("""
@@ -233,6 +238,8 @@ public class StoreWorkUsageService {
                     where a.tenant_id=:tenantId and a.id in (:reviewers)
                     """, base(p).addValue("reviewers", reviewerIds))) {
                 reviewer.put("available", eligibleReviewer(p, hotelId, (UUID) reviewer.get("assignment_id")));
+                reviewer.put("explicit", explicitIds.contains((UUID) reviewer.get("assignment_id")));
+                reviewer.put("automatic", automaticIds.contains((UUID) reviewer.get("assignment_id")));
                 reviewers.add(reviewer);
             }
             reviewers.sort(Comparator.comparingInt(row -> reviewerIds.indexOf((UUID) row.get("assignment_id"))));
@@ -281,7 +288,7 @@ public class StoreWorkUsageService {
                 select reviewer_assignment_id,row_version from store_usage_review_config
                 where tenant_id=:tenantId and hotel_org_unit_id=:hotelId for update
                 """, base(p).addValue("hotelId", hotelId));
-        List<UUID> beforeReviewers = currentReviewers(p, hotelId, false);
+        List<UUID> beforeReviewers = explicitReviewers(p, hotelId, false);
         long version = before.isEmpty() ? -1 : ((Number) before.getFirst().get("row_version")).longValue();
         if (version != expectedVersion) throw conflict("审核配置已变化，请刷新后再保存");
         jdbc.update("""
@@ -302,11 +309,13 @@ public class StoreWorkUsageService {
                         "reviewerAssignmentId", reviewerIds.getFirst(), "reviewerAssignmentIds", reviewerIds,
                         "pendingRequestsRerouted", true)));
         // Pending work follows current configuration; submission snapshots remain immutable.
+        List<UUID> effectiveReviewers = currentReviewers(p, hotelId, false).stream()
+                .filter(id -> eligibleReviewer(p, hotelId, id)).toList();
         for (UUID recordId : jdbc.queryForList("""
                 select work_record_id from store_work_usage where tenant_id=:tenantId
                   and hotel_org_unit_id=:hotelId and status='PENDING'
                 """, base(p).addValue("hotelId", hotelId), UUID.class))
-            for (UUID reviewerId : reviewerIds) notifyReviewer(p, recordId, reviewerId);
+            for (UUID reviewerId : effectiveReviewers) notifyReviewer(p, recordId, reviewerId);
         return configuration(p, hotelId);
     }
 
@@ -352,7 +361,7 @@ public class StoreWorkUsageService {
         }
         List<UUID> configuredReviewers = currentReviewers(p, hotelId, true);
         if (configuredReviewers.isEmpty()) {
-            if (typed) throw conflict("门店尚未配置耗用审核人，请联系管理员配置后提交");
+            if (typed) throw conflict("门店暂无有效店长、店助或已配置的耗用审核人，请联系管理员核对任职和审核权限");
             return; // Legacy pilot stores retain their existing reporting flow until enabled.
         }
         var assignment = itemScope.assignment(p, hotelId, (UUID)record.get("position_assignment_id"), false);
@@ -509,9 +518,9 @@ public class StoreWorkUsageService {
         access.requireOrgScope(hotelId);
         List<UUID> reviewers = currentReviewers(p, hotelId, lock);
         UUID assignment = p.businessActorAssignmentId();
-        if (!p.hasPermission("*") && (assignment == null || !reviewers.contains(assignment)
+        if (!p.hasPermission("*") && (!hasUsageReviewCapability(p) || assignment == null || !reviewers.contains(assignment)
                 || !eligibleReviewer(p, hotelId, assignment)))
-            throw new AccessDeniedException("仅该门店配置的有效耗用审核人可以复核，请切换到指定任职");
+            throw new AccessDeniedException("仅该门店当前有效的店长、店助或已配置耗用审核人可以复核，请切换到对应任职");
         Boolean self = jdbc.queryForObject("""
                 select exists(select 1 from work_record r join employee e on e.tenant_id=r.tenant_id and e.id=r.employee_id
                     where r.tenant_id=:tenantId and r.id=:recordId and (e.account_id=:actorId or exists(
@@ -604,7 +613,7 @@ public class StoreWorkUsageService {
                 """, base(p).addValue("ids", ids))) {
             byRecord.computeIfAbsent((UUID) line.get("work_record_id"), ignored -> new ArrayList<>()).add(line);
         }
-        boolean allowed = p.hasPermission("*") || (p.hasPermission("work-record.review")
+        boolean allowed = p.hasPermission("*") || (hasUsageReviewCapability(p)
                 && p.businessActorAssignmentId() != null && reviewers.contains(p.businessActorAssignmentId())
                 && eligibleReviewer(p, hotelId, p.businessActorAssignmentId()));
         Map<UUID,List<Map<String,Object>>> historyByRecord=new HashMap<>();
@@ -775,6 +784,12 @@ public class StoreWorkUsageService {
         return rows.getFirst();
     }
     private List<UUID> currentReviewers(TenantPrincipal p, UUID hotelId, boolean lock) {
+        // Persisted additions and current management are independent: a new hotel need not have a config row.
+        LinkedHashSet<UUID> reviewers = new LinkedHashSet<>(explicitReviewers(p, hotelId, lock));
+        reviewers.addAll(automaticReviewers(p, hotelId, lock));
+        return List.copyOf(reviewers);
+    }
+    private List<UUID> explicitReviewers(TenantPrincipal p, UUID hotelId, boolean lock) {
         List<UUID> first = jdbc.queryForList("select reviewer_assignment_id from store_usage_review_config where tenant_id=:tenantId and hotel_org_unit_id=:hotelId"
                 + (lock ? " for share" : ""), base(p).addValue("hotelId", hotelId), UUID.class);
         if (first.isEmpty()) return List.of();
@@ -784,6 +799,29 @@ public class StoreWorkUsageService {
                 order by case when reviewer_assignment_id=:first then 0 else 1 end,reviewer_assignment_id
                 """, base(p).addValue("hotelId", hotelId).addValue("first", first.getFirst()), UUID.class);
         return members.isEmpty() ? first : members;
+    }
+    private List<UUID> automaticReviewers(TenantPrincipal p, UUID hotelId, boolean lock) {
+        List<UUID> candidates = jdbc.queryForList("""
+                select a.id
+                from employee_position_assignment a
+                join org_unit assignment_org on assignment_org.tenant_id=a.tenant_id
+                  and assignment_org.id=a.org_unit_id and assignment_org.status='ACTIVE'
+                join position_function_profile f on f.tenant_id=a.tenant_id and f.position_id=a.position_id
+                  and f.scope_type='GROUP'
+                join app_role role on role.tenant_id=f.tenant_id and role.id=f.default_role_id
+                  and role.role_type='SYSTEM' and role.code in ('GENERAL_MANAGER','ASSISTANT_GENERAL_MANAGER')
+                join lateral (
+                    select hotel.id,hotel.status from org_unit_closure closure
+                    join org_unit hotel on hotel.tenant_id=closure.tenant_id and hotel.id=closure.ancestor_id
+                    where closure.tenant_id=a.tenant_id and closure.descendant_id=a.org_unit_id
+                      and hotel.unit_type='HOTEL' order by closure.depth limit 1
+                ) hotel on hotel.id=:hotelId and hotel.status='ACTIVE'
+                where a.tenant_id=:tenantId and a.status='ACTIVE' and a.valid_from<=current_date
+                  and (a.valid_to is null or a.valid_to>=current_date)
+                order by case when role.code='GENERAL_MANAGER' then 0 else 1 end,a.is_primary desc,a.id
+                """ + (lock ? " for share of a" : ""), base(p).addValue("hotelId", hotelId), UUID.class);
+        // Role identity alone grants nothing. Resolve the effective published HOTEL/GROUP profile and scope.
+        return candidates.stream().filter(id -> eligibleReviewer(p, hotelId, id)).toList();
     }
     private boolean eligibleReviewer(TenantPrincipal p, UUID hotelId, UUID assignmentId) {
         if (assignmentId == null) return false;
@@ -797,9 +835,13 @@ public class StoreWorkUsageService {
                 """, base(p).addValue("hotelId", hotelId).addValue("assignmentId", assignmentId), UUID.class);
         if (accounts.isEmpty()) return false;
         return identities.inspectAssignment(p.tenantId(), accounts.getFirst(), p.correlationId(), assignmentId)
-                .map(target -> (target.hasTenantScope() || target.orgScopes().contains(hotelId)) && (target.hasPermission("*")
-                    || (target.hasPermission("work-record.review") && (target.hasPermission("store-resource.usage-review")
-                        || (target.hasPermission("store-resource.read") && target.hasPermission("ui.module.store-resources")))))).orElse(false);
+                .map(target -> (target.hasTenantScope() || target.orgScopes().contains(hotelId))
+                    && hasUsageReviewCapability(target)).orElse(false);
+    }
+    private boolean hasUsageReviewCapability(TenantPrincipal principal) {
+        return principal.hasPermission("*") || (principal.hasPermission("work-record.review")
+                && (principal.hasPermission("store-resource.usage-review")
+                    || (principal.hasPermission("store-resource.read") && principal.hasPermission("ui.module.store-resources"))));
     }
     private UUID hotelFor(TenantPrincipal p, UUID orgId) {
         List<UUID> ids = jdbc.queryForList("""

@@ -25,7 +25,7 @@ public class WorkVisibilityPolicy {
             "GROUP_VICE_PRESIDENT", "HR_ADMINISTRATION_SUPERVISOR", "HR_ADMINISTRATION",
             "OTA_OPERATION_MANAGER", "OTA_OPERATION_ASSISTANT", "OPERATIONS_DIRECTOR", "OPERATIONS_MANAGER"));
     // Compatibility for built-in positions without configured reporting links.
-    // Custom positions require explicit reporting links; names/legacy levels grant nothing.
+    // Custom reviewers require explicit reporting links; names/legacy levels grant nothing.
     private static final Map<String, Set<String>> SUBORDINATE_ROLES = Map.ofEntries(
             Map.entry("GROUP_CHAIRMAN", union(GROUP_TEAM, Set.of("CEO"))),
             Map.entry("CEO", GROUP_TEAM),
@@ -67,6 +67,8 @@ public class WorkVisibilityPolicy {
                     SUBORDINATE_ROLES.getOrDefault(role, Set.of())));
             params.addValue("workSubordinateRoles", subordinateRoles.isEmpty()
                     ? Set.of("__NO_SUBORDINATES__") : subordinateRoles);
+            params.addValue("workHotelManagement", WorkReviewPolicy.usesHotelManagementDefault(principal));
+            WorkReviewPolicy.managementParameters(principal, params);
             // Headquarters' explicitly authorized hotel portfolio is independent of
             // a hotel's direct manager link. Local teams instead honor configured leaders.
             params.addValue("workPortfolioRoles", principal.hasRole("GENERAL_MANAGER")
@@ -90,14 +92,13 @@ public class WorkVisibilityPolicy {
                         join position_function_profile p on p.tenant_id = a.tenant_id
                           and p.position_id = a.position_id and p.scope_type = 'GROUP'
                         join app_role r on r.tenant_id = p.tenant_id and r.id = p.default_role_id
-                        where a.tenant_id = :tenantId and r.role_type = 'SYSTEM'
-                          and r.code in (:workSubordinateRoles)
-                          and (:workTenantScope or a.org_unit_id in (:workReadScopes))
-                          and (r.code in (:workPortfolioRoles) or (
-                            a.manager_assignment_id is null and not exists (
+                        where a.tenant_id = :tenantId and (:workTenantScope or a.org_unit_id in (:workReadScopes))
+                          and ((:workHotelManagement and %s)
+                          or (not :workHotelManagement and r.role_type = 'SYSTEM' and r.code in (:workSubordinateRoles)
+                          and (r.code in (:workPortfolioRoles) or (a.manager_assignment_id is null and not exists (
                               select 1 from position_assignment_reporting_relation configured
                               where configured.tenant_id = a.tenant_id
-                                and configured.subordinate_assignment_id = a.id)))
+                                and configured.subordinate_assignment_id = a.id)))))
                     ), descendants(id) as (
                         select id from roots
                         union
@@ -105,7 +106,7 @@ public class WorkVisibilityPolicy {
                         join descendants leader on leader.id = edge.leader_id
                     )
                     select id from descendants
-                    """, params, UUID.class));
+                    """.formatted(WorkReviewPolicy.hotelManagementSql("a", "a.org_unit_id")), params, UUID.class));
             managed.removeAll(own);
         }
         params.addValue("workManagedIds", nonempty(managed));
@@ -130,8 +131,10 @@ public class WorkVisibilityPolicy {
     // Explicit review grants apply to these rows, never to the employee's other work.
     private static String usageMember(String hotel) {
         return """
-                exists (select 1 from store_usage_review_config usage_config
-                  join employee_position_assignment usage_reviewer on usage_reviewer.tenant_id=usage_config.tenant_id
+                exists (select 1 from org_unit review_hotel
+                  left join store_usage_review_config usage_config on usage_config.tenant_id=review_hotel.tenant_id
+                    and usage_config.hotel_org_unit_id=review_hotel.id
+                  join employee_position_assignment usage_reviewer on usage_reviewer.tenant_id=review_hotel.tenant_id
                     and usage_reviewer.id=:workUsageAssignmentId
                   join employee reviewer_employee on reviewer_employee.tenant_id=usage_reviewer.tenant_id
                     and reviewer_employee.id=usage_reviewer.employee_id and reviewer_employee.account_id=:workUsageActorId
@@ -140,16 +143,25 @@ public class WorkVisibilityPolicy {
                   join position_definition reviewer_position on reviewer_position.tenant_id=usage_reviewer.tenant_id
                     and reviewer_position.id=usage_reviewer.position_id and reviewer_position.status='ACTIVE'
                     and reviewer_position.deleted_at is null and reviewer_position.permanently_deleted_at is null
-                  join org_unit review_hotel on review_hotel.tenant_id=usage_config.tenant_id
-                    and review_hotel.id=usage_config.hotel_org_unit_id and review_hotel.unit_type='HOTEL' and review_hotel.status='ACTIVE'
+                  left join position_function_profile reviewer_profile on reviewer_profile.tenant_id=usage_reviewer.tenant_id
+                    and reviewer_profile.position_id=usage_reviewer.position_id and reviewer_profile.scope_type='GROUP'
+                  left join app_role reviewer_role on reviewer_role.tenant_id=reviewer_profile.tenant_id
+                    and reviewer_role.id=reviewer_profile.default_role_id and reviewer_role.role_type='SYSTEM'
                   join org_unit_closure reviewer_hotel on reviewer_hotel.tenant_id=usage_reviewer.tenant_id
                     and reviewer_hotel.descendant_id=usage_reviewer.org_unit_id and reviewer_hotel.ancestor_id=review_hotel.id
-                  where usage_config.tenant_id=:tenantId and usage_config.hotel_org_unit_id=%s
+                  where review_hotel.tenant_id=:tenantId and review_hotel.id=%s
+                    and review_hotel.unit_type='HOTEL' and review_hotel.status='ACTIVE'
                     and (:workTenantScope or review_hotel.id in (:workReadScopes))
                     and usage_reviewer.status='ACTIVE' and usage_reviewer.valid_from<=current_date
                     and (usage_reviewer.valid_to is null or usage_reviewer.valid_to>=current_date)
                     and reviewer_employee.employment_status='ACTIVE' and reviewer_employee.deleted_at is null
-                    and (exists (select 1 from store_usage_review_config_member member
+                    and ((reviewer_role.code in ('GENERAL_MANAGER','ASSISTANT_GENERAL_MANAGER')
+                        and review_hotel.id=(select nearest_hotel.id from org_unit_closure nearest
+                          join org_unit nearest_hotel on nearest_hotel.tenant_id=nearest.tenant_id
+                            and nearest_hotel.id=nearest.ancestor_id and nearest_hotel.unit_type='HOTEL'
+                          where nearest.tenant_id=usage_reviewer.tenant_id and nearest.descendant_id=usage_reviewer.org_unit_id
+                          order by nearest.depth limit 1))
+                      or exists (select 1 from store_usage_review_config_member member
                       where member.tenant_id=usage_config.tenant_id and member.hotel_org_unit_id=usage_config.hotel_org_unit_id
                         and member.reviewer_assignment_id=usage_reviewer.id)
                       or (usage_config.reviewer_assignment_id=usage_reviewer.id and not exists (
@@ -231,7 +243,17 @@ public class WorkVisibilityPolicy {
                 where usage_report.tenant_id=:tenantId and usage_report.id=:usageReportId
                   and (:workTenantScope or review_config.hotel_org_unit_id in (:workReadScopes))
                 for share of review_config
-                """, params, UUID.class).isEmpty()) return false;
+                """, params, UUID.class).isEmpty()) {
+            // A newly appointed hotel manager does not require a pre-existing manual config row.
+            if (jdbc.queryForList("""
+                    select hotel.id from org_unit hotel join daily_report usage_report
+                      on usage_report.tenant_id=hotel.tenant_id and usage_report.hotel_org_unit_id=hotel.id
+                    where usage_report.tenant_id=:tenantId and usage_report.id=:usageReportId
+                      and hotel.unit_type='HOTEL' and hotel.status='ACTIVE'
+                      and (:workTenantScope or hotel.id in (:workReadScopes))
+                    for share of hotel
+                    """, params, UUID.class).isEmpty()) return false;
+        }
         // Read members after acquiring the parent lock so a waited-for replacement is visible.
         return Boolean.TRUE.equals(jdbc.queryForObject("select exists(select 1 from daily_report usage_report"
                 + " where usage_report.tenant_id=:tenantId and usage_report.id=:usageReportId and "

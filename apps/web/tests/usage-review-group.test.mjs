@@ -29,6 +29,26 @@ test('review groups normalize server members while keeping legacy single-reviewe
   } finally { globalThis.fetch = previousFetch }
 })
 
+test('new hotels can use live management reviewers without a manually saved config or primary reviewer', async () => {
+  const previousFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ hotel_org_unit_id: 'new-hotel', enabled: true,
+      configured: false, row_version: -1, reviewer_available: true, configured_reviewer_assignment_ids: [],
+      reviewer_assignments: [{ assignment_id: 'new-manager', reviewer_name: '接任店长', reviewer_position_name: '店总',
+        available: true, automatic: true, explicit: false }], items: [] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } })
+    const config = await usage.loadUsageConfig(identity, 'new-hotel')
+    assert.equal(config.enabled, true)
+    assert.equal(config.reviewerAvailable, true)
+    assert.equal(config.configured, false)
+    assert.equal(config.rowVersion, -1)
+    assert.equal(config.reviewerAssignmentId, undefined)
+    assert.deepEqual(config.configuredReviewerAssignmentIds, [])
+    assert.equal(usage.configuredUsageReviewers(config)[0].assignmentId, 'new-manager')
+    assert.match(usage.usageReviewerSummary(config), /接任店长.*随任职自动生效/)
+  } finally { globalThis.fetch = previousFetch }
+})
+
 test('saving two reviewers sends explicit assignment ids and the exact optimistic version', async () => {
   const previousFetch = globalThis.fetch, requests = []
   try {

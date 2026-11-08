@@ -50,6 +50,7 @@ export function WorkUsagePanel({ identity, hotelId, canConfigure, canReverse, go
   }
   return <section className={styles.panel}><header><div><h2>日清耗用审核</h2><p>员工填报 → 门店指定人员复核 → 耗品和清洁用品扣库；与工作记录复核一次完成。</p></div><button type="button" className="secondary" disabled={busy} onClick={() => { setSelection(undefined); setConfirmation(undefined); void Promise.all([records.reload(), config.reload(), reviewers.reload()]) }}>刷新审核列表</button></header>
     <AsyncState loading={config.loading} error={config.error} onRetry={config.reload} />
+    <p>本店现任店长、店助按岗位权限自动取得耗用审核资格，离任后自动失效。下方可补充其他审核人；取消勾选不会撤销现任管理者的岗位权限。同一记录由任一有效审核人处理即可。</p>
     {config.data && <section className={styles.usageForm}><h3>本店耗用审核人</h3>{config.data.enabled ? <ul>{configuredReviewers.map(person => <li key={person.assignmentId}>{person.reviewerName} · {person.reviewerPositionName} · {person.available ? '有效' : '已失效或无权限'}</li>)}</ul> : <p>尚未启用：原有文字填报不自动扣库。配置审核人后，新提交的耗用工作必须按清单填写。</p>}{config.data.enabled && !config.data.reviewerAvailable && <p className={styles.error}>当前审核人均已失效，请重新选择有效人员。</p>}
       <p>配置的有效审核人任选一人处理，通过或退回后其他人无需重复审核。</p>
       {canConfigure && <><p>可勾选本店多个有权限的任职，岗位名称不会自动授予审核权。更换后，未审核记录按新配置流转，原分配及操作历史保留。</p>
